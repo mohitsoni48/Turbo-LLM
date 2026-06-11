@@ -1,0 +1,48 @@
+# llama-turbo repo .gitignore
+# Tracks: docs/ (product strategy), CLAUDE.md, RESOURCES.md, small control
+# scripts, and (going forward) the TurboLLM product code under turbollm/.
+# Does NOT track the heavy local-inference stack, secrets, or runtime state.
+# NOTE: .gitignore does not support inline comments — keep patterns on their own lines.
+
+# Heavy local-inference stack (multi-GB; not product source)
+/atomic/
+/cuda/
+/openwebui/
+/_archive/
+
+# Secrets & runtime state
+/.webui_secret_key
+/.run/
+/.omc/
+
+# Model weights & large binaries
+*.gguf
+*.safetensors
+*.bin
+*.exe
+*.dll
+*.lib
+*.pdb
+*.zip
+*.7z
+*.log
+
+# Go (TurboLLM daemon)
+/turbollm/**/bin/
+/turbollm/**/dist/
+*.test
+*.out
+
+# Node / React frontend
+node_modules/
+/turbollm/web/dist/
+/turbollm/web/build/
+.vite/
+*.local
+
+# Editor / OS cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
