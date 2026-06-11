@@ -1,0 +1,32 @@
+{
+  "name": "turbollm",
+  "version": "0.0.0",
+  "description": "TurboLLM daemon — local LLM platform (engine manager + OpenAI/Anthropic gateway + web UI)",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "turbollm": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "src/webdist"
+  ],
+  "scripts": {
+    "dev": "tsx watch src/cli.ts",
+    "start": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types",
+    "build:web": "cd web && npm ci && npm run build",
+    "build": "npm run typecheck && tsup src/cli.ts --format esm --clean --target node22"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.0",
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsup": "^8.3.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

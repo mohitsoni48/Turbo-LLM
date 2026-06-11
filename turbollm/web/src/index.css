@@ -1,0 +1,131 @@
+@import "tailwindcss";
+
+/* ── TurboLLM design system (spec 11 §1) ──────────────────────────────────────
+   Warm, calm, editorial. One accent. No gradients, no glow. Tokens are the only
+   source of color — components must never hardcode hex; use var(--token).        */
+
+:root {
+  /* light */
+  --bg: #faf9f7;
+  --panel: #ffffff;
+  --panel-2: #f4f2ee;
+  --ink: #1a1a18;
+  --muted: #6b6a66;
+  --faint: #9c9a94;
+  --border: #e7e4de;
+  --border-strong: #d6d2c8;
+  --accent: #c96442;
+  --accent-hover: #b85837;
+  --on-accent: #ffffff;
+  --ok: #3a9d6b;
+  --warn: #c9913f;
+  --err: #c4453c;
+  --info: #5a7d9a;
+  --radius: 12px;
+  --radius-lg: 16px;
+  --radius-sm: 8px;
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.05);
+  --shadow-2: 0 4px 16px rgb(0 0 0 / 0.07);
+  /* log panel is the same near-black in both themes (spec 11 §6); its foreground
+     tokens are defined here so components never inline hex. */
+  --log-bg: #0b0b0c;
+  --log-ink: #d6d3cd;
+  --log-faint: #7a7872;
+  --log-err-ink: #e0b3ad;
+}
+
+.dark {
+  /* dark — applied as a class on <html> per the theme store */
+  --bg: #0e0e10;
+  --panel: #17171a;
+  --panel-2: #1d1d21;
+  --ink: #ededec;
+  --muted: #9a9a96;
+  --faint: #6e6e6a;
+  --border: #2a2a2e;
+  --border-strong: #3a3a40;
+  --accent: #e08a5f;
+  --accent-hover: #e89a73;
+  --on-accent: #1a1a18;
+  --ok: #4cc38a;
+  --warn: #d8a45a;
+  --err: #e06c5f;
+  --info: #7da3c4;
+}
+
+/* Map design tokens to the Tailwind v4 theme so utilities like bg-panel,
+   text-muted, border-border, rounded-lg resolve to our CSS variables. */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-on-accent: var(--on-accent);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-err: var(--err);
+  --color-info: var(--info);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius);
+  --radius-lg: var(--radius-lg);
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Default border color for the Tailwind `border` utility (matches our token). */
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+}
+
+/* Visible focus ring — 2px accent at 40% (spec 11 §8). */
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  outline-offset: 1px;
+}
+
+/* starting-state pulse (spec 11 §3/§8) */
+@keyframes tllm-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+.tllm-pulse {
+  animation: tllm-pulse 1.2s ease-in-out infinite;
+}
+
+/* sonner toast tokens → our palette */
+[data-sonner-toaster] {
+  --normal-bg: var(--panel);
+  --normal-text: var(--ink);
+  --normal-border: var(--border);
+}

@@ -13,7 +13,7 @@
 # Secrets & runtime state
 /.webui_secret_key
 /.run/
-/.omc/
+.omc/
 
 # Model weights & large binaries
 *.gguf
@@ -27,16 +27,18 @@
 *.7z
 *.log
 
-# Go (TurboLLM daemon)
-/turbollm/**/bin/
-/turbollm/**/dist/
-*.test
-*.out
+# TurboLLM daemon (Node/TS) build outputs
+/turbollm/dist/
+/turbollm/src/webdist/
+/turbollm/bin/
+
+# Local dev/preview config (machine-specific engine/model paths) + runtime
+/turbollm/dev-config.json
+/turbollm/.preview-config.json
+/turbollm/daemon.pid
 
 # Node / React frontend
 node_modules/
-/turbollm/web/dist/
-/turbollm/web/build/
 .vite/
 *.local
 
