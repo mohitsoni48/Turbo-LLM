@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
@@ -10,7 +10,15 @@ import { toast } from '../../components/ui/sonner'
 // ── Thinking block ────────────────────────────────────────────────────────────
 
 function ThinkingBlock({ reasoning, thinkMs, streaming }: { reasoning: string; thinkMs?: number; streaming?: boolean }) {
-  const [open, setOpen] = useState(!!streaming)
+  // Always collapsed by default; expands into a fixed-height scroll window so long
+  // reasoning never balloons the chat.
+  const [open, setOpen] = useState(false)
+  const scrollRef = useRef<HTMLPreElement>(null)
+  useEffect(() => {
+    if (open && streaming && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    }
+  }, [reasoning, open, streaming])
   const label = thinkMs ? `Thought for ${(thinkMs / 1000).toFixed(1)}s` : streaming ? 'Thinking…' : 'Thinking'
   return (
     <div className="mb-3 rounded-lg border border-border bg-panel-2">
@@ -21,9 +29,13 @@ function ThinkingBlock({ reasoning, thinkMs, streaming }: { reasoning: string; t
       >
         <ChevronDown size={13} className={open ? 'rotate-180 transition-transform' : 'transition-transform'} />
         {label}
+        {streaming && !open && <span className="tllm-pulse ml-0.5">·</span>}
       </button>
       {open && (
-        <pre className="overflow-auto px-3 pb-3 font-mono text-[12px] leading-relaxed text-muted whitespace-pre-wrap">
+        <pre
+          ref={scrollRef}
+          className="max-h-48 overflow-auto px-3 pb-3 font-mono text-[12px] leading-relaxed text-muted whitespace-pre-wrap"
+        >
           {reasoning}
         </pre>
       )}
@@ -39,6 +51,10 @@ function StatsRow({ stats }: { stats: Partial<MessageStats> }) {
   if (stats.promptTps)    parts.push(`${stats.promptTps.toFixed(0)} tok/s prefill`)
   if (stats.ttftMs != null && stats.ttftMs > 0) parts.push(`${(stats.ttftMs / 1000).toFixed(2)}s TTFT`)
   if (stats.promptTokens != null && stats.genTokens != null) parts.push(`${stats.promptTokens}+${stats.genTokens} tokens`)
+  if (stats.cachedTokens != null && stats.cachedTokens > 0) {
+    const pct = stats.promptTokens ? Math.round((stats.cachedTokens / stats.promptTokens) * 100) : 0
+    parts.push(`${stats.cachedTokens} cached${pct ? ` (${pct}%)` : ''}`)
+  }
   if (stats.totalMs)      parts.push(`${(stats.totalMs / 1000).toFixed(1)}s total`)
 
   if (!parts.length) return null

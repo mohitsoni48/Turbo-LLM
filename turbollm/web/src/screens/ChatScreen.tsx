@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowDown, Cpu, SendHorizontal, Square } from 'lucide-react'
+import { ArrowDown, Cpu, SendHorizontal, SlidersHorizontal, Square } from 'lucide-react'
 import { sendMessage } from '../lib/chat-api'
 import { useConversation, useConversationMutations } from '../lib/chat-queries'
-import { useStatus } from '../lib/queries'
+import { useModelActions, useModels, useStatus } from '../lib/queries'
 import type { Message } from '../lib/chat-types'
 import { ApiError } from '../lib/api'
 import { Button } from '../components/ui/button'
@@ -11,6 +11,8 @@ import { toast } from '../components/ui/sonner'
 import { useQueryClient } from '@tanstack/react-query'
 import { MessageBubble, StreamingBubble } from './chat/MessageBubble'
 import { ConversationSidebar } from './chat/ConversationSidebar'
+import { ModelLoadMenu } from '../components/ModelLoadMenu'
+import { ModelDetailDialog } from './models/ModelDetailDialog'
 
 // Streaming state
 interface LiveState {
@@ -29,6 +31,7 @@ export function ChatScreen() {
   const [live, setLive] = useState<LiveState | null>(null)
   const [input, setInput] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [settingsKey, setSettingsKey] = useState<string | null>(null)
   const [showScrollBtn, setShowScrollBtn] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const scrollerRef = useRef<HTMLDivElement>(null)
@@ -37,10 +40,32 @@ export function ChatScreen() {
   const userScrolledUp = useRef(false)
   const qc = useQueryClient()
   const mut = useConversationMutations()
+  const modelsQ = useModels()
+  const modelActions = useModelActions()
 
   const convQ = useConversation(activeId)
   const conv = convQ.data
   const messages = conv?.messages ?? []
+
+  const allModels = modelsQ.data?.models ?? []
+  const modelBusy =
+    modelActions.load.isPending ||
+    modelActions.eject.isPending ||
+    engineState === 'starting' ||
+    engineState === 'stopping'
+
+  const handleLoadModel = (key: string) => {
+    modelActions.load.mutate(
+      { key },
+      { onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not load model.') },
+    )
+  }
+  const handleEject = () => {
+    if (live) { abortRef.current?.abort(); setLive(null) }
+    modelActions.eject.mutate(undefined, {
+      onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not eject model.'),
+    })
+  }
 
   // Auto-resize textarea
   const autoResize = () => {
@@ -190,7 +215,9 @@ export function ChatScreen() {
   // Context meter
   const lastStats = messages.findLast((m) => m.role === 'assistant')?.stats
   const ctxUsed  = lastStats?.ctxUsed ?? 0
-  const ctxMax   = lastStats?.ctxMax  ?? model?.ctx ?? 0
+  // Prefer the currently-loaded model's ctx (fresh after a reload) over the last
+  // message's reported max, which goes stale when settings change.
+  const ctxMax   = model?.ctx || lastStats?.ctxMax || 0
   const ctxPct   = ctxMax > 0 ? ctxUsed / ctxMax : 0
 
   const ready = engineState === 'running' && !!model
@@ -204,14 +231,45 @@ export function ChatScreen() {
 
       {/* Thread */}
       <div className="relative flex min-w-0 flex-1 flex-col">
+        {/* Chat header: model load/switch/eject (always available) */}
+        <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-4">
+          <ModelLoadMenu
+            models={allModels}
+            loadedKey={model?.key ?? null}
+            loadedName={model?.name ?? null}
+            pending={modelBusy}
+            onLoad={handleLoadModel}
+            onEject={handleEject}
+          />
+          {model && (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8"
+              onClick={() => setSettingsKey(model.key)}
+              title="Model settings — change on the fly"
+            >
+              <SlidersHorizontal size={15} />
+            </Button>
+          )}
+          {engineState === 'starting' && <span className="text-[12px] text-muted">Loading model…</span>}
+          {engineState === 'stopping' && <span className="text-[12px] text-muted">Ejecting…</span>}
+        </div>
+
         {/* No model loaded */}
         {!model && (
           <div className="flex flex-1 items-center justify-center p-6">
             <div className="w-full max-w-md rounded-[var(--radius-lg)] border border-border bg-panel p-6 text-center shadow-[var(--shadow-1)]">
               <Cpu size={24} className="mx-auto mb-3 text-muted" />
               <h2 className="text-[16px] font-semibold text-ink">No model loaded</h2>
-              <p className="mt-1 text-[13px] text-muted">Load a model from the Models screen to start chatting.</p>
-              <Button asChild className="mt-4"><Link to="/models">Go to Models</Link></Button>
+              <p className="mt-1 text-[13px] text-muted">
+                {allModels.length > 0
+                  ? 'Pick a model from the selector above to start chatting.'
+                  : 'Add a model folder on the Models screen to get started.'}
+              </p>
+              {allModels.length === 0 && (
+                <Button asChild className="mt-4"><Link to="/models">Go to Models</Link></Button>
+              )}
             </div>
           </div>
         )}
@@ -336,6 +394,8 @@ export function ChatScreen() {
           </>
         )}
       </div>
+
+      <ModelDetailDialog modelKey={settingsKey} onClose={() => setSettingsKey(null)} />
     </div>
   )
 }

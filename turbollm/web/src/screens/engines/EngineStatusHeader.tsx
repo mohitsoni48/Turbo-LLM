@@ -1,12 +1,14 @@
-import { Copy } from 'lucide-react'
+import { CircleSlash, Copy } from 'lucide-react'
 import type { Status } from '../../lib/types'
+import { useModelActions } from '../../lib/queries'
+import { ApiError } from '../../lib/api'
 import { Button } from '../../components/ui/button'
 import { StateChip } from '../../components/StateChip'
 import { toast } from '../../components/ui/sonner'
 
-/** Active engine status card: name + state chip + loading elapsed + error log.
- *  Start/Stop/Restart are intentionally absent — the engine is managed automatically
- *  when models are loaded from the Models screen. */
+/** Active engine status card: name + state chip + loading elapsed + error log,
+ *  plus a Stop control that unloads the model and shuts the engine process down.
+ *  (No manual Start — the engine starts automatically when a model is loaded.) */
 export function EngineStatusHeader({
   status,
   activeEngineName,
@@ -17,6 +19,13 @@ export function EngineStatusHeader({
   const state = status?.engine.state ?? 'stopped'
   const error = status?.engine.error
   const elapsedMs = status?.model?.loadElapsedMs
+  const actions = useModelActions()
+  const canStop = state === 'running' || state === 'starting'
+
+  const onStop = () =>
+    actions.eject.mutate(undefined, {
+      onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not stop the engine.'),
+    })
 
   const copyLog = async () => {
     const text = (error?.logTail ?? []).join('\n')
@@ -45,6 +54,19 @@ export function EngineStatusHeader({
         )}
         {state === 'running' && status?.model && (
           <span className="text-[13px] text-muted truncate">{status.model.name}</span>
+        )}
+        {canStop && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="ml-auto"
+            onClick={onStop}
+            disabled={actions.eject.isPending}
+            title="Stop the engine and unload the model"
+          >
+            <CircleSlash size={14} />
+            Stop & unload
+          </Button>
         )}
       </div>
 

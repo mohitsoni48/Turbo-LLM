@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import { Boxes, FolderPlus, RefreshCw, SlidersHorizontal, X, Zap } from 'lucide-react'
+import { Boxes, CircleSlash, FolderPlus, RefreshCw, SlidersHorizontal, X, Zap } from 'lucide-react'
 import { ApiError } from '../lib/api'
 import { useModelActions, useModelDirs, useModelMutations, useModels } from '../lib/queries'
 import type { ModelEntry } from '../lib/types'
@@ -78,8 +78,10 @@ export function ModelsScreen() {
               key={m.key}
               m={m}
               onLoad={() => actions.load.mutate({ key: m.key })}
+              onEject={() => actions.eject.mutate()}
               onTune={() => setOpenKey(m.key)}
               loading={actions.load.isPending}
+              ejecting={actions.eject.isPending}
             />
           ))}
         </div>
@@ -90,7 +92,21 @@ export function ModelsScreen() {
   )
 }
 
-function ModelRow({ m, onLoad, onTune, loading }: { m: ModelEntry; onLoad: () => void; onTune: () => void; loading: boolean }) {
+function ModelRow({
+  m,
+  onLoad,
+  onEject,
+  onTune,
+  loading,
+  ejecting,
+}: {
+  m: ModelEntry
+  onLoad: () => void
+  onEject: () => void
+  onTune: () => void
+  loading: boolean
+  ejecting: boolean
+}) {
   const loadable = !m.incomplete && !m.parseError
   return (
     <div className="flex items-center gap-3 rounded-lg border border-border bg-panel px-4 py-3">
@@ -118,6 +134,12 @@ function ModelRow({ m, onLoad, onTune, loading }: { m: ModelEntry; onLoad: () =>
           <Zap size={14} />
           {m.loaded ? 'Reload' : 'Load'}
         </Button>
+        {m.loaded && (
+          <Button size="sm" variant="outline" onClick={onEject} disabled={ejecting} title="Eject model (stop the engine)">
+            <CircleSlash size={14} />
+            Eject
+          </Button>
+        )}
         <Button size="sm" variant="ghost" onClick={onTune} disabled={!loadable} title="Load settings">
           <SlidersHorizontal size={14} />
         </Button>

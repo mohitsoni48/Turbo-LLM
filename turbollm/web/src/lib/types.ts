@@ -186,7 +186,8 @@ export type LoadProfile = {
   cacheReuse: number
   useJinja: boolean
   chatTemplateFile: string
-  speculative: 'off' | 'nextn' | 'draft'
+  speculative: 'off' | 'mtp' | 'nextn' | 'draft'
+  mtpHeadPath: string
   draftModelPath: string
   sampling: Sampling
   extraArgs: string[]

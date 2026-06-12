@@ -18,6 +18,7 @@ export interface MessageStats {
   promptTokens: number
   promptMs: number
   promptTps: number
+  cachedTokens: number
   genTokens: number
   genMs: number
   tps: number

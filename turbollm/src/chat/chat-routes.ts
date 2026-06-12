@@ -112,7 +112,11 @@ export function registerChatRoutes(app: Hono, d: Deps): void {
       let fullReasoning = ''
       let inThink = false
       let pendingThinkBuf = ''
-      let finalUsage: { prompt_tokens?: number; completion_tokens?: number } = {}
+      let finalUsage: {
+        prompt_tokens?: number
+        completion_tokens?: number
+        prompt_tokens_details?: { cached_tokens?: number }
+      } = {}
       let finalTimings: Record<string, number> = {}
       let aborted = false
 
@@ -287,19 +291,26 @@ export function registerChatRoutes(app: Hono, d: Deps): void {
         model: ms.model?.name ?? '',
         aborted,
       }
+      // cached prompt tokens: prefer the engine's explicit count, else infer it
+      // as (full prompt − tokens it actually had to process).
+      const fullPrompt = finalUsage.prompt_tokens ?? 0
+      const cachedExplicit = finalUsage.prompt_tokens_details?.cached_tokens
       if (finalTimings.prompt_n) {
-        stats.promptTokens = finalTimings.prompt_n
+        const processed = finalTimings.prompt_n
+        stats.promptTokens = fullPrompt || processed
         stats.promptMs     = finalTimings.prompt_ms
         stats.promptTps    = finalTimings.prompt_per_second
         stats.genTokens    = finalTimings.predicted_n
         stats.genMs        = finalTimings.predicted_ms
         stats.tps          = finalTimings.predicted_per_second
+        stats.cachedTokens = cachedExplicit ?? Math.max(0, (fullPrompt || processed) - processed)
       } else {
         // Fallback: wall clock
-        stats.promptTokens = finalUsage.prompt_tokens ?? 0
+        stats.promptTokens = fullPrompt
         stats.genTokens    = finalUsage.completion_tokens ?? 0
         stats.genMs        = totalMs - ttftMs
         stats.tps          = stats.genMs > 0 ? Math.round((stats.genTokens / stats.genMs) * 1000 * 10) / 10 : 0
+        stats.cachedTokens = cachedExplicit ?? 0
       }
 
       // Persist final assistant message
@@ -374,18 +385,39 @@ async function autoTitle(
     const titleMessages = [
       ...prevMessages.slice(-2),
       { role: 'assistant', content: assistantReply.slice(0, 500) },
-      { role: 'user', content: 'Generate a 3-6 word title for this conversation. Reply with only the title, no quotes, no period at the end.' },
+      {
+        role: 'user',
+        // /no_think disables thinking on Qwen-style templates; chat_template_kwargs
+        // below covers the rest; any leaked <think> is stripped from the output.
+        content: 'Generate a concise 3-6 word title for this conversation. Reply with ONLY the title — no quotes, no punctuation, no preamble. /no_think',
+      },
     ]
     const res = await fetch(`${target}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: ms.model?.key, messages: titleMessages, stream: false, temperature: 0.3, max_tokens: 20 }),
-      signal: AbortSignal.timeout(15_000),
+      body: JSON.stringify({
+        model: ms.model?.key,
+        messages: titleMessages,
+        stream: false,
+        temperature: 0.3,
+        max_tokens: 32,
+        reasoning_budget: 0,
+        chat_template_kwargs: { enable_thinking: false },
+      }),
+      signal: AbortSignal.timeout(20_000),
     })
     if (!res.ok) return
-    const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> }
-    const raw = data.choices?.[0]?.message?.content?.trim() ?? ''
-    const title = raw.replace(/^["']|["']$/g, '').replace(/\.$/, '').trim().slice(0, 60)
+    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> }
+    let raw = data.choices?.[0]?.message?.content ?? ''
+    raw = raw.replace(/<think>[\s\S]*?<\/think>/gi, '').trim() // strip any leaked reasoning
+    let title = raw.replace(/^["'“”]+|["'“”]+$/g, '').replace(/[.!?]+$/, '').trim().slice(0, 60)
+    // Fallback: a snippet of the first user message if the model gave nothing usable.
+    if (!title) {
+      const firstUser = prevMessages.find((m) => m.role === 'user')?.content
+      if (typeof firstUser === 'string') {
+        title = firstUser.replace(/\s+/g, ' ').trim().split(' ').slice(0, 6).join(' ').slice(0, 60)
+      }
+    }
     if (title && d.db.getConversation(convId)?.title === 'New chat') {
       d.db.updateConversation(convId, { title })
     }

@@ -31,7 +31,8 @@ export interface LoadProfile {
   cacheReuse: number
   useJinja: boolean
   chatTemplateFile: string
-  speculative: 'off' | 'nextn' | 'draft'
+  speculative: 'off' | 'mtp' | 'nextn' | 'draft'
+  mtpHeadPath: string
   draftModelPath: string
   sampling: Sampling
   extraArgs: string[]
@@ -101,7 +102,9 @@ export function deriveDefault(m: ModelEntry, sys: SysInfo): LoadProfile {
     kvTypeK: 'f16',
     kvTypeV: 'f16',
     flashAttn: 'auto',
-    threads: 0,
+    // Default CPU threads = half the logical cores (leaves headroom for the OS
+    // and other work); user-overridable in the load settings.
+    threads: Math.max(1, Math.floor(sys.cores / 2)),
     threadsBatch: 0,
     useMmproj: m.vision,
     mmprojGpu: true,
@@ -110,6 +113,7 @@ export function deriveDefault(m: ModelEntry, sys: SysInfo): LoadProfile {
     useJinja: m.hasChatTemplate,
     chatTemplateFile: '',
     speculative: 'off',
+    mtpHeadPath: '',
     draftModelPath: '',
     sampling: defaultSampling(),
     extraArgs: [],
@@ -168,11 +172,20 @@ export function profileToArgs(p: LoadProfile, m: ModelEntry, caps: Capabilities)
   if (p.cacheReuse > 0 && has('--cache-reuse')) a.push('--cache-reuse', String(p.cacheReuse))
   if (p.useJinja && has('--jinja')) a.push('--jinja')
   if (p.chatTemplateFile && has('--chat-template-file')) a.push('--chat-template-file', p.chatTemplateFile)
-  if (p.speculative === 'draft' && p.draftModelPath && has('--model-draft')) {
+  // Speculative decoding (spec 05 §8). TurboQuant forks expose `--spec-type`:
+  //   mtp   → Gemma-4 MTP: a separate gemma4_assistant GGUF via --mtp-head
+  //   nextn → Qwen3 NextN: point --model-draft at the SAME main-model GGUF
+  //   draft → mainline: a separate small draft GGUF
+  const specType = has('--spec-type')
+  if (p.speculative === 'mtp' && p.mtpHeadPath && has('--mtp-head')) {
+    if (specType) a.push('--spec-type', 'mtp')
+    a.push('--mtp-head', p.mtpHeadPath)
+  } else if (p.speculative === 'nextn' && specType && has('--model-draft')) {
+    a.push('--spec-type', 'nextn', '--model-draft', m.path)
+  } else if (p.speculative === 'draft' && p.draftModelPath && has('--model-draft')) {
+    if (specType) a.push('--spec-type', 'draft')
     a.push('--model-draft', p.draftModelPath, '--draft-max', '16', '--draft-min', '1')
   }
-  // SPEC-GAP: NextN/MTP enable flag for the TurboQuant fork unverified; 'nextn'
-  // is a no-op until confirmed against --help. (speculative === 'nextn')
   a.push(...p.extraArgs)
   return a
 }

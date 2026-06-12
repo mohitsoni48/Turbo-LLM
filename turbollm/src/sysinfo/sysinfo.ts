@@ -14,6 +14,7 @@ export interface GpuInfo {
 export interface SysInfo {
   os: string
   cpu: string
+  cores: number
   ramMB: number
   gpus: GpuInfo[]
 }
@@ -25,6 +26,7 @@ export function getSysInfo(): SysInfo {
   cached = {
     os: `${process.platform}/${process.arch}`,
     cpu: os.cpus()[0]?.model?.trim() ?? '',
+    cores: os.cpus().length || 1,
     ramMB: Math.round(os.totalmem() / 1e6),
     gpus: detectGpus(),
   }

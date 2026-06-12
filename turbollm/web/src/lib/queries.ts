@@ -181,6 +181,13 @@ export function useModelActions() {
     }),
     load: useMutation({
       mutationFn: (v: { key: string; overrides?: Partial<LoadProfile> }) => loadModel(v.key, v.overrides),
+      onSuccess: (_d, v) => {
+        invalidate()
+        void qc.invalidateQueries({ queryKey: ['model', v.key] })
+      },
+    }),
+    eject: useMutation({
+      mutationFn: () => stopEngine(),
       onSuccess: invalidate,
     }),
   }
