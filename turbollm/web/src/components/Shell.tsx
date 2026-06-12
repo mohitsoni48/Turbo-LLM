@@ -1,30 +1,20 @@
 import { type ReactNode } from 'react'
-import { NavLink, useLocation } from 'react-router-dom'
+import { NavLink } from 'react-router-dom'
 import {
   Boxes,
-  ChevronDown,
   Cpu,
   MessageSquare,
-  Play,
   Settings2,
-  Square,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
-import { useEngineMutations } from '../lib/queries'
 import type { Status } from '../lib/types'
 import { StateChip } from './StateChip'
+import { EngineProvisionBanner } from './EngineProvisionBanner'
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from './ui/tooltip'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from './ui/dropdown-menu'
 import { Badge } from './ui/badge'
 
 const NAV = [
@@ -50,6 +40,7 @@ export function Shell({
       <NavRail online={online} version={version} />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar status={status} />
+        <EngineProvisionBanner status={status} />
         <main className="min-h-0 flex-1 overflow-auto">{children}</main>
       </div>
     </div>
@@ -111,14 +102,8 @@ function NavRail({ online, version }: { online: boolean; version: string }) {
 }
 
 function TopBar({ status }: { status: Status | undefined }) {
-  const location = useLocation()
   const engineState = status?.engine.state ?? 'stopped'
   const model = status?.model
-  const { start, stop } = useEngineMutations()
-
-  // Top bar hidden on chat detail? No — present on all screens (spec 08 §1).
-  // Keep route key just to avoid unused import lint.
-  void location
 
   return (
     <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-bg px-4">
@@ -134,34 +119,10 @@ function TopBar({ status }: { status: Status | undefined }) {
         )}
       </div>
 
+      {/* Engine is auto-managed (starts on model load, stops before switching);
+          status is display-only — no manual Start/Stop controls. */}
       <div className="ml-auto flex items-center gap-2">
         <StateChip state={engineState} />
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            aria-label="Engine quick actions"
-            className="grid h-8 w-8 place-items-center rounded-md text-muted hover:bg-panel-2 hover:text-ink"
-          >
-            <ChevronDown size={16} />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem
-              onSelect={() => start.mutate()}
-              disabled={engineState === 'running' || engineState === 'starting'}
-            >
-              <Play size={14} /> Start
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              onSelect={() => stop.mutate()}
-              disabled={engineState === 'stopped' || engineState === 'stopping'}
-            >
-              <Square size={14} /> Stop
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem asChild>
-              <NavLink to="/engines">Manage engines</NavLink>
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
       </div>
     </header>
   )

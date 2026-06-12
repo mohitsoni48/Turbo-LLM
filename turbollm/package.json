@@ -17,7 +17,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-strip-types",
     "build:web": "cd web && npm ci && npm run build",
-    "build": "npm run typecheck && tsup src/cli.ts --format esm --clean --target node22"
+    "build": "npm run typecheck && tsup && node -e \"const fs=require('fs'),p='dist/cli.js',c=fs.readFileSync(p,'utf8');fs.writeFileSync(p,c.replaceAll('from \\\"sqlite\\\"','from \\\"node:sqlite\\\"'))\" && node -e \"require('fs').cpSync('src/webdist','dist/webdist',{recursive:true,force:true})\""
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",

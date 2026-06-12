@@ -4,6 +4,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, normalize } from 'node:path'
 import { registerApi } from './api/routes'
+import { registerChatRoutes } from './chat/chat-routes'
 import type { Deps } from './deps'
 import { registerGateway } from './gateway/gateway'
 
@@ -30,6 +31,7 @@ export function createApp(d: Deps): Hono {
   app.get('/healthz', (c) => c.json({ status: 'ok', version: d.version }))
 
   registerApi(app, d)
+  registerChatRoutes(app, d)
   registerGateway(app, d.manager)
 
   // Embedded SPA with client-side-routing fallback (spec 08 §1).

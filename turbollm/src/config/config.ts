@@ -99,7 +99,7 @@ export function defaultConfig(): Config {
     version: SCHEMA_VERSION,
     daemon: {
       host: '127.0.0.1',
-      port: 8080,
+      port: 6996,
       lanBind: false,
       authToken: '',
       idleTtlMinutes: 60,

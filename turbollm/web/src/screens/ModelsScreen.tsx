@@ -1,13 +1,14 @@
 import { useState, type ReactNode } from 'react'
-import { Boxes, FolderPlus, RefreshCw, X } from 'lucide-react'
+import { Boxes, FolderPlus, RefreshCw, SlidersHorizontal, X, Zap } from 'lucide-react'
 import { ApiError } from '../lib/api'
-import { useModelDirs, useModelMutations, useModels } from '../lib/queries'
+import { useModelActions, useModelDirs, useModelMutations, useModels } from '../lib/queries'
 import type { ModelEntry } from '../lib/types'
 import { EmptyState, InlineError, ScreenHeader } from '../components/common'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Skeleton } from '../components/ui/skeleton'
+import { ModelDetailDialog } from './models/ModelDetailDialog'
 
 type Filter = 'all' | 'vision' | 'moe'
 
@@ -15,7 +16,9 @@ export function ModelsScreen() {
   const modelsQ = useModels()
   const dirsQ = useModelDirs()
   const mut = useModelMutations()
+  const actions = useModelActions()
   const [filter, setFilter] = useState<Filter>('all')
+  const [openKey, setOpenKey] = useState<string | null>(null)
 
   const scanning = modelsQ.data?.scanning ?? false
   const models = modelsQ.data?.models ?? []
@@ -71,15 +74,24 @@ export function ModelsScreen() {
       ) : (
         <div className="flex flex-col gap-2">
           {filtered.map((m) => (
-            <ModelRow key={m.key} m={m} />
+            <ModelRow
+              key={m.key}
+              m={m}
+              onLoad={() => actions.load.mutate({ key: m.key })}
+              onTune={() => setOpenKey(m.key)}
+              loading={actions.load.isPending}
+            />
           ))}
         </div>
       )}
+
+      <ModelDetailDialog modelKey={openKey} onClose={() => setOpenKey(null)} />
     </div>
   )
 }
 
-function ModelRow({ m }: { m: ModelEntry }) {
+function ModelRow({ m, onLoad, onTune, loading }: { m: ModelEntry; onLoad: () => void; onTune: () => void; loading: boolean }) {
+  const loadable = !m.incomplete && !m.parseError
   return (
     <div className="flex items-center gap-3 rounded-lg border border-border bg-panel px-4 py-3">
       <div className="min-w-0 flex-1">
@@ -88,6 +100,7 @@ function ModelRow({ m }: { m: ModelEntry }) {
           {m.loaded && <Tag tone="ok">loaded</Tag>}
           {m.vision && <Tag>vision</Tag>}
           {m.moe && <Tag>MoE</Tag>}
+          {m.hasProfile && <Tag>tuned</Tag>}
           {m.incomplete && <Tag tone="warn">missing parts</Tag>}
           {m.parseError && <Tag tone="err">unreadable</Tag>}
         </div>
@@ -100,6 +113,15 @@ function ModelRow({ m }: { m: ModelEntry }) {
       <Stat>{fmtSize(m.sizeBytes)}</Stat>
       <Stat>{m.nativeCtx ? `${fmtCtx(m.nativeCtx)} ctx` : '—'}</Stat>
       <Stat>{m.benchTps ? `${m.benchTps} t/s` : '—'}</Stat>
+      <div className="flex items-center gap-1">
+        <Button size="sm" onClick={onLoad} disabled={!loadable || loading} title={loadable ? '' : 'Model is incomplete or unreadable'}>
+          <Zap size={14} />
+          {m.loaded ? 'Reload' : 'Load'}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={onTune} disabled={!loadable} title="Load settings">
+          <SlidersHorizontal size={14} />
+        </Button>
+      </div>
     </div>
   )
 }

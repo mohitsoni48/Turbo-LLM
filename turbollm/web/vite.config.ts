@@ -8,9 +8,9 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     proxy: {
-      '/api': 'http://127.0.0.1:8080',
-      '/healthz': 'http://127.0.0.1:8080',
-      '/v1': 'http://127.0.0.1:8080',
+      '/api': 'http://127.0.0.1:6996',
+      '/healthz': 'http://127.0.0.1:6996',
+      '/v1': 'http://127.0.0.1:6996',
     },
   },
   build: {

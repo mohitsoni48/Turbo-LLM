@@ -10,12 +10,14 @@ export interface ModelEntry {
   name: string
   path: string
   dir: string
+  format: 'gguf' | 'mlx'
   sizeBytes: number
   sizeLabel: string
   arch: string
   quant: string
   nativeCtx: number
   blockCount: number
+  headCountKv: number
   moe: boolean
   expertCount: number
   vision: boolean
@@ -63,12 +65,14 @@ export class Scanner {
     this.scanning = true
     try {
       const dirs = this.store.snapshot().modelDirs
-      const files: FileInfo[] = []
+      const scan: ScanResult = { ggufs: [], mlxDirs: [] }
       for (const d of dirs) {
-        if (existsSync(d)) walk(d, files)
+        if (existsSync(d)) walk(d, scan)
         await tick()
       }
-      this.entries = await this.build(files)
+      const gguf = await this.build(scan.ggufs)
+      const mlx = scan.mlxDirs.map((dir) => mlxEntryFor(dir))
+      this.entries = [...gguf, ...mlx].sort((a, b) => a.name.localeCompare(b.name))
       this.lastScanAt = new Date().toISOString()
       this.saveCache()
     } finally {
@@ -155,12 +159,14 @@ export class Scanner {
       name,
       path,
       dir,
+      format: 'gguf',
       sizeBytes,
       sizeLabel: meta?.sizeLabel ?? '',
       arch: meta?.arch ?? 'unknown',
       quant,
       nativeCtx: meta?.nativeCtx ?? 0,
       blockCount: meta?.blockCount ?? 0,
+      headCountKv: meta?.headCountKv ?? 0,
       moe: (meta?.expertCount ?? 0) > 0,
       expertCount: meta?.expertCount ?? 0,
       vision,
@@ -201,12 +207,36 @@ interface FileInfo {
   mtime: number
 }
 
-function walk(dir: string, out: FileInfo[]): void {
+interface ScanResult {
+  ggufs: FileInfo[]
+  mlxDirs: string[]
+}
+
+/** A directory holds an MLX/HF model when it has config.json + safetensors weights
+ *  + a tokenizer. mlx-lm loads such a directory directly (spec 03 §2b, 04). */
+function isMlxModelDir(names: string[]): boolean {
+  const lower = names.map((n) => n.toLowerCase())
+  const hasConfig = lower.includes('config.json')
+  const hasWeights = lower.some((n) => n.endsWith('.safetensors'))
+  const hasTokenizer =
+    lower.includes('tokenizer.json') ||
+    lower.includes('tokenizer.model') ||
+    lower.includes('tokenizer_config.json')
+  return hasConfig && hasWeights && hasTokenizer
+}
+
+function walk(dir: string, out: ScanResult): void {
   let names: string[]
   try {
     names = readdirSync(dir)
   } catch {
     return // permission / gone
+  }
+  // An MLX model is a whole directory — record it and don't descend (the shards
+  // and tokenizer live inside).
+  if (isMlxModelDir(names)) {
+    out.mlxDirs.push(dir)
+    return
   }
   for (const name of names) {
     if (name === '.git' || name === 'node_modules') continue
@@ -220,8 +250,82 @@ function walk(dir: string, out: FileInfo[]): void {
     if (st.isSymbolicLink()) continue // avoid cycles
     if (st.isDirectory()) walk(full, out)
     else if (st.isFile() && name.toLowerCase().endsWith('.gguf') && st.size >= 1 << 20) {
-      out.push({ path: full, size: st.size, mtime: st.mtimeMs })
+      out.ggufs.push({ path: full, size: st.size, mtime: st.mtimeMs })
     }
+  }
+}
+
+interface MlxConfig {
+  model_type?: string
+  architectures?: string[]
+  max_position_embeddings?: number
+  num_hidden_layers?: number
+  num_key_value_heads?: number
+  num_local_experts?: number
+  num_experts?: number
+  quantization?: { bits?: number; group_size?: number }
+}
+
+/** Build a ModelEntry for an MLX model directory by reading its config.json. */
+function mlxEntryFor(dir: string): ModelEntry {
+  let cfg: MlxConfig = {}
+  let parseError: string | null = null
+  try {
+    // Strip a leading UTF-8 BOM if present — JSON.parse rejects it.
+    const raw = readFileSync(join(dir, 'config.json'), 'utf8').replace(/^﻿/, '')
+    cfg = JSON.parse(raw) as MlxConfig
+  } catch (e) {
+    parseError = `Could not read config.json: ${(e as Error).message}`
+  }
+
+  let sizeBytes = 0
+  let mtimeMs = 0
+  let hasChatTemplate = false
+  try {
+    for (const n of readdirSync(dir)) {
+      const lower = n.toLowerCase()
+      if (lower.endsWith('.safetensors')) {
+        const st = lstatSync(join(dir, n))
+        sizeBytes += st.size
+        mtimeMs = Math.max(mtimeMs, st.mtimeMs)
+      }
+    }
+    const tc = join(dir, 'tokenizer_config.json')
+    if (existsSync(tc)) hasChatTemplate = readFileSync(tc, 'utf8').includes('chat_template')
+  } catch {
+    /* best effort */
+  }
+
+  const expertCount = cfg.num_local_experts ?? cfg.num_experts ?? 0
+  const bits = cfg.quantization?.bits
+  const quant = bits ? `${bits}bit` : 'fp16'
+  const arch = cfg.model_type || cfg.architectures?.[0] || 'unknown'
+  const name = basename(dir).replace(/[-_]/g, ' ').replace(/\s+/g, ' ').trim()
+
+  return {
+    key: `${name.toLowerCase()}|mlx-${quant}|${sizeBytes}`,
+    name,
+    path: dir,
+    dir,
+    format: 'mlx',
+    sizeBytes,
+    sizeLabel: '',
+    arch,
+    quant,
+    nativeCtx: cfg.max_position_embeddings ?? 0,
+    blockCount: cfg.num_hidden_layers ?? 0,
+    headCountKv: cfg.num_key_value_heads ?? 0,
+    moe: expertCount > 0,
+    expertCount,
+    vision: false,
+    mmprojPath: null,
+    hasChatTemplate,
+    incomplete: false,
+    parseError,
+    loaded: false,
+    hasProfile: false,
+    benchTps: null,
+    mtime: new Date(mtimeMs || Date.now()).toISOString(),
   }
 }
 

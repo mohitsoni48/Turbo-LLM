@@ -6,8 +6,11 @@ import type {
   ChatCompletionResponse,
   ChatMessage,
   Engine,
+  EngineBackends,
   EngineLogs,
   EnginesList,
+  LoadProfile,
+  ModelDetail,
   ModelDirs,
   ModelsList,
   Status,
@@ -87,6 +90,18 @@ export function addEngine(input: { name: string; binPath: string }): Promise<Eng
   return request<Engine>('/api/v1/engines', { method: 'POST', json: input })
 }
 
+export function getEngineBackends(): Promise<EngineBackends> {
+  return request<EngineBackends>('/api/v1/engines/backends')
+}
+
+export function installBackend(backend: string): Promise<{ accepted: true; backend: string }> {
+  return request('/api/v1/engines/backends/install', { method: 'POST', json: { backend } })
+}
+
+export function installMlx(): Promise<{ accepted: true; engine: 'mlx' }> {
+  return request('/api/v1/engines/mlx', { method: 'POST', json: {} })
+}
+
 export function renameEngine(id: string, name: string): Promise<Engine> {
   return request<Engine>(`/api/v1/engines/${encodeURIComponent(id)}`, {
     method: 'PUT',
@@ -153,6 +168,33 @@ export function addModelDir(dir: string): Promise<ModelDirs> {
 
 export function removeModelDir(dir: string): Promise<ModelDirs> {
   return request<ModelDirs>('/api/v1/modeldirs', { method: 'DELETE', json: { dir } })
+}
+
+// ── Load profiles + load flow (A4, spec 05) ──────────────────────────────────
+export function getModelDetail(key: string): Promise<ModelDetail> {
+  return request<ModelDetail>(`/api/v1/models/${encodeURIComponent(key)}`)
+}
+
+export function saveModelProfile(key: string, profile: LoadProfile): Promise<LoadProfile> {
+  return request<LoadProfile>(`/api/v1/models/${encodeURIComponent(key)}/profile`, {
+    method: 'PUT',
+    json: profile,
+  })
+}
+
+export function resetModelProfile(key: string): Promise<{ ok: true }> {
+  return request<{ ok: true }>(`/api/v1/models/${encodeURIComponent(key)}/profile/reset`, {
+    method: 'POST',
+    json: {},
+  })
+}
+
+/** Load a model by key, optionally with one-off profile overrides (spec 05 §7). */
+export function loadModel(modelKey: string, profileOverrides?: Partial<LoadProfile>): Promise<{ ok: true }> {
+  return request<{ ok: true }>('/api/v1/engine/start', {
+    method: 'POST',
+    json: { modelKey, profileOverrides },
+  })
 }
 
 // ── Chat (non-streaming gateway passthrough) ─────────────────────────────────

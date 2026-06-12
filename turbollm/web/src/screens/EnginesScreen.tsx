@@ -5,6 +5,7 @@ import { useUiStore } from '../stores/ui'
 import { ScreenHeader, InlineError, EmptyState } from '../components/common'
 import { Skeleton } from '../components/ui/skeleton'
 import { AddEngineDialog } from './engines/AddEngineDialog'
+import { BackendPicker } from './engines/BackendPicker'
 import { EngineRow } from './engines/EngineRow'
 import { EngineStatusHeader } from './engines/EngineStatusHeader'
 import { EngineLogPanel } from './engines/EngineLogPanel'
@@ -34,6 +35,9 @@ export function EnginesScreen() {
         {activeEngine && (
           <EngineStatusHeader status={status} activeEngineName={activeEngine.name} />
         )}
+
+        {/* Hardware-aware backend selector (ADR-025) */}
+        <BackendPicker />
 
         {/* Log panel */}
         {activeEngine && (

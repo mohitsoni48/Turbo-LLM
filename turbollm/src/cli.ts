@@ -1,8 +1,12 @@
 import { serve } from '@hono/node-server'
+import { join } from 'node:path'
 import { ConfigStore, defaultConfigPath } from './config/config'
 import { Manager, type StartOpts } from './engines/manager'
 import { Registry } from './engines/registry'
+import { ProvisionState } from './engines/provision-state'
+import { seedDefaultEngines } from './engines/seed'
 import { Scanner } from './models/scanner'
+import { ConversationStore } from './chat/db'
 import { createApp } from './server'
 
 // Entrypoint for the TurboLLM daemon (npm bin "turbollm"): wiring + graceful
@@ -20,21 +24,26 @@ if (store.brokenBackup()) {
 }
 
 const registry = new Registry(store)
-void registry.ensureProbed()
+const provision = new ProvisionState()
+const enginesDir = join(store.dir(), 'engines')
+void seedDefaultEngines(registry, enginesDir, provision).then(() => registry.ensureProbed())
 const manager = new Manager(store)
 const scanner = new Scanner(store)
 void scanner.rescan() // discover models in the background
+const db = new ConversationStore(store.dir())
 const startedAt = Date.now()
-const app = createApp({ store, registry, manager, scanner, version, startedAt })
+const app = createApp({ store, registry, manager, scanner, db, provision, version, startedAt })
 
 const cfg = store.snapshot()
-const addr = argValue('--addr', `${cfg.daemon.host}:${cfg.daemon.port}`)
+const defaultHost = cfg.daemon.lanBind ? '0.0.0.0' : (cfg.daemon.host || '127.0.0.1')
+const addr = argValue('--addr', `${defaultHost}:${cfg.daemon.port}`)
 const lastColon = addr.lastIndexOf(':')
 const host = addr.slice(0, lastColon) || '127.0.0.1'
-const port = Number(addr.slice(lastColon + 1)) || 8080
+const port = Number(addr.slice(lastColon + 1)) || 6996
 
 const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
-  console.log(`TurboLLM ${version} listening on http://${host}:${info.port}`)
+  const displayHost = host === '0.0.0.0' ? '0.0.0.0 (LAN)' : host
+  console.log(`TurboLLM ${version} listening on http://${displayHost}:${info.port}`)
 })
 
 // Optionally restore the last engine/model on start (spec 05 §7).
@@ -57,7 +66,7 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     if (shuttingDown) return
     shuttingDown = true
     console.log('shutting down')
-    void manager.shutdown().finally(() => server.close(() => process.exit(0)))
+    void manager.shutdown().finally(() => { db.close(); server.close(() => process.exit(0)) })
     setTimeout(() => process.exit(0), 12_000).unref()
   })
 }

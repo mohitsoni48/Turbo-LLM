@@ -42,13 +42,13 @@ cd web && npm install && cd ..
 # build the web UI (-> src/webdist) then run the daemon in dev (hot TS via tsx)
 npm run build:web
 npm run start             # or: npm run dev   (watch mode)
-#   open http://127.0.0.1:8080   ·   curl http://127.0.0.1:8080/api/v1/status
+#   open http://127.0.0.1:6996   ·   curl http://127.0.0.1:6996/api/v1/status
 
 # production bundle (single dist/cli.js with deps bundled)
 npm run build             # tsc --noEmit + tsup
-node dist/cli.js --addr 127.0.0.1:8080
+node dist/cli.js --addr 127.0.0.1:6996
 ```
-Frontend hot-reload: `cd web && npm run dev` (proxies /api, /v1 to the daemon on :8080).
+Frontend hot-reload: `cd web && npm run dev` (proxies /api, /v1 to the daemon on :6996).
 
 ## Toolchain
 Node 25 / npm 11. (Go 1.26.4 is still installed but no longer used — ADR-023.)

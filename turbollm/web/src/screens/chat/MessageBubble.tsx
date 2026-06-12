@@ -1,0 +1,250 @@
+import { useState, type ReactNode } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import rehypeHighlight from 'rehype-highlight'
+import { ChevronDown, ClipboardCopy, Pencil, RefreshCw, Trash2 } from 'lucide-react'
+import type { Message, MessageStats } from '../../lib/chat-types'
+import { Button } from '../../components/ui/button'
+import { toast } from '../../components/ui/sonner'
+
+// ── Thinking block ────────────────────────────────────────────────────────────
+
+function ThinkingBlock({ reasoning, thinkMs, streaming }: { reasoning: string; thinkMs?: number; streaming?: boolean }) {
+  const [open, setOpen] = useState(!!streaming)
+  const label = thinkMs ? `Thought for ${(thinkMs / 1000).toFixed(1)}s` : streaming ? 'Thinking…' : 'Thinking'
+  return (
+    <div className="mb-3 rounded-lg border border-border bg-panel-2">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-1.5 px-3 py-2 text-[12px] font-medium text-muted hover:text-ink"
+      >
+        <ChevronDown size={13} className={open ? 'rotate-180 transition-transform' : 'transition-transform'} />
+        {label}
+      </button>
+      {open && (
+        <pre className="overflow-auto px-3 pb-3 font-mono text-[12px] leading-relaxed text-muted whitespace-pre-wrap">
+          {reasoning}
+        </pre>
+      )}
+    </div>
+  )
+}
+
+// ── Stats row ─────────────────────────────────────────────────────────────────
+
+function StatsRow({ stats }: { stats: Partial<MessageStats> }) {
+  const parts: string[] = []
+  if (stats.tps)          parts.push(`${stats.tps.toFixed(1)} tok/s`)
+  if (stats.promptTps)    parts.push(`${stats.promptTps.toFixed(0)} tok/s prefill`)
+  if (stats.ttftMs != null && stats.ttftMs > 0) parts.push(`${(stats.ttftMs / 1000).toFixed(2)}s TTFT`)
+  if (stats.promptTokens != null && stats.genTokens != null) parts.push(`${stats.promptTokens}+${stats.genTokens} tokens`)
+  if (stats.totalMs)      parts.push(`${(stats.totalMs / 1000).toFixed(1)}s total`)
+
+  if (!parts.length) return null
+
+  const tooltip = [
+    stats.model       ? `Model: ${stats.model}` : '',
+    stats.promptMs    ? `Prefill: ${stats.promptMs.toFixed(0)}ms` : '',
+    stats.genMs       ? `Gen: ${stats.genMs.toFixed(0)}ms` : '',
+    stats.ctxUsed != null ? `Context: ${stats.ctxUsed} / ${stats.ctxMax}` : '',
+    stats.aborted     ? 'Aborted' : '',
+  ].filter(Boolean).join('\n')
+
+  return (
+    <div className="mt-2 text-[11px] text-faint" title={tooltip}>
+      {parts.join(' · ')}
+      {stats.aborted && <span className="ml-2" style={{ color: 'var(--warn)' }}>· aborted</span>}
+    </div>
+  )
+}
+
+// ── Markdown renderer ─────────────────────────────────────────────────────────
+
+function Markdown({ children }: { children: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      rehypePlugins={[rehypeHighlight]}
+      components={{
+        a: ({ children, href }) => (
+          <a href={href} target="_blank" rel="noopener noreferrer" className="text-accent underline underline-offset-2">{children}</a>
+        ),
+        code: ({ className, children, ...props }) => {
+          const isBlock = className?.includes('language-')
+          if (!isBlock) return <code className="rounded bg-panel-2 px-1 py-0.5 font-mono text-[0.88em]" {...props}>{children}</code>
+          const lang = className?.replace('language-', '') ?? ''
+          return (
+            <div className="relative my-2 overflow-hidden rounded-lg border border-border">
+              {lang && <div className="flex items-center justify-between border-b border-border bg-panel-2 px-3 py-1 font-mono text-[11px] text-muted">
+                <span>{lang}</span>
+                <button
+                  type="button"
+                  className="hover:text-ink"
+                  onClick={() => { void navigator.clipboard.writeText(String(children)).then(() => toast.success('Copied')) }}
+                >
+                  <ClipboardCopy size={12} />
+                </button>
+              </div>}
+              <code className={`${className} block overflow-auto p-3 text-[13px] leading-relaxed`} {...props}>{children}</code>
+            </div>
+          )
+        },
+        pre: ({ children }) => <>{children}</>,
+        table: ({ children }) => <div className="overflow-x-auto my-2"><table className="w-full border-collapse text-[13px]">{children}</table></div>,
+        th: ({ children }) => <th className="border border-border bg-panel-2 px-3 py-1.5 text-left font-semibold text-[13px]">{children}</th>,
+        td: ({ children }) => <td className="border border-border px-3 py-1.5 text-[13px]">{children}</td>,
+      }}
+    >
+      {children}
+    </ReactMarkdown>
+  )
+}
+
+// ── Streaming message (in-progress) ──────────────────────────────────────────
+
+export function StreamingBubble({
+  content,
+  reasoning,
+  progress,
+}: {
+  content: string
+  reasoning: string
+  progress: { phase: string; pct: number; tps: number } | null
+}) {
+  return (
+    <div className="flex gap-3">
+      <ModelAvatar />
+      <div className="min-w-0 flex-1 pt-0.5">
+        {reasoning && <ThinkingBlock reasoning={reasoning} streaming />}
+        <div className="prose-tllm text-[15px] leading-[1.7] text-ink">
+          {content ? <Markdown>{content}</Markdown> : (
+            <span className="text-muted">
+              {progress
+                ? progress.phase === 'prompt'
+                  ? `Processing prompt · ${progress.pct}% · ${progress.tps > 0 ? `${progress.tps.toFixed(0)} tok/s` : ''}`
+                  : 'Generating…'
+                : reasoning ? 'Generating…' : 'Thinking…'}
+            </span>
+          )}
+        </div>
+        <div className="mt-1 text-[11px] text-faint">
+          {content && progress?.phase !== 'prompt' && '…'}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Completed message bubble ──────────────────────────────────────────────────
+
+export function MessageBubble({
+  message,
+  isLast,
+  onCopy,
+  onEdit,
+  onDelete,
+  onRegenerate,
+  editingId,
+  onEditSave,
+  onEditCancel,
+}: {
+  message: Message
+  isLast: boolean
+  onCopy: (m: Message) => void
+  onEdit: (m: Message) => void
+  onDelete: (m: Message) => void
+  onRegenerate: () => void
+  editingId: string | null
+  onEditSave: (content: string) => void
+  onEditCancel: () => void
+}) {
+  const [editDraft, setEditDraft] = useState(message.content)
+  const isEditing = editingId === message.id
+
+  if (message.role === 'user') {
+    return (
+      <div className="group flex justify-end gap-2">
+        <div className="flex flex-col items-end gap-1">
+          {isEditing ? (
+            <div className="w-full max-w-[75%]">
+              <textarea
+                autoFocus
+                className="w-full resize-none rounded-[var(--radius-lg)] border border-accent bg-panel px-4 py-2.5 text-[15px] leading-[1.6] text-ink outline-none"
+                rows={3}
+                value={editDraft}
+                onChange={(e) => setEditDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); onEditSave(editDraft) }
+                  if (e.key === 'Escape') onEditCancel()
+                }}
+              />
+              <div className="mt-1.5 flex gap-1.5 justify-end">
+                <Button size="sm" variant="ghost" onClick={onEditCancel}>Cancel</Button>
+                <Button size="sm" onClick={() => onEditSave(editDraft)}>Save & Resend</Button>
+              </div>
+            </div>
+          ) : (
+            <div className="max-w-[75%] whitespace-pre-wrap rounded-[var(--radius-lg)] bg-accent px-4 py-2.5 text-[15px] leading-[1.6] text-on-accent">
+              {message.content}
+            </div>
+          )}
+          {!isEditing && (
+            <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+              <ActionBtn icon={<ClipboardCopy size={12} />} label="Copy" onClick={() => onCopy(message)} />
+              <ActionBtn icon={<Pencil size={12} />}        label="Edit"   onClick={() => { setEditDraft(message.content); onEdit(message) }} />
+              <ActionBtn icon={<Trash2 size={12} />}        label="Delete" onClick={() => onDelete(message)} destructive />
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  // Assistant
+  const hasError = message.stats.aborted && !message.content
+  return (
+    <div className="group flex gap-3">
+      <ModelAvatar />
+      <div className="min-w-0 flex-1 pt-0.5">
+        {message.reasoning && (
+          <ThinkingBlock reasoning={message.reasoning} thinkMs={message.stats.thinkMs} />
+        )}
+        {hasError ? (
+          <div className="rounded-lg border px-4 py-3 text-[14px]" style={{ borderColor: 'var(--err)', color: 'var(--err)', background: 'color-mix(in srgb, var(--err) 8%, transparent)' }}>
+            Generation failed or was stopped.
+            {isLast && <button type="button" className="ml-3 underline" onClick={onRegenerate}>Regenerate</button>}
+          </div>
+        ) : (
+          <div className="prose-tllm text-[15px] leading-[1.7] text-ink">
+            <Markdown>{message.content}</Markdown>
+          </div>
+        )}
+        <StatsRow stats={message.stats} />
+        <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+          <ActionBtn icon={<ClipboardCopy size={12} />} label="Copy"       onClick={() => onCopy(message)} />
+          {isLast && <ActionBtn icon={<RefreshCw size={12} />} label="Regenerate" onClick={onRegenerate} />}
+          <ActionBtn icon={<Trash2 size={12} />}        label="Delete"     onClick={() => onDelete(message)} destructive />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ModelAvatar() {
+  return <div className="mt-1 grid h-5 w-5 shrink-0 place-items-center rounded bg-panel-2 text-[9px] font-bold text-muted">T</div>
+}
+
+function ActionBtn({ icon, label, onClick, destructive }: { icon: ReactNode; label: string; onClick: () => void; destructive?: boolean }) {
+  return (
+    <button
+      type="button"
+      title={label}
+      onClick={onClick}
+      className="rounded p-1 transition-colors hover:bg-panel-2"
+      style={{ color: destructive ? 'var(--err)' : 'var(--faint)' }}
+    >
+      {icon}
+    </button>
+  )
+}

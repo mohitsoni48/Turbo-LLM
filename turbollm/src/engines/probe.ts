@@ -2,6 +2,7 @@
 // version + a capability fingerprint. Ports the verified Go probe.
 import { execFile } from 'node:child_process'
 import { existsSync, statSync } from 'node:fs'
+import { dirname } from 'node:path'
 
 export interface ProbeResult {
   version: string
@@ -24,7 +25,7 @@ const KNOWN_KV = ['f16', 'q8_0', 'q4_0', 'q4_1', 'q5_0', 'q5_1', 'q8_1']
 
 function runCaptured(bin: string, arg: string): Promise<{ out: string; err: Error | null }> {
   return new Promise((resolve) => {
-    execFile(bin, [arg], { timeout: 10_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile(bin, [arg], { cwd: dirname(bin), timeout: 10_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
       resolve({ out: (stdout || '') + (stderr || ''), err: error })
     })
   })

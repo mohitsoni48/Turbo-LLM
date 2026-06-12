@@ -1,14 +1,12 @@
-import { Copy, Play, RotateCcw, Square } from 'lucide-react'
-import { ApiError } from '../../lib/api'
-import { useEngineMutations } from '../../lib/queries'
+import { Copy } from 'lucide-react'
 import type { Status } from '../../lib/types'
 import { Button } from '../../components/ui/button'
 import { StateChip } from '../../components/StateChip'
 import { toast } from '../../components/ui/sonner'
 
-/** Status header for the active engine: name + state chip + Start/Stop/Restart,
- *  loading-elapsed while starting, and the error logTail block when in error
- *  (spec 03 §9). */
+/** Active engine status card: name + state chip + loading elapsed + error log.
+ *  Start/Stop/Restart are intentionally absent — the engine is managed automatically
+ *  when models are loaded from the Models screen. */
 export function EngineStatusHeader({
   status,
   activeEngineName,
@@ -16,19 +14,9 @@ export function EngineStatusHeader({
   status: Status | undefined
   activeEngineName: string | null
 }) {
-  const { start, stop, restart } = useEngineMutations()
   const state = status?.engine.state ?? 'stopped'
   const error = status?.engine.error
   const elapsedMs = status?.model?.loadElapsedMs
-
-  const handle = (
-    mutate: { mutate: (v: void, o?: { onError?: (e: unknown) => void }) => void },
-    failMsg: string,
-  ) =>
-    mutate.mutate(undefined, {
-      onError: (e: unknown) =>
-        toast.error(e instanceof ApiError ? e.message : failMsg),
-    })
 
   const copyLog = async () => {
     const text = (error?.logTail ?? []).join('\n')
@@ -40,53 +28,24 @@ export function EngineStatusHeader({
     }
   }
 
-  const running = state === 'running'
-  const starting = state === 'starting'
-  const busy = start.isPending || stop.isPending || restart.isPending
-
   return (
     <div className="rounded-[var(--radius)] border border-[color:var(--accent)] bg-panel p-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <div>
-            <div className="text-[12px] text-muted">Active engine</div>
-            <div className="text-sm font-semibold text-ink">
-              {activeEngineName ?? 'None active'}
-            </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <div>
+          <div className="text-[12px] text-muted">Active engine</div>
+          <div className="text-sm font-semibold text-ink">
+            {activeEngineName ?? 'None active'}
           </div>
-          <StateChip state={state} />
-          {starting && elapsedMs != null && (
-            <span className="text-[13px] text-muted">
-              Loading model… ({Math.round(elapsedMs / 1000)}s)
-            </span>
-          )}
         </div>
-
-        <div className="flex items-center gap-2">
-          <Button
-            size="sm"
-            onClick={() => handle(start, 'Could not start engine.')}
-            disabled={busy || running || starting || !activeEngineName}
-          >
-            <Play size={14} /> Start
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => handle(stop, 'Could not stop engine.')}
-            disabled={busy || state === 'stopped' || state === 'stopping'}
-          >
-            <Square size={14} /> Stop
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => handle(restart, 'Could not restart engine.')}
-            disabled={busy || !running}
-          >
-            <RotateCcw size={14} /> Restart
-          </Button>
-        </div>
+        <StateChip state={state} />
+        {state === 'starting' && elapsedMs != null && (
+          <span className="text-[13px] text-muted">
+            Loading model… ({Math.round(elapsedMs / 1000)}s)
+          </span>
+        )}
+        {state === 'running' && status?.model && (
+          <span className="text-[13px] text-muted truncate">{status.model.name}</span>
+        )}
       </div>
 
       {state === 'error' && error && (

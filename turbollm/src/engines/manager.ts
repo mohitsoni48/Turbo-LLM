@@ -6,6 +6,7 @@ import { createWriteStream, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { dirname, join } from 'node:path'
 import type { ConfigStore, Engine } from '../config/config'
+import { mlxServerCommand } from './mlx'
 
 export type State = 'stopped' | 'starting' | 'running' | 'stopping' | 'error'
 
@@ -74,8 +75,8 @@ export class Manager {
     mkdirSync(dirname(logPath), { recursive: true })
     const logStream = createWriteStream(logPath) // truncates
 
-    const args = buildArgs(opts, port)
-    const child = spawn(opts.engine.binPath, args, { cwd: dirname(opts.engine.binPath), windowsHide: true })
+    const { cmd, args } = engineCommand(opts, port)
+    const child = spawn(cmd, args, { cwd: dirname(cmd), windowsHide: true })
     // end:false — otherwise whichever of stdout/stderr closes first would end the
     // shared log stream and drop the other's output. We close it in onTerminated.
     child.stdout?.pipe(logStream, { end: false })
@@ -108,6 +109,19 @@ export class Manager {
     if (!child || (this.state !== 'running' && this.state !== 'starting')) return
     this.state = 'stopping'
     void gracefulStop(child, this.exited)
+  }
+
+  async stopAndWait(): Promise<void> {
+    const exited = this.exited
+    if (this.state === 'running' || this.state === 'starting') {
+      this.stop()
+      await Promise.race([exited, sleep(10_000)])
+    } else if (this.state === 'stopping') {
+      await Promise.race([exited, sleep(10_000)])
+    } else if (this.state === 'error') {
+      this.state = 'stopped'
+      this.errInfo = null
+    }
   }
 
   async restart(): Promise<void> {
@@ -214,6 +228,16 @@ export class Manager {
 }
 
 // ---- helpers ---------------------------------------------------------------
+
+/** Build the spawn command for an engine, branching on its kind (spec 03 §2b). */
+function engineCommand(opts: StartOpts, port: number): { cmd: string; args: string[] } {
+  if (opts.engine.kind === 'mlx') {
+    // MLX: run the mlx-lm OpenAI server via the provisioned venv python. The
+    // llama.cpp LoadProfile flags in opts.extraArgs do not apply and are dropped.
+    return mlxServerCommand(opts.engine.binPath, opts.modelPath, port, '127.0.0.1')
+  }
+  return { cmd: opts.engine.binPath, args: buildArgs(opts, port) }
+}
 
 function buildArgs(opts: StartOpts, port: number): string[] {
   const args = ['-m', opts.modelPath, '--host', '127.0.0.1', '--port', String(port)]

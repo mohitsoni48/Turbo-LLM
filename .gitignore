@@ -35,7 +35,12 @@
 # Local dev/preview config (machine-specific engine/model paths) + runtime
 /turbollm/dev-config.json
 /turbollm/.preview-config.json
+/turbollm/.preview-config.json.broken-*
 /turbollm/daemon.pid
+# Runtime SQLite chat DB (created beside a local config dir during dev)
+/turbollm/*.db
+/turbollm/*.db-shm
+/turbollm/*.db-wal
 
 # Node / React frontend
 node_modules/

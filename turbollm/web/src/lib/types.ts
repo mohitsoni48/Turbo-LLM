@@ -35,12 +35,24 @@ export type LoadedModel = {
   loadElapsedMs?: number
 }
 
+/** Default-engine provisioning progress (ADR-024), from GET /api/v1/status. */
+export type EngineProvision = {
+  active: boolean
+  phase: 'idle' | 'downloading' | 'extracting' | 'error'
+  backend: string
+  pct: number // 0..1 while downloading; -1 = indeterminate (extracting)
+  part?: number // 1-based current archive (multi-asset backends like CUDA)
+  parts?: number // total archives for this backend
+  error: string | null
+}
+
 export type Status = {
   version: string
   engine: EngineRuntime
   model: LoadedModel | null
   bench: { running: boolean; step?: number; total?: number; label?: string }
   downloads: { active: number }
+  engineProvision?: EngineProvision
   telemetryLevel: string
   uptimeSec: number
 }
@@ -64,6 +76,29 @@ export type Engine = {
 export type EnginesList = {
   engines: Engine[]
   activeEngineId: string
+}
+
+/** A selectable llama.cpp backend variant (ADR-025). */
+export type BackendInfo = {
+  id: string
+  label: string
+  installed: boolean
+  recommended: boolean
+  active: boolean
+}
+
+export type MlxInfo = {
+  supported: boolean
+  installed: boolean
+  active: boolean
+}
+
+export type EngineBackends = {
+  vendor: string
+  recommended: string
+  gpus: { name: string; vramMb: number; vendor: string }[]
+  backends: BackendInfo[]
+  mlx: MlxInfo
 }
 
 export type EngineLogs = {
@@ -93,12 +128,14 @@ export type ModelEntry = {
   name: string
   path: string
   dir: string
+  format: 'gguf' | 'mlx'
   sizeBytes: number
   sizeLabel: string
   arch: string
   quant: string
   nativeCtx: number
   blockCount: number
+  headCountKv: number
   moe: boolean
   expertCount: number
   vision: boolean
@@ -120,4 +157,55 @@ export type ModelsList = {
 
 export type ModelDirs = {
   dirs: string[]
+}
+
+// ── Load profiles + VRAM fit (A4, spec 05) ───────────────────────────────────
+export type Sampling = {
+  temp: number
+  topP: number
+  topK: number
+  minP: number
+  repeatPenalty: number
+  presencePenalty: number
+}
+
+export type LoadProfile = {
+  ctx: number
+  ngl: number
+  nCpuMoe: number
+  parallel: number
+  kvUnified: boolean
+  kvTypeK: string
+  kvTypeV: string
+  flashAttn: 'auto' | 'on' | 'off'
+  threads: number
+  threadsBatch: number
+  useMmproj: boolean
+  mmprojGpu: boolean
+  imageMaxTokens: number
+  cacheReuse: number
+  useJinja: boolean
+  chatTemplateFile: string
+  speculative: 'off' | 'nextn' | 'draft'
+  draftModelPath: string
+  sampling: Sampling
+  extraArgs: string[]
+  tunedBy?: string
+}
+
+export type FitVerdict = 'fits' | 'tight' | 'overflow' | 'cpu' | 'unknown'
+
+export type VramFit = {
+  estMb: number
+  totalVramMb: number
+  pct: number
+  verdict: FitVerdict
+}
+
+export type SysGpu = { name: string; vramMb: number }
+
+export type ModelDetail = ModelEntry & {
+  profile: LoadProfile
+  vramFit: VramFit
+  gpu: SysGpu | null
 }

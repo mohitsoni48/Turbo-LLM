@@ -46,6 +46,32 @@ export class Registry {
     return eng
   }
 
+  /** Register an MLX engine (kind='mlx'). No llama-server probe — the binPath is
+   *  a venv python, not a llama-server, so capabilities/flags don't apply. */
+  addMlx(name: string, binPath: string, version: string): Engine {
+    const eng: Engine = {
+      id: randomUUID(),
+      name: name.trim() || 'MLX',
+      binPath,
+      kind: 'mlx',
+      version,
+      capabilities: { kvTypes: [], flags: [] },
+      addedAt: new Date().toISOString(),
+    }
+    this.store.update((c) => {
+      // Replace an existing MLX engine at the same path rather than duplicating.
+      const existing = c.engines.find((e) => e.kind === 'mlx' && e.binPath === binPath)
+      if (existing) {
+        existing.version = version
+        eng.id = existing.id
+      } else {
+        c.engines.push(eng)
+      }
+      if (!c.activeEngineId) c.activeEngineId = eng.id
+    })
+    return eng
+  }
+
   rename(id: string, name: string): Engine {
     let out: Engine | undefined
     this.store.update((c) => {
