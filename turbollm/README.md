@@ -1,93 +1,257 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/turbollm/web/public/brand/turbollm-icon-512.jpeg" width="96" height="96" alt="TurboLLM" />
+  <img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/turbollm/web/public/brand/turbollm-icon-512.jpeg" width="92" height="92" alt="TurboLLM" />
 </p>
 
 <h1 align="center">TurboLLM</h1>
 
 <p align="center">
-  <strong>Run any local LLM, auto-tuned to your GPU — with a polished web UI and an
-  OpenAI/Anthropic-compatible API.</strong><br/>
-  Point Claude Code at your own machine in one command. Fully offline, no cloud key.
+  <strong>Run <em>any</em> local LLM engine, auto-tuned to your GPU — with a polished web UI
+  and an OpenAI/Anthropic-compatible API.</strong><br/>
+  Bring your own llama.cpp fork. No compiling. No Electron. No Python. Point Claude Code at
+  your own machine in one command — fully offline.
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/turbollm"><img src="https://img.shields.io/npm/v/turbollm.svg?color=e2552e" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/turbollm"><img src="https://img.shields.io/npm/dm/turbollm.svg?color=e2552e" alt="npm downloads" /></a>
+  <img src="https://img.shields.io/badge/node-%E2%89%A522-3c873a.svg" alt="node >= 22" />
+  <img src="https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg" alt="license" />
+  <img src="https://img.shields.io/badge/platform-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-555.svg" alt="platforms" />
 </p>
 
 <!-- Brand: shipped app icon web/public/brand/turbollm-icon-512.jpeg · high-res masters web/brand-assets/ (unshipped) · in-app mark web/src/components/Logo.tsx · favicon web/public/favicon.svg -->
 
+```bash
+npx turbollm
+```
+
+That one command starts a local daemon, opens a browser UI, and serves your models over an
+API any tool can talk to. TurboLLM is the **performance & bleeding-edge layer for local
+LLMs** — built for people who today hand-compile forks and hunt forums for the right flags.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/how-it-works.svg" width="860" alt="How TurboLLM works: clients -> one lightweight daemon -> any engine on your GPU" />
+</p>
+
 ---
 
-TurboLLM is a single command — `npx turbollm` — that starts a local daemon, opens a
-browser UI, and serves your models over an API any tool can talk to. It manages **any
-bring-your-own inference engine** (stock `llama.cpp`, community forks, or a default it
-provisions for you), **auto-tunes the launch flags to your exact hardware**, and shows you
-**real measured tokens/sec**.
+## Contents
 
-It's built for the prosumer/indie-dev who today hand-compiles forks and hunts forums for
-the right flags — not as "another easy chat app," but as the **performance & bleeding-edge
-layer for local LLMs**.
+- [Why TurboLLM](#why-turbollm)
+- [Quick start](#quick-start)
+- [⭐ Bring any engine — the headline feature](#-bring-any-engine--the-headline-feature)
+- [Models — bring your own, or browse Hugging Face](#models)
+- [Auto-tuning & performance](#auto-tuning--performance)
+- [Chat](#chat)
+- [APIs & integrations](#apis--integrations)
+- [Run Claude Code on your own GPU](#run-claude-code-on-your-own-gpu)
+- [Use it from any device on your network](#use-it-from-any-device-on-your-network)
+- [Command-line reference](#command-line-reference)
+- [Configuration & data](#configuration--data)
+- [Requirements](#requirements)
+- [Privacy](#privacy)
+- [How TurboLLM compares](#how-turbollm-compares)
+- [Troubleshooting](#troubleshooting)
+- [Develop from source](#develop-from-source)
+- [License](#license)
+
+---
 
 ## Why TurboLLM
 
-- **Any engine, including forks.** Most tools lock you to one blessed runtime. TurboLLM
-  makes any `llama-server`-compatible binary a first-class choice — point it at a build you
-  compiled, or let it auto-provision the right prebuilt for your GPU (CUDA / ROCm / Metal /
-  SYCL / Vulkan, picked by detected vendor).
-- **Auto-tuned to your hardware.** It benchmarks on load and derives fast defaults (flash
-  attention, speculative decoding / NextN, context, offload, KV-cache type, threads) with a
-  VRAM-fit verdict *before* you load — no more guessing flags.
-- **Real tokens/sec, never fake.** Speed shown in the model list is measured on your
-  machine from actual generation, not a synthetic estimate.
-- **A real chat UI.** Streaming with live t/s, prefill %, TTFT and full stats; markdown +
-  code highlighting; collapsible thinking blocks; edit / regenerate / delete / copy;
-  persistent searchable conversations; image input for vision models; per-chat system
-  prompt and sampling.
-- **Drop-in APIs.** OpenAI **and** Anthropic-compatible endpoints, so existing tools and
-  agentic CLIs work unchanged.
-- **Usable from any device.** The web UI runs in the browser and can be shared across your
-  LAN (with optional API-key auth), not locked to the machine it runs on.
-- **Bring your own models.** Point it at folders you already have (no re-download), or
-  browse and download GGUFs from Hugging Face — or any direct URL — inside the app.
-- **Offline-first & private.** Core local use needs no account, no backend, no internet.
-  No analytics are collected.
+Local-LLM tools make two choices for you, and both cost you performance:
 
-## Requirements
+1. **They pick the engine.** LM Studio ships one blessed runtime; Ollama hides the engine
+   entirely. The fastest community innovations — new quant formats, speculative decoding,
+   low-bit KV cache — land in **forks** first, and you can't use them without compiling.
+2. **They don't tell you what speed to expect**, and they don't tune the dozens of launch
+   flags (`-c`, `-ngl`, `--n-cpu-moe`, KV type, threads, flash-attn, draft models) that make
+   the difference between 20 and 80 tokens/sec on the *same* hardware.
 
-- **Node.js 22 or newer** — the daemon enforces this at startup and exits with a clear
-  message if the version is too old. Download: <https://nodejs.org>
-- A GPU is recommended but not required (a CPU build is provisioned as a fallback).
+TurboLLM does the opposite:
+
+- **🔌 Any engine, including forks.** Point it at any `llama-server`-compatible binary — a
+  build you compiled, a community fork, or the one it auto-provisions for your GPU. It probes
+  the binary's real capabilities and adapts the UI to them. **This is the whole point.**
+- **⚡ Auto-tuned to your hardware.** It benchmarks on load, derives fast defaults, and shows
+  a **VRAM-fit verdict before you load** — no more flag guessing.
+- **📊 Real tokens/sec, never faked.** Speed in the model list is *measured on your machine*
+  from actual generation — live while you chat, and remembered per model.
+- **🪶 Lightweight.** A ~0.3 MB npm package on Node — **no Electron, no bundled Chromium, no
+  Python**. It downloads only the engine your GPU actually needs (Vulkan ≈ 38 MB).
+- **🔌 Drop-in APIs.** OpenAI **and** Anthropic-compatible — so Claude Code and every existing
+  tool work unchanged.
+- **🔒 Offline-first & private.** No account, no backend, no internet, **no telemetry.**
+
+---
 
 ## Quick start
 
 ```bash
-# run directly without installing (recommended for first try)
+# run without installing (recommended for first try)
 npx turbollm
 
-# or install globally, then run
+# or install globally
 npm install -g turbollm
 turbollm
 ```
 
-The daemon starts, prints the local URL (default <http://127.0.0.1:6996>), and opens your
-browser. On first run with no engine configured, it downloads a suitable prebuilt
-`llama-server` for your hardware automatically. Stop the daemon with **Ctrl+C**.
+**On first run** the daemon:
 
-Then, in the UI: open **Models**, download or pick a GGUF, and load it.
+1. Detects your GPU and **downloads a matching `llama-server` build** (CUDA for NVIDIA, ROCm
+   for AMD, Metal for Apple, SYCL for Intel, Vulkan otherwise — with a CPU fallback).
+2. Starts on <http://127.0.0.1:6996> and opens your browser.
+3. Drops you on the **Chat** screen, ready to load a model.
 
-## Use your local model with Claude Code
+Then open **Models**, download or pick a GGUF, click **Load**, and start chatting. Stop the
+daemon any time with **Ctrl+C**.
 
-TurboLLM serves an Anthropic-compatible API, so coding CLIs like
-[Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code) can run against
-whatever model you have loaded — no cloud key, fully offline. One command wires it up:
+<!--
+  📸 SCREENSHOTS — drop PNGs into assets/screenshots/ and uncomment. Suggested shots:
+  - chat.png      : a chat mid-stream showing the live t/s + context meter
+  - models.png    : the Models › Library with measured t/s per model
+  - engines.png   : the Engines screen + backend picker (the USP)
+  - tuning.png    : the model load-params panel (ctx/ngl/NextN/VRAM verdict)
+  <p align="center"><img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/chat.png" width="860" alt="TurboLLM chat" /></p>
+-->
+
+---
+
+## ⭐ Bring any engine — the headline feature
+
+No other local-LLM app lets you run **whatever inference engine you want**. TurboLLM treats
+the engine as a swappable component.
+
+**Add a custom engine** (Engines screen → **Add engine**):
+
+1. Compile or download any `llama-server`-compatible binary — stock
+   [llama.cpp](https://github.com/ggml-org/llama.cpp), a community fork, or your own build.
+2. Point TurboLLM at the binary. It runs a **capability probe** and learns exactly which
+   flags and features that build supports.
+3. Activate it. The load-parameter UI **adapts to that engine** — features the build doesn't
+   support are hidden; ones it adds (e.g. low-bit KV cache, NextN) light up.
+
+**Auto-provisioned default.** Don't want to fetch anything? On first run TurboLLM downloads
+the right upstream prebuilt for your GPU automatically — and a **backend picker** lets you
+switch between CUDA / ROCm / Metal / SYCL / Vulkan / CPU at any time (it downloads the variant
+you choose, LM Studio-style).
+
+**Engine types.** Both **llama.cpp / GGUF** and **MLX** (on macOS) are first-class engine
+kinds — pick the right one per model.
+
+**Fully supervised.** Every engine runs under a real state machine: health-gated readiness,
+graceful stop, an **idle auto-stop** watchdog, and **live logs + clear error surfacing** in
+the UI when something fails to load.
+
+> Why it matters: fork-exclusive features — **speculative decoding (NextN / MTP / draft)**,
+> low-bit KV cache, new quant formats — are usable on day 0, with **zero compiler knowledge**
+> on your part beyond producing the binary (and often not even that).
+
+---
+
+## Models
+
+- **Use the folders you already have.** Point TurboLLM at any directory of GGUFs — your
+  existing LM Studio / Ollama / manual downloads — **no re-downloading.** It parses GGUF
+  metadata (arch, params, quant, context, vision) for every file.
+- **Browse & download from Hugging Face**, in-app: search, see the file tree, pick a quant,
+  and download with **resume + SHA-256 verification**. Gated models (Llama, Gemma) work via
+  your own HF token, which **never leaves your machine**.
+- **Import from any URL** — not just Hugging Face. Paste a direct `.gguf` link (model-author
+  sites, mirrors, private servers); it disk-space-checks and downloads through the same
+  manager.
+- **Quant recommendation per GPU** and a **VRAM-fit verdict** so you pick a quant that
+  actually fits before you commit.
+- **Primary download folder**, real-time **measured t/s per model**, and **delete-from-disk**
+  — full library management.
+
+---
+
+## Auto-tuning & performance
+
+- **Auto-benchmark on load** derives fast defaults for your exact GPU.
+- **Real measured tokens/sec** in the model list — **live** while a model is generating,
+  **last-session** when it's idle (never a synthetic estimate).
+- **Full load-parameter UI**, a superset of what other tools expose:
+  context length, GPU offload (`-ngl`), **MoE CPU-offload (`--n-cpu-moe`)**, parallel slots,
+  **KV-cache quant type** (incl. low-bit on supporting forks), CPU threads, flash attention,
+  and **speculative decoding (NextN / MTP / draft)**.
+- **Fast by default:** flash attention on, NextN self-speculative decoding on for models that
+  carry a draft head, threads auto — best speed out of the box, safely gated to what your
+  engine actually accepts.
+- **Saved per-model profiles** — tune once, and it loads that way every time.
+
+---
+
+## Chat
+
+A genuinely good chat UI, not an afterthought:
+
+- **Streaming** with a **stop** button, **live tokens/sec**, **prompt-processing %** and
+  **prefill t/s**, **time-to-first-token**, **total time**, exact **token counts**, and a
+  **context-usage meter** (filled / max) on every reply.
+- **Thinking control** — toggle reasoning **off** to get a direct answer (saves time and
+  tokens), or leave it **on** with collapsible, timed "thought for N s" blocks.
+- **Markdown + syntax-highlighted code** with one-click copy.
+- **Edit, regenerate, delete, copy** any message; **persistent, searchable conversations**
+  with rename, delete, and **auto-generated titles**.
+- **Per-chat system prompt** and **per-chat sampling** overrides (temperature, top-p/k, min-p).
+- **Image input** for vision models.
+- **TurboLLM Expert** — a built-in assistant that knows the app and your hardware, for
+  onboarding and troubleshooting without leaving the UI.
+
+---
+
+## APIs & integrations
+
+With a model loaded, TurboLLM serves two compatible APIs on the same port:
+
+```bash
+# OpenAI-compatible
+curl http://127.0.0.1:6996/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"local","messages":[{"role":"user","content":"hello"}]}'
+```
+
+- **OpenAI-compatible** `/v1/chat/completions`, `/v1/embeddings`, … — point any OpenAI client
+  or tool at it.
+- **Anthropic-compatible** `/v1/messages` — including **tool use and streaming** — which is
+  what powers Claude Code below. No other local host offers this.
+- **API-key auth** you can require when sharing over a LAN (Settings → Network).
+
+---
+
+## Run Claude Code on your own GPU
+
+TurboLLM's Anthropic-compatible endpoint means [Claude
+Code](https://www.npmjs.com/package/@anthropic-ai/claude-code) can run against whatever model
+you've loaded — no cloud key, fully offline. One command wires it up:
 
 ```bash
 turbollm launch claude          # opens Claude Code on your loaded model
 ```
 
-This requires the daemon running with a model loaded. It points Claude Code's
-`ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` at TurboLLM and execs `claude`; extra args are
-forwarded (`turbollm launch claude --help`). If `claude` isn't installed, the command tells
-you how (`npm install -g @anthropic-ai/claude-code`). The in-app **Developer** screen also
-shows manual env-var snippets for any OpenAI- or Anthropic-compatible tool.
+It sets Claude Code's `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` at TurboLLM and execs `claude`;
+extra args are forwarded. If `claude` isn't installed, it tells you how. The in-app
+**Developer** screen also shows copy-paste env snippets for any OpenAI- or Anthropic-compatible
+tool (Open WebUI, Kilo Code, opencode, …).
 
-## Command-line usage
+---
+
+## Use it from any device on your network
+
+The UI runs in the browser, so any phone, tablet, or laptop on your LAN can use the model on
+your GPU box:
+
+```bash
+turbollm --addr 0.0.0.0:6996    # bind all interfaces, then open http://<your-ip>:6996
+```
+
+Turn on **Require API key** in Settings → Network when you expose it.
+
+---
+
+## Command-line reference
 
 ```bash
 turbollm                        # start on :6996, open browser
@@ -99,38 +263,82 @@ turbollm launch claude          # start Claude Code against the loaded model
 
 | Flag | Description |
 |------|-------------|
-| `--port <n>` | Listen on a specific port (default: 6996) |
+| `--port <n>` | Listen on a specific port (default: `6996`) |
 | `--addr <host:port>` | Full host:port override, e.g. `0.0.0.0:6996` for LAN sharing |
 | `--no-open` | Start without opening a browser window |
 | `--config <file>` | Path to a custom config file |
 | `--help`, `-h` | Show usage and exit |
 
-State (config, database, downloaded engines and models) lives under **`~/.turbollm/`**.
+---
 
-## API
+## Configuration & data
 
-With a model loaded, TurboLLM serves two compatible APIs on the same port:
+Everything lives under **`~/.turbollm/`** on every OS — `config.json`, the SQLite chat
+database, downloaded engines, models cache, and logs. Back it up or delete it to reset.
+Use `--config <file>` to point at an alternate config (its directory becomes the data dir).
 
-```bash
-# OpenAI-compatible
-curl http://127.0.0.1:6996/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"local","messages":[{"role":"user","content":"hello"}]}'
-```
+---
 
-The Anthropic-compatible endpoint (`/v1/messages`, including tool use and streaming) powers
-the Claude Code integration above. When sharing over a LAN you can require an API key —
-enable it in **Settings → Network**.
+## Requirements
 
-## Develop & run from source
+- **Node.js 22 or newer** — enforced at startup with a clear message. <https://nodejs.org>
+- **Windows, macOS, or Linux.**
+- A GPU is recommended but **not required** — a CPU build is provisioned as a fallback.
+- On Windows, the first time the auto-downloaded `llama-server` runs, SmartScreen/Defender may
+  prompt (it's an upstream binary). Allow it once.
+
+---
+
+## Privacy
+
+TurboLLM is **offline-first**: core local use needs no account, no backend, and no internet.
+**No analytics or telemetry are collected.** Your prompts, chats, files, and keys never leave
+your machine.
+
+---
+
+## How TurboLLM compares
+
+Focused on the differences that matter — all four are good tools.
+
+| | **TurboLLM** | LM Studio | Ollama | Open WebUI |
+|---|:---:|:---:|:---:|:---:|
+| Run **any engine / community forks** | ✅ | ❌ one runtime | ❌ hidden | ❌ |
+| **Auto-tune** launch flags to your GPU | ✅ | ❌ | ❌ | ❌ |
+| **Measured** t/s in the model list | ✅ | ◐ | ◐ | ❌ |
+| **Anthropic** API (tool use) → Claude Code | ✅ | ❌ | ❌ | ❌ |
+| OpenAI-compatible API | ✅ | ✅ | ✅ | ◐ proxy |
+| Use existing model folders (no re-download) | ✅ | ◐ | ❌ | ❌ |
+| Speculative decoding (NextN / MTP / draft) | ✅ | ◐ draft | ❌ | ❌ |
+| Web UI from any LAN device | ✅ | ❌ | ❌ | ✅ |
+| **Lightweight** (no Electron / no Python) | ✅ npm | ❌ Electron | ✅ Go | ❌ Python |
+| Offline-first · no telemetry | ✅ | ◐ | ✅ | ✅ |
+
+Prefer Open WebUI's chat breadth? It works great pointed at TurboLLM's OpenAI endpoint.
+
+---
+
+## Troubleshooting
+
+- **`TurboLLM requires Node.js 22 or newer`** — upgrade Node: <https://nodejs.org>.
+- **Model won't load / OOM** — pick a smaller quant (the VRAM verdict warns you), lower GPU
+  offload, or close other GPU apps. Failures surface in the Engines screen with the engine log.
+- **Windows Defender / SmartScreen prompt** — that's the upstream `llama-server` binary on
+  first run; allow it once.
+- **Port already in use** — `turbollm --port 9000`.
+- **Slow generation** — open the model's load params; ensure GPU offload is high and flash
+  attention / NextN are on for supported models.
+
+---
+
+## Develop from source
 
 ```bash
 npm install                  # daemon deps
 cd web && npm install && cd ..
 
 npm run build:web            # build the React UI -> src/webdist
-npm run start                # run the daemon in dev (hot TS via tsx)
-#   open http://127.0.0.1:6996   ·   curl http://127.0.0.1:6996/api/v1/status
+npm run start                # run the daemon in dev (hot TS via tsx) -> :6996
 
 npm run build                # production bundle -> dist/cli.js (web assets included)
 node dist/cli.js --port 6996
@@ -139,25 +347,29 @@ node dist/cli.js --port 6996
 Frontend hot-reload: `cd web && npm run dev` (proxies `/api` and `/v1` to the daemon on
 :6996).
 
-### Layout
+**Stack:** Node ≥22 · TypeScript · Hono · `node:sqlite` · tsup — and a React 19 + Tailwind v4 +
+shadcn/ui frontend. One TypeScript codebase, shipped as an npm package.
 
 ```
 turbollm/
-  package.json          npm package; bin "turbollm" -> bin/turbollm.mjs -> dist/cli.js
+  bin/turbollm.mjs      launcher shim (Node guard) -> dist/cli.js
   src/
     cli.ts              entrypoint: wiring + graceful shutdown
     server.ts           Hono app: CORS, API, gateway, embedded SPA
-    config/             config schema + load/save/migrate
     engines/            provisioning, probe, registry, lifecycle state machine
     api/routes.ts       /api/v1/* handlers
     gateway/            /v1/* OpenAI + Anthropic gateway
-    webdist/            built web UI (generated; served by the daemon)
-  web/                  React 19 + TS + Tailwind v4 + shadcn frontend (own package.json)
+    models/ · chat/ · hf/ · bench/ · downloads/
+  web/                  React + TS + Tailwind + shadcn frontend (own package.json)
 ```
+
+---
 
 ## License
 
-Source-available under the **Functional Source License 1.1 (Apache 2.0 future grant)** —
-SPDX `FSL-1.1-ALv2`. Free for personal use, internal business use, education, and research;
-the only restriction is shipping a competing product. Each release converts to Apache-2.0
-two years after it's published. Full text in [LICENSE.md](LICENSE.md).
+Source-available under the **Functional Source License 1.1 (Apache-2.0 future grant)** — SPDX
+**`FSL-1.1-ALv2`**. Free for personal use, internal business use, education, and research; the
+only restriction is shipping a competing product. Each release converts to Apache-2.0 two
+years after it's published. Full text: [LICENSE.md](LICENSE.md).
+
+<p align="center"><sub>Built for people who refuse to wait for the mainstream to bless the fast path. ⚡</sub></p>

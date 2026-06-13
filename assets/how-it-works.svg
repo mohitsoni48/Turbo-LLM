@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 470" font-family="-apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif">
+  <!-- self-contained light card so it reads on any GitHub theme -->
+  <rect x="1" y="1" width="958" height="468" rx="18" fill="#ffffff" stroke="#e5e7eb" stroke-width="2"/>
+
+  <text x="40" y="46" font-size="20" font-weight="700" fill="#111827">How TurboLLM works</text>
+  <text x="40" y="70" font-size="14" fill="#6b7280">One lightweight daemon. Any engine. Auto-tuned to your GPU.</text>
+
+  <!-- ===== Clients ===== -->
+  <g>
+    <rect x="40" y="120" width="230" height="250" rx="12" fill="#f9fafb" stroke="#e5e7eb"/>
+    <text x="155" y="150" font-size="12" font-weight="700" letter-spacing="1" fill="#6b7280" text-anchor="middle">YOU &amp; YOUR TOOLS</text>
+    <rect x="60" y="168" width="190" height="56" rx="9" fill="#ffffff" stroke="#d1d5db"/>
+    <text x="155" y="192" font-size="13" font-weight="600" fill="#111827" text-anchor="middle">Web UI</text>
+    <text x="155" y="210" font-size="11" fill="#6b7280" text-anchor="middle">any browser · any LAN device</text>
+    <rect x="60" y="236" width="190" height="56" rx="9" fill="#ffffff" stroke="#d1d5db"/>
+    <text x="155" y="260" font-size="13" font-weight="600" fill="#111827" text-anchor="middle">Claude Code · CLIs · apps</text>
+    <text x="155" y="278" font-size="11" fill="#6b7280" text-anchor="middle">OpenAI &amp; Anthropic clients</text>
+    <rect x="60" y="304" width="190" height="46" rx="9" fill="#ffffff" stroke="#d1d5db"/>
+    <text x="155" y="332" font-size="12" fill="#374151" text-anchor="middle">curl / scripts / agents</text>
+  </g>
+
+  <!-- arrow clients -> daemon -->
+  <line x1="270" y1="245" x2="360" y2="245" stroke="#9ca3af" stroke-width="2"/>
+  <polygon points="360,245 350,240 350,250" fill="#9ca3af"/>
+  <text x="315" y="236" font-size="10.5" fill="#6b7280" text-anchor="middle">HTTP · SSE</text>
+
+  <!-- ===== Daemon (accent) ===== -->
+  <g>
+    <rect x="360" y="100" width="300" height="290" rx="14" fill="#fff7f4" stroke="#e2552e" stroke-width="2"/>
+    <rect x="360" y="100" width="300" height="40" rx="14" fill="#e2552e"/>
+    <rect x="360" y="126" width="300" height="14" fill="#e2552e"/>
+    <text x="510" y="126" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">TurboLLM daemon</text>
+    <text x="510" y="162" font-size="11" fill="#9a3412" text-anchor="middle">one npm process · ~0.3 MB · Node 22+</text>
+
+    <rect x="380" y="176" width="260" height="40" rx="8" fill="#ffffff" stroke="#fed7c7"/>
+    <text x="510" y="201" font-size="12.5" font-weight="600" fill="#111827" text-anchor="middle">OpenAI + Anthropic gateway</text>
+    <rect x="380" y="222" width="260" height="40" rx="8" fill="#ffffff" stroke="#fed7c7"/>
+    <text x="510" y="247" font-size="12.5" font-weight="600" fill="#111827" text-anchor="middle">Engine supervisor + auto-tune</text>
+    <rect x="380" y="268" width="260" height="40" rx="8" fill="#ffffff" stroke="#fed7c7"/>
+    <text x="510" y="293" font-size="12.5" font-weight="600" fill="#111827" text-anchor="middle">Model manager — Hugging Face + local</text>
+    <rect x="380" y="314" width="260" height="40" rx="8" fill="#ffffff" stroke="#fed7c7"/>
+    <text x="510" y="339" font-size="12.5" font-weight="600" fill="#111827" text-anchor="middle">Benchmark → real tokens/sec</text>
+  </g>
+
+  <!-- arrow daemon -> engines -->
+  <line x1="660" y1="245" x2="740" y2="245" stroke="#9ca3af" stroke-width="2"/>
+  <polygon points="740,245 730,240 730,250" fill="#9ca3af"/>
+  <text x="700" y="236" font-size="10.5" fill="#6b7280" text-anchor="middle">spawns · tunes</text>
+
+  <!-- ===== Engines ===== -->
+  <g>
+    <rect x="740" y="120" width="180" height="250" rx="12" fill="#f9fafb" stroke="#e5e7eb"/>
+    <text x="830" y="150" font-size="12" font-weight="700" letter-spacing="1" fill="#6b7280" text-anchor="middle">ANY ENGINE</text>
+    <rect x="758" y="166" width="144" height="34" rx="8" fill="#ffffff" stroke="#d1d5db"/>
+    <text x="830" y="188" font-size="12.5" fill="#111827" text-anchor="middle">llama.cpp</text>
+    <rect x="758" y="206" width="144" height="34" rx="8" fill="#ffffff" stroke="#d1d5db"/>
+    <text x="830" y="228" font-size="12.5" font-weight="700" fill="#e2552e" text-anchor="middle">your fork ✦</text>
+    <rect x="758" y="246" width="144" height="34" rx="8" fill="#ffffff" stroke="#d1d5db"/>
+    <text x="830" y="268" font-size="12.5" fill="#111827" text-anchor="middle">MLX (macOS)</text>
+    <line x1="758" y1="298" x2="902" y2="298" stroke="#e5e7eb"/>
+    <text x="830" y="320" font-size="11" font-weight="600" fill="#374151" text-anchor="middle">your GPU</text>
+    <text x="830" y="338" font-size="10.5" fill="#6b7280" text-anchor="middle">CUDA · ROCm · Metal · Vulkan</text>
+  </g>
+
+  <text x="480" y="430" font-size="12.5" fill="#6b7280" text-anchor="middle">Offline-first · no account · no telemetry — the gateway stays stable while engines swap behind it (local now, your cloud box later).</text>
+</svg>
