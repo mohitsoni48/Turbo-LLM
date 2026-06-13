@@ -1,8 +1,8 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
-import { Boxes, ChevronRight, CircleSlash, FolderPlus, MoreHorizontal, RefreshCw, SlidersHorizontal, Star, Trash2, X, Zap } from 'lucide-react'
+import { Boxes, ChevronRight, CircleSlash, FolderPlus, Loader2, MoreHorizontal, RefreshCw, SlidersHorizontal, Star, Trash2, X, Zap } from 'lucide-react'
 import { ApiError, deleteModel } from '../lib/api'
-import { queryKeys, useModelActions, useModelDirs, useModelMutations, useModels } from '../lib/queries'
+import { queryKeys, useModelActions, useModelDirs, useModelMutations, useModels, useStatus } from '../lib/queries'
 import type { ModelEntry } from '../lib/types'
 import { EmptyState, InlineError, ScreenHeader } from '../components/common'
 import { Badge } from '../components/ui/badge'
@@ -61,6 +61,21 @@ export function ModelsScreen() {
   const mut = useModelMutations()
   const actions = useModelActions()
   const del = useDeleteModel()
+  const { data: status } = useStatus()
+
+  // A load isn't instant: POST /load returns 202, then the engine spends seconds in
+  // `starting` before the model is `running`. Keep the Load buttons in a busy/loading
+  // state across that whole window — not just while the mutation POST is in flight —
+  // so the button never looks idle while a model is actually coming up.
+  const engineState = status?.engine.state
+  const loadBusy = actions.load.isPending || engineState === 'starting' || engineState === 'stopping'
+  // The specific model coming up: the mutation's own key while the POST is in flight,
+  // then the engine's reported loading model once it's `starting`.
+  const loadingKey = actions.load.isPending
+    ? actions.load.variables?.key
+    : engineState === 'starting'
+      ? status?.model?.key
+      : undefined
   const [tab, setTab] = useState<Tab>('library')
   const [filter, setFilter] = useState<Filter>('all')
   const [openKey, setOpenKey] = useState<string | null>(null)
@@ -137,6 +152,8 @@ export function ModelsScreen() {
           modelsQ={modelsQ}
           mut={mut}
           actions={actions}
+          loadBusy={loadBusy}
+          loadingKey={loadingKey}
           dirs={dirs}
           primaryDir={primaryDir}
           scanning={scanning}
@@ -166,6 +183,8 @@ function LibraryTab({
   modelsQ,
   mut,
   actions,
+  loadBusy,
+  loadingKey,
   dirs,
   primaryDir,
   scanning,
@@ -179,6 +198,8 @@ function LibraryTab({
   modelsQ: ReturnType<typeof useModels>
   mut: ReturnType<typeof useModelMutations>
   actions: ReturnType<typeof useModelActions>
+  loadBusy: boolean
+  loadingKey: string | undefined
   dirs: string[]
   primaryDir: string
   scanning: boolean
@@ -233,7 +254,8 @@ function LibraryTab({
                 onEject={() => actions.eject.mutate()}
                 onTune={() => setOpenKey(g.variants[0].key)}
                 onDelete={() => setConfirmDelete(g.variants[0])}
-                loading={actions.load.isPending}
+                busy={loadBusy}
+                loadingThis={loadingKey === g.variants[0].key}
                 ejecting={actions.eject.isPending}
               />
             ) : (
@@ -244,7 +266,8 @@ function LibraryTab({
                 onEject={() => actions.eject.mutate()}
                 onTune={(key) => setOpenKey(key)}
                 onDelete={(m) => setConfirmDelete(m)}
-                loading={actions.load.isPending}
+                busy={loadBusy}
+                loadingKey={loadingKey}
                 ejecting={actions.eject.isPending}
               />
             ),
@@ -275,7 +298,8 @@ function ModelGroupRow({
   onEject,
   onTune,
   onDelete,
-  loading,
+  busy,
+  loadingKey,
   ejecting,
 }: {
   group: Group
@@ -283,7 +307,8 @@ function ModelGroupRow({
   onEject: () => void
   onTune: (key: string) => void
   onDelete: (m: ModelEntry) => void
-  loading: boolean
+  busy: boolean
+  loadingKey: string | undefined
   ejecting: boolean
 }) {
   const [open, setOpen] = useState(false)
@@ -323,7 +348,8 @@ function ModelGroupRow({
               onEject={onEject}
               onTune={() => onTune(m.key)}
               onDelete={() => onDelete(m)}
-              loading={loading}
+              busy={busy}
+              loadingThis={loadingKey === m.key}
               ejecting={ejecting}
             />
           ))}
@@ -340,7 +366,8 @@ function ModelRow({
   onEject,
   onTune,
   onDelete,
-  loading,
+  busy,
+  loadingThis,
   ejecting,
 }: {
   m: ModelEntry
@@ -349,7 +376,10 @@ function ModelRow({
   onEject: () => void
   onTune: () => void
   onDelete: () => void
-  loading: boolean
+  /** Any load/engine transition is in progress — disable the Load buttons. */
+  busy: boolean
+  /** This specific model is the one currently coming up — show the spinner here. */
+  loadingThis: boolean
   ejecting: boolean
 }) {
   const loadable = !m.incomplete && !m.parseError
@@ -386,9 +416,9 @@ function ModelRow({
       <Stat>{m.nativeCtx ? `${fmtCtx(m.nativeCtx)} ctx` : '—'}</Stat>
       <TpsStat m={m} />
       <div className="flex items-center gap-1">
-        <Button size="sm" onClick={onLoad} disabled={!loadable || loading} title={loadable ? '' : 'Model is incomplete or unreadable'}>
-          <Zap size={14} />
-          {m.loaded ? 'Reload' : 'Load'}
+        <Button size="sm" onClick={onLoad} disabled={!loadable || busy} title={loadable ? '' : 'Model is incomplete or unreadable'}>
+          {loadingThis ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />}
+          {loadingThis ? 'Loading…' : m.loaded ? 'Reload' : 'Load'}
         </Button>
         {m.loaded && (
           <Button size="sm" variant="outline" onClick={onEject} disabled={ejecting} title="Eject model (stop the engine)">

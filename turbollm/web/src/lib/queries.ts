@@ -89,7 +89,10 @@ export function useStatus(): UseQueryResult<Status> {
   return useQuery({
     queryKey: queryKeys.status,
     queryFn: getStatus,
-    refetchInterval: (q) => (q.state.data?.bench.running ? 1000 : 2000),
+    // Poll faster (1s) while an auto-tune sweep runs OR a completion is actively
+    // streaming, so the inline progress and the live "Generating…" indicator stay live.
+    refetchInterval: (q) =>
+      q.state.data?.bench.running || (q.state.data?.engineStats?.activeRequests ?? 0) > 0 ? 1000 : 2000,
     refetchIntervalInBackground: false,
     // Keep the prior value visible while a poll is in flight to avoid flicker.
     placeholderData: (prev) => prev,

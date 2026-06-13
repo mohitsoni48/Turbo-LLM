@@ -47,6 +47,16 @@ export interface CompletionRecord {
   genTps?: number
 }
 
+/** Live per-request progress for the engine card (spec 11). `phase` is the current
+ *  stage of the most-recent in-flight completion; cleared once nothing is generating. */
+export interface LiveGen {
+  phase: 'prompt' | 'gen'
+  /** Prompt-processing percent (0–100) while `phase === 'prompt'`; 0 in gen phase. */
+  pct: number
+  /** Output tokens produced so far in the gen phase (live, approximate). */
+  outputTokens: number
+}
+
 /** Live summary of the current running session (B4). Resets on start/stop. */
 export interface SessionStats {
   requests: number
@@ -55,6 +65,9 @@ export interface SessionStats {
   avgPromptTps: number
   avgGenTps: number
   sinceMs: number
+  /** Number of completions currently streaming through the engine right now. >0
+   *  drives the "Generating…" live indicator in the engine card. */
+  activeRequests: number
 }
 
 interface SessionAccumulator {
@@ -106,6 +119,7 @@ export class Manager {
   private exited: Promise<void> = Promise.resolve()
   private resolveExited: (() => void) | null = null
   private generation = 0
+  private liveGen: LiveGen | null = null
   private session: SessionAccumulator = freshSession()
 
   constructor(private store: ConfigStore) {
@@ -233,6 +247,7 @@ export class Manager {
       avgPromptTps: s.promptTpsCount > 0 ? s.sumPromptTps / s.promptTpsCount : 0,
       avgGenTps: s.genTpsCount > 0 ? s.sumGenTps / s.genTpsCount : 0,
       sinceMs: Date.now() - s.startedAt,
+      activeRequests: this.generation,
     }
   }
   logPath(): string {
@@ -243,6 +258,18 @@ export class Manager {
   }
   generationEnd(): void {
     this.generation = Math.max(0, this.generation - 1)
+    if (this.generation === 0) this.liveGen = null
+  }
+
+  /** Publish live progress for the in-flight completion (cheap; called per chunk).
+   *  Last-writer-wins — a single slot is enough for the single-model engine card. */
+  setLiveGen(g: LiveGen): void {
+    this.liveGen = g
+  }
+
+  /** Live progress for the engine card, or null when nothing is generating. */
+  liveGeneration(): LiveGen | null {
+    return this.generation > 0 ? this.liveGen : null
   }
 
   async shutdown(): Promise<void> {

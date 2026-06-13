@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ChevronLeft, ChevronRight, MessageSquarePlus, Search, Trash2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, MessageSquarePlus, Pencil, Search, Trash2 } from 'lucide-react'
 import type { Conversation } from '../../lib/chat-types'
 import { useConversationMutations, useConversations } from '../../lib/chat-queries'
 import { Button } from '../../components/ui/button'
@@ -123,7 +123,10 @@ function ConvItem({
     setEditing(false)
     const title = draft.trim()
     if (!title || title === conv.title) { setDraft(conv.title); return }
-    mut.update.mutate({ id: conv.id, title })
+    mut.update.mutate(
+      { id: conv.id, title },
+      { onError: () => { setDraft(conv.title); toast.error('Could not rename conversation.') } },
+    )
   }
 
   return (
@@ -152,14 +155,26 @@ function ConvItem({
         </span>
       )}
       <span className="text-[11px] text-faint">{relTime(conv.updatedAt)}</span>
-      <button
-        type="button"
-        onClick={(e) => onDelete(e, conv)}
-        className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-faint opacity-0 transition-opacity hover:text-err group-hover:opacity-100"
-        title="Delete conversation"
-      >
-        <Trash2 size={13} />
-      </button>
+      {!editing && (
+        <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); setDraft(conv.title); setEditing(true) }}
+            className="rounded p-1 text-faint transition-colors hover:text-ink"
+            title="Rename conversation"
+          >
+            <Pencil size={13} />
+          </button>
+          <button
+            type="button"
+            onClick={(e) => onDelete(e, conv)}
+            className="rounded p-1 text-faint transition-colors hover:text-err"
+            title="Delete conversation"
+          >
+            <Trash2 size={13} />
+          </button>
+        </div>
+      )}
     </div>
   )
 }

@@ -58,11 +58,14 @@ export function registerApi(app: Hono, d: Deps): void {
       : null
     // Live running-session stats (B4): only meaningful while the engine runs.
     const engineStats = ms.state === 'running' ? d.manager.sessionStats() : null
+    // Live per-request progress for the engine card (prefill % / live token count).
+    const liveGeneration = ms.state === 'running' ? d.manager.liveGeneration() : null
     return c.json({
       version: d.version,
       engine,
       model,
       engineStats,
+      liveGeneration,
       // Auto-tune runner state (spec 09 §1): real progress while a sweep runs, then
       // a lingering done/error snapshot the detail dialog reads to show the result.
       bench: d.bench.status(),

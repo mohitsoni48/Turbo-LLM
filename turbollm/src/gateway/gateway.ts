@@ -38,13 +38,28 @@ export function registerGateway(app: Hono, d: Deps): void {
     const modelName = status.state === 'running' ? (status.model?.name ?? req.model ?? 'local') : (req.model ?? 'local')
     const oaiBody = mapToOpenAI(req)
 
-    const res = await fetch(`${target}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(oaiBody),
-    })
+    // Mark the completion in-flight so the engine card's live "Generating…"
+    // indicator counts Claude-CLI (Anthropic-protocol) traffic too. Each branch
+    // below pairs this with generationEnd so the counter can never leak.
+    d.manager.generationStart()
+
+    let res: Response
+    try {
+      res = await fetch(`${target}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(oaiBody),
+      })
+    } catch (e) {
+      d.manager.generationEnd()
+      return c.json(
+        { type: 'error', error: { type: 'api_error', message: (e as Error).message || 'Engine error.' } },
+        500,
+      )
+    }
 
     if (!res.ok || !res.body) {
+      d.manager.generationEnd()
       const text = await res.text().catch(() => '')
       return c.json(
         { type: 'error', error: { type: 'api_error', message: text || 'Engine error.' } },
@@ -66,15 +81,23 @@ export function registerGateway(app: Hono, d: Deps): void {
       // Raw ReadableStream does not — chunks buffer until the response completes,
       // which makes Claude CLI (and any Anthropic-protocol client) appear "slow".
       return streamSSE(c, async (stream) => {
-        for await (const evt of gen) {
-          await stream.writeSSE({ event: evt.event, data: evt.data })
+        try {
+          for await (const evt of gen) {
+            await stream.writeSSE({ event: evt.event, data: evt.data })
+          }
+        } finally {
+          d.manager.generationEnd()
         }
       })
     }
 
-    const oaiRes = (await res.json()) as Record<string, unknown>
-    recordOpenAiUsage(d, oaiRes) // session stats (B4), fail-safe
-    return c.json(mapFromOpenAI(oaiRes, modelName))
+    try {
+      const oaiRes = (await res.json()) as Record<string, unknown>
+      recordOpenAiUsage(d, oaiRes) // session stats (B4), fail-safe
+      return c.json(mapFromOpenAI(oaiRes, modelName))
+    } finally {
+      d.manager.generationEnd()
+    }
   })
 
   // ── POST /v1/messages/count_tokens (spec 06 §2) ───────────────────────────

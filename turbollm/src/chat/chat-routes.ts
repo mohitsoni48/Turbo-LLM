@@ -288,7 +288,12 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
       } = {}
       let finalTimings: Record<string, number> = {}
       let aborted = false
+      let liveOut = 0 // approximate output-token count for the live engine-card row
 
+      // Mark this completion as in-flight so the engine card's live "Generating…"
+      // indicator (and the idle watchdog) can see it. Paired with generationEnd in
+      // the finally below so a thrown/aborted stream can never leak the counter.
+      d.manager.generationStart()
       try {
         const res = await fetch(`${target}/v1/chat/completions`, {
           method: 'POST',
@@ -326,6 +331,7 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
             const pp = chunk.prompt_progress as { processed?: number; total?: number; tps?: number } | undefined
             if (pp && pp.total) {
               const pct = Math.round((pp.processed ?? 0) / pp.total * 100)
+              d.manager.setLiveGen({ phase: 'prompt', pct, outputTokens: 0 })
               await stream.writeSSE({ event: 'progress', data: JSON.stringify({ phase: 'prompt', processed: pp.processed, total: pp.total, pct, tps: pp.tps ?? 0 }) })
               continue
             }
@@ -420,6 +426,8 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
                 if (!ttftMs) ttftMs = Date.now() - requestStart
                 firstDelta = true
                 fullContent += toProcess
+                // Each llama-server content chunk is ~one token — a good-enough live count.
+                d.manager.setLiveGen({ phase: 'gen', pct: 0, outputTokens: ++liveOut })
                 await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: toProcess }) })
                 toProcess = ''
               }
@@ -443,6 +451,7 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
           await stream.writeSSE({ event: 'error', data: JSON.stringify({ code: 'engine_stopped', message: (e as Error).message }) })
         }
       } finally {
+        d.manager.generationEnd()
         inflight.delete(convId)
       }
 

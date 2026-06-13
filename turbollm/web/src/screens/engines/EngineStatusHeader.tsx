@@ -1,5 +1,5 @@
 import { CircleSlash, Copy, RotateCw } from 'lucide-react'
-import type { EngineStats, Status } from '../../lib/types'
+import type { EngineStats, LiveGeneration, Status } from '../../lib/types'
 import { useEngineMutations, useModelActions } from '../../lib/queries'
 import { ApiError } from '../../lib/api'
 import { Button } from '../../components/ui/button'
@@ -20,6 +20,7 @@ export function EngineStatusHeader({
   const error = status?.engine.error
   const elapsedMs = status?.model?.loadElapsedMs
   const stats = state === 'running' ? status?.engineStats ?? null : null
+  const live = state === 'running' ? status?.liveGeneration ?? null : null
   const actions = useModelActions()
   const mut = useEngineMutations()
   const canStop = state === 'running' || state === 'starting'
@@ -63,6 +64,19 @@ export function EngineStatusHeader({
         {state === 'running' && status?.model && (
           <span className="text-[13px] text-muted truncate">{status.model.name}</span>
         )}
+        {/* Compact activity pill for engine traffic without a detailed live row
+            (e.g. Claude-CLI / gateway requests). In-app chat shows the richer
+            prefill %/token row below instead, so this stays out of its way. */}
+        {state === 'running' && !live && (stats?.activeRequests ?? 0) > 0 && (
+          <span
+            className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[12px] font-medium"
+            style={{ background: 'color-mix(in srgb, var(--accent) 12%, transparent)', color: 'var(--accent)' }}
+            title="The engine is actively generating"
+          >
+            <span className="tllm-pulse inline-block h-1.5 w-1.5 rounded-full" style={{ background: 'var(--accent)' }} />
+            Generating{(stats?.activeRequests ?? 0) > 1 ? ` (${stats?.activeRequests})` : ''}…
+          </span>
+        )}
         {canRestart && (
           <Button
             size="sm"
@@ -91,6 +105,8 @@ export function EngineStatusHeader({
         )}
       </div>
 
+      {live && <LiveGenRow live={live} />}
+
       {stats && <SessionStatsRow stats={stats} />}
 
       {state === 'error' && error && (
@@ -112,6 +128,34 @@ export function EngineStatusHeader({
           </pre>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Live per-request progress (spec 11) ───────────────────────────────────────
+
+/** Slim live row shown while a completion streams through the engine: a prefill
+ *  progress bar during prompt processing, then a pulsing live token count during
+ *  generation. Driven by the `/status` poll (1s while a request is in flight). */
+function LiveGenRow({ live }: { live: LiveGeneration }) {
+  if (live.phase === 'prompt') {
+    return (
+      <div className="mt-3 flex items-center gap-2 text-[12px] text-muted">
+        <span className="shrink-0">Processing prompt</span>
+        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-panel-2">
+          <div
+            className="h-full rounded-full transition-[width] duration-300"
+            style={{ width: `${Math.max(0, Math.min(100, live.pct))}%`, background: 'var(--accent)' }}
+          />
+        </div>
+        <span className="shrink-0 tabular-nums">{live.pct}%</span>
+      </div>
+    )
+  }
+  return (
+    <div className="mt-3 flex items-center gap-2 text-[12px] text-muted">
+      <span className="tllm-pulse inline-block h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: 'var(--accent)' }} />
+      <span className="tabular-nums">{live.outputTokens.toLocaleString()} tok generated</span>
     </div>
   )
 }

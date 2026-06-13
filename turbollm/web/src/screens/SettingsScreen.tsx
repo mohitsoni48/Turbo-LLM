@@ -21,6 +21,69 @@ import { toast } from '../components/ui/sonner'
  *  (ADR-038). Default ON when unset. */
 const SHOW_THINKING_KEY = 'tllm.showThinking.default'
 
+/** A controlled numeric input that doesn't fight the user mid-edit. A raw
+ *  `value={number}` with `Number(e.target.value) || min` snaps an emptied field
+ *  straight back to a number, so you can't clear it to retype and every partial
+ *  value gets clamped on each keystroke. This keeps a local text draft: the field
+ *  may be empty or intermediate while focused, commits finite values up unclamped,
+ *  and only clamps to [min,max] on blur / Enter. */
+function NumberField({
+  value,
+  min,
+  max,
+  step,
+  onCommit,
+  className,
+  ariaLabel,
+}: {
+  value: number
+  min?: number
+  max?: number
+  step?: number
+  onCommit: (n: number) => void
+  className?: string
+  ariaLabel?: string
+}) {
+  const [draft, setDraft] = useState(String(value))
+  // Re-sync when the upstream value changes (settings load, programmatic update).
+  useEffect(() => { setDraft(String(value)) }, [value])
+
+  const clamp = (n: number) => {
+    let v = n
+    if (min != null) v = Math.max(min, v)
+    if (max != null) v = Math.min(max, v)
+    return v
+  }
+
+  return (
+    <input
+      type="number"
+      inputMode="numeric"
+      aria-label={ariaLabel}
+      min={min}
+      max={max}
+      step={step}
+      value={draft}
+      onChange={(e) => {
+        const raw = e.target.value
+        setDraft(raw) // allow empty / partial input without snapping back
+        if (raw.trim() === '') return
+        const n = Number(raw)
+        if (Number.isFinite(n)) onCommit(n) // commit unclamped so typing isn't fought
+      }}
+      onBlur={() => {
+        const n = Number(draft)
+        const next = draft.trim() === '' || !Number.isFinite(n) ? value : clamp(n)
+        setDraft(String(next))
+        onCommit(next)
+      }}
+      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+      className={className}
+    />
+  )
+}
+
+const clampN = (n: number, min: number, max: number) => Math.max(min, Math.min(max, Math.round(n)))
 
 export function SettingsScreen() {
   const { theme, setTheme } = useUiStore()
@@ -66,15 +129,21 @@ export function SettingsScreen() {
   }, [showThinking])
 
   const settingsPayload = () => ({
-    idleTtlMinutes: ttl,
-    port,
+    // Clamp defensively: NumberField commits unclamped while editing and only
+    // snaps to range on blur, so guard the final ranges here too (spec 08 §2).
+    idleTtlMinutes: clampN(ttl, 0, 1440),
+    port: clampN(port, 1024, 65535),
     autoGenerateTitles: autoTitle,
     openBrowserOnStart: openBrowser,
     autoLoadOnStart: autoLoad,
     telemetryLevel: telemetry,
     lanBind,
     requireApiKey,
-    modelDefaults: { ctx: defCtx, ngl: defNgl, imageMaxTokens: defImageMax },
+    modelDefaults: {
+      ctx: Math.max(256, Math.round(defCtx)),
+      ngl: clampN(defNgl, 0, 99),
+      imageMaxTokens: Math.max(0, Math.round(defImageMax)),
+    },
   })
 
   const handleSave = () => {
@@ -176,12 +245,12 @@ export function SettingsScreen() {
               <div className="text-[12px] text-muted">Unload model after this many minutes of inactivity (0 = never)</div>
             </div>
             <div className="flex items-center gap-2">
-              <input
-                type="number"
+              <NumberField
+                value={ttl}
                 min={0}
                 max={1440}
-                value={ttl}
-                onChange={(e) => setTtl(Math.max(0, Math.min(1440, Number(e.target.value) || 0)))}
+                onCommit={setTtl}
+                ariaLabel="Idle timeout in minutes"
                 className="w-20 rounded-md border border-border bg-bg px-2 py-1 text-right text-[13px] text-ink outline-none"
               />
               <span className="text-[12px] text-muted">min</span>
@@ -203,12 +272,12 @@ export function SettingsScreen() {
               <div className="text-[12px] text-muted">Default context window, capped at each model's native max</div>
             </div>
             <div className="flex items-center gap-2">
-              <input
-                type="number"
+              <NumberField
+                value={defCtx}
                 min={256}
                 step={512}
-                value={defCtx}
-                onChange={(e) => setDefCtx(Math.max(256, Number(e.target.value) || 256))}
+                onCommit={setDefCtx}
+                ariaLabel="Default context length"
                 className="w-24 rounded-md border border-border bg-bg px-2 py-1 text-right text-[13px] text-ink outline-none"
               />
               <span className="text-[12px] text-muted">tok</span>
@@ -221,12 +290,12 @@ export function SettingsScreen() {
               <div className="text-[12px] text-muted">Layers to offload to the GPU (99 = all); ignored on CPU-only machines</div>
             </div>
             <div className="flex items-center gap-2">
-              <input
-                type="number"
+              <NumberField
+                value={defNgl}
                 min={0}
                 max={99}
-                value={defNgl}
-                onChange={(e) => setDefNgl(Math.max(0, Math.min(99, Number(e.target.value) || 0)))}
+                onCommit={setDefNgl}
+                ariaLabel="Default GPU layers"
                 className="w-20 rounded-md border border-border bg-bg px-2 py-1 text-right text-[13px] text-ink outline-none"
               />
             </div>
@@ -238,12 +307,12 @@ export function SettingsScreen() {
               <div className="text-[12px] text-muted">Per-image token budget for vision models (0 = engine default)</div>
             </div>
             <div className="flex items-center gap-2">
-              <input
-                type="number"
+              <NumberField
+                value={defImageMax}
                 min={0}
                 step={256}
-                value={defImageMax}
-                onChange={(e) => setDefImageMax(Math.max(0, Number(e.target.value) || 0))}
+                onCommit={setDefImageMax}
+                ariaLabel="Image max tokens"
                 className="w-24 rounded-md border border-border bg-bg px-2 py-1 text-right text-[13px] text-ink outline-none"
               />
               <span className="text-[12px] text-muted">tok</span>
@@ -421,12 +490,12 @@ function NetworkSection({
           <div className="text-[14px] font-medium text-ink">Port</div>
           <div className="text-[12px] text-muted">Port the daemon listens on (1024–65535)</div>
         </div>
-        <input
-          type="number"
+        <NumberField
+          value={port}
           min={1024}
           max={65535}
-          value={port}
-          onChange={(e) => setPort(Math.max(1024, Math.min(65535, Number(e.target.value) || 1024)))}
+          onCommit={setPort}
+          ariaLabel="Daemon port"
           className="w-24 rounded-md border border-border bg-bg px-2 py-1 text-right text-[13px] text-ink outline-none"
         />
       </div>

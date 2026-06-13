@@ -55,6 +55,9 @@ export type EngineStats = {
   avgPromptTps: number
   avgGenTps: number
   sinceMs: number
+  /** Completions streaming through the engine right now; >0 shows a live
+   *  "Generating…" indicator in the engine card. */
+  activeRequests: number
 }
 
 /** One candidate the auto-tune sweep evaluated (spec 09 §1). `outcome` is 'ok' on a
@@ -80,11 +83,22 @@ export type BenchState = {
   error?: string
 }
 
+/** Live per-request progress for the engine card (spec 11), from GET /api/v1/status.
+ *  Null unless a completion is actively streaming through the engine. */
+export type LiveGeneration = {
+  phase: 'prompt' | 'gen'
+  /** Prompt-processing percent (0–100) during the prefill phase; 0 in gen phase. */
+  pct: number
+  /** Output tokens produced so far (live, approximate) during the gen phase. */
+  outputTokens: number
+}
+
 export type Status = {
   version: string
   engine: EngineRuntime
   model: LoadedModel | null
   engineStats?: EngineStats | null
+  liveGeneration?: LiveGeneration | null
   bench: BenchState
   downloads: { active: number }
   engineProvision?: EngineProvision
