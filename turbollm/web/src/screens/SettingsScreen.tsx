@@ -62,26 +62,32 @@ export function SettingsScreen() {
     localStorage.setItem(SHOW_THINKING_KEY, showThinking ? 'true' : 'false')
   }, [showThinking])
 
+  const settingsPayload = () => ({
+    idleTtlMinutes: ttl,
+    port,
+    autoGenerateTitles: autoTitle,
+    openBrowserOnStart: openBrowser,
+    autoLoadOnStart: autoLoad,
+    telemetryLevel: telemetry,
+    lanBind,
+    modelDefaults: { ctx: defCtx, ngl: defNgl, imageMaxTokens: defImageMax },
+  })
+
   const handleSave = () => {
-    save.mutate(
-      {
-        idleTtlMinutes: ttl,
-        port,
-        autoGenerateTitles: autoTitle,
-        openBrowserOnStart: openBrowser,
-        autoLoadOnStart: autoLoad,
-        telemetryLevel: telemetry,
-        lanBind,
-        modelDefaults: { ctx: defCtx, ngl: defNgl, imageMaxTokens: defImageMax },
-      },
-      {
-        onSuccess: () => toast.success('Settings saved'),
-        onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not save settings.'),
-      },
-    )
+    save.mutate(settingsPayload(), {
+      onSuccess: () => toast.success('Settings saved'),
+      onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not save settings.'),
+    })
   }
 
-  const requestRestart = () => setRestartOverlay(true)
+  // Restart must persist pending changes FIRST — otherwise a port/LAN toggle the user
+  // just flipped is lost and the re-exec'd daemon comes back on the old config.
+  const requestRestart = () => {
+    save.mutate(settingsPayload(), {
+      onSuccess: () => setRestartOverlay(true),
+      onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not save settings before restart.'),
+    })
+  }
 
   return (
     <div className="mx-auto max-w-2xl px-6 py-6">

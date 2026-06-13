@@ -157,29 +157,51 @@ function openBrowser(url: string): void {
 // ── Start server ──────────────────────────────────────────────────────────────
 const noOpen = hasFlag('--no-open')
 
-const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
-  const displayHost = host === '0.0.0.0' ? '0.0.0.0 (LAN)' : host
-  const uiUrl = `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${info.port}`
+// Bind with retry. On a self-restart the OLD listener may not have released the port
+// the instant the replacement starts (Windows lingers the socket, and a 127.0.0.1 →
+// 0.0.0.0 LAN switch is a conflicting bind), so retry EADDRINUSE for ~10s instead of
+// crashing — otherwise a restart leaves the user with NO daemon. `server` is mutable
+// so the restart handler below always closes the live instance.
+let server: ReturnType<typeof serve>
+function listen(attempt = 0): void {
+  const s = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
+    const displayHost = host === '0.0.0.0' ? '0.0.0.0 (LAN)' : host
+    const uiUrl = `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${info.port}`
 
-  console.log(``)
-  console.log(`  TurboLLM ${version} is ready!`)
-  console.log(``)
-  console.log(`  Local:   ${uiUrl}`)
-  if (host === '0.0.0.0') {
-    console.log(`  Network: http://<your-ip>:${info.port}  (LAN)`)
-  }
-  console.log(``)
-  console.log(`  API:     ${uiUrl}/api/v1/status`)
-  console.log(`  Stop:    Ctrl+C`)
-  console.log(``)
+    console.log(``)
+    console.log(`  TurboLLM ${version} is ready!`)
+    console.log(``)
+    console.log(`  Local:   ${uiUrl}`)
+    if (host === '0.0.0.0') {
+      console.log(`  Network: http://<your-ip>:${info.port}  (LAN)`)
+    }
+    console.log(``)
+    console.log(`  API:     ${uiUrl}/api/v1/status`)
+    console.log(`  Stop:    Ctrl+C`)
+    console.log(``)
 
-  if (!noOpen) {
-    openBrowser(uiUrl)
-  }
+    if (!noOpen) {
+      openBrowser(uiUrl)
+    }
 
-  // Keep the legacy one-liner for log parsers that key on it.
-  process.stdout.write(`TurboLLM ${version} listening on http://${displayHost}:${info.port}\n`)
-})
+    // Keep the legacy one-liner for log parsers that key on it.
+    process.stdout.write(`TurboLLM ${version} listening on http://${displayHost}:${info.port}\n`)
+  })
+  ;(s as unknown as { on?: (ev: 'error', cb: (e: NodeJS.ErrnoException) => void) => void }).on?.(
+    'error',
+    (e) => {
+      if (e?.code === 'EADDRINUSE' && attempt < 20) {
+        if (attempt === 0) console.log(`  Port ${port} busy (previous instance releasing) — retrying…`)
+        setTimeout(() => listen(attempt + 1), 500)
+      } else {
+        console.error(`Could not bind ${host}:${port}: ${e?.message ?? e}`)
+        process.exit(1)
+      }
+    },
+  )
+  server = s
+}
+listen()
 
 // ── Self-restart (spec 08 §2) ──────────────────────────────────────────────────
 // POST /api/v1/daemon/restart re-execs the daemon so port / LAN-bind changes take
@@ -195,11 +217,15 @@ const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
 let restarting = false
 function spawnReplacement(): void {
   // Re-exec with the SAME interpreter + argv (minus argv[0]=node) and cwd, detached
-  // so it outlives this dying parent. `unref()` lets the parent exit immediately.
+  // so it outlives this dying parent. `stdio:'ignore'` (NOT 'inherit') is essential:
+  // the parent is exiting, so inheriting its stdio handles would break the child's
+  // streams the moment we exit (and fails outright when the parent was itself launched
+  // detached). `unref()` lets the parent exit immediately. The replacement retries the
+  // port bind, so it survives the brief window where this process still holds it.
   const child = spawn(process.execPath, process.argv.slice(1), {
     cwd: process.cwd(),
     detached: true,
-    stdio: 'inherit',
+    stdio: 'ignore',
   })
   child.unref()
 }
