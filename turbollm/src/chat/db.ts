@@ -42,12 +42,13 @@ export interface Message {
   content: string
   reasoning: string
   attachments: string[]
+  textAttachments: string[]
   stats: Partial<MessageStats>
   createdAt: string
 }
 
 interface ConvRow { id: string; title: string; system_prompt: string; model_key: string; sampling: string; expert_mode: number; created_at: string; updated_at: string }
-interface MsgRow  { id: string; conv_id: string; seq: number; role: 'user' | 'assistant'; content: string; reasoning: string; attachments: string; stats: string; model_key: string | null; created_at: string }
+interface MsgRow  { id: string; conv_id: string; seq: number; role: 'user' | 'assistant'; content: string; reasoning: string; attachments: string; text_attachments: string | null; stats: string; model_key: string | null; created_at: string }
 
 // node:sqlite named-param objects need an explicit cast to Record<string, SQLInputValue>
 type P = Record<string, SQLInputValue>
@@ -59,7 +60,7 @@ function rowToConv(r: ConvRow): Conversation {
 }
 
 function rowToMsg(r: MsgRow): Message {
-  return { id: r.id, convId: r.conv_id, seq: r.seq, role: r.role, content: r.content, reasoning: r.reasoning, attachments: safeJson(r.attachments) as string[], stats: safeJson(r.stats) as Partial<MessageStats>, createdAt: r.created_at }
+  return { id: r.id, convId: r.conv_id, seq: r.seq, role: r.role, content: r.content, reasoning: r.reasoning, attachments: safeJson(r.attachments) as string[], textAttachments: r.text_attachments ? safeJson(r.text_attachments) as string[] : [], stats: safeJson(r.stats) as Partial<MessageStats>, createdAt: r.created_at }
 }
 
 interface Changes { changes: number }
@@ -109,6 +110,15 @@ export class ConversationStore {
       this.db.exec(`
         ALTER TABLE conversations ADD COLUMN expert_mode INTEGER NOT NULL DEFAULT 0;
         PRAGMA user_version = 3;
+      `)
+    }
+    // v4 (spec 07 §9b): store text-file attachment filenames on user messages so the
+    // UI can render file chips in the sent bubble. Nullable — existing rows get NULL
+    // and are decoded as [] in rowToMsg (non-breaking).
+    if (v < 4) {
+      this.db.exec(`
+        ALTER TABLE messages ADD COLUMN text_attachments TEXT;
+        PRAGMA user_version = 4;
       `)
     }
   }
@@ -164,15 +174,16 @@ export class ConversationStore {
     return (this.db.prepare(`SELECT * FROM messages WHERE conv_id = $id ORDER BY seq ASC`).all({ $id: convId } as P) as unknown as MsgRow[]).map(rowToMsg)
   }
 
-  addMessage(convId: string, role: 'user' | 'assistant', content: string, extra?: Partial<Pick<Message, 'reasoning' | 'attachments' | 'stats'>>): Message {
+  addMessage(convId: string, role: 'user' | 'assistant', content: string, extra?: Partial<Pick<Message, 'reasoning' | 'attachments' | 'textAttachments' | 'stats'>>): Message {
     const id = randomUUID()
     const now = new Date().toISOString()
     const row = this.db.prepare(`SELECT COALESCE(MAX(seq),0) AS ms FROM messages WHERE conv_id = $id`).get({ $id: convId } as P) as unknown as { ms: number }
     // Attribute assistant replies to the conversation's model so the Models screen
     // can surface last-session gen t/s (spec 04 §5). User turns are left NULL.
     const modelKey = role === 'assistant' ? this.conversationModelKey(convId) : null
-    this.db.prepare(`INSERT INTO messages (id,conv_id,seq,role,content,reasoning,attachments,stats,model_key,created_at) VALUES ($id,$cid,$seq,$role,$content,$reasoning,$attachments,$stats,$mk,$now)`)
-      .run({ $id: id, $cid: convId, $seq: row.ms + 1, $role: role, $content: content, $reasoning: extra?.reasoning ?? '', $attachments: JSON.stringify(extra?.attachments ?? []), $stats: JSON.stringify(extra?.stats ?? {}), $mk: modelKey, $now: now } as P)
+    const textAttachments = extra?.textAttachments?.length ? JSON.stringify(extra.textAttachments) : null
+    this.db.prepare(`INSERT INTO messages (id,conv_id,seq,role,content,reasoning,attachments,text_attachments,stats,model_key,created_at) VALUES ($id,$cid,$seq,$role,$content,$reasoning,$attachments,$ta,$stats,$mk,$now)`)
+      .run({ $id: id, $cid: convId, $seq: row.ms + 1, $role: role, $content: content, $reasoning: extra?.reasoning ?? '', $attachments: JSON.stringify(extra?.attachments ?? []), $ta: textAttachments, $stats: JSON.stringify(extra?.stats ?? {}), $mk: modelKey, $now: now } as P)
     this.touchConversation(convId)
     return this.getMessage(id)!
   }

@@ -19,15 +19,28 @@ const DOT_COLOR: Record<EngineState, string> = {
   error: 'var(--err)',
 }
 
-/** Pill chip with a colored dot + label reflecting the engine state. */
+/** Pill chip with a colored dot + label reflecting the engine state. With
+ *  `dotOnly`, renders just the colored dot (collapsed nav rail) — the label is
+ *  still exposed via `aria-label` for screen readers. */
 export function StateChip({
   state,
   className,
+  dotOnly = false,
 }: {
   state: EngineState
   className?: string
+  dotOnly?: boolean
 }) {
   const pulse = state === 'starting'
+  if (dotOnly) {
+    return (
+      <span
+        className={cn('inline-flex h-2 w-2 rounded-full', pulse && 'tllm-pulse', className)}
+        style={{ background: DOT_COLOR[state] }}
+        aria-label={LABELS[state]}
+      />
+    )
+  }
   return (
     <span
       className={cn(

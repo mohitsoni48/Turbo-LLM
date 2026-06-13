@@ -23,6 +23,7 @@ export interface Message {
   content: string
   reasoning: string
   attachments: string[]
+  textAttachments: string[]
   stats: Partial<MessageStats>
   createdAt: string
 }

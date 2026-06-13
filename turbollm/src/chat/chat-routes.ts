@@ -95,7 +95,7 @@ export function registerChatRoutes(app: Hono, d: Deps): void {
 
   app.post('/api/v1/conversations/:id/messages', async (c) => {
     const convId = c.req.param('id')
-    const b = await body<{ content?: string; images?: string[]; docContext?: string }>(c)
+    const b = await body<{ content?: string; images?: string[]; docContext?: string; textAttachments?: string[] }>(c)
     const content = (b.content ?? '').trim()
     if (!content) return err(c, 400, 'invalid_input', 'content is required.')
 
@@ -110,10 +110,11 @@ export function registerChatRoutes(app: Hono, d: Deps): void {
     if (inflight.has(convId)) return err(c, 409, 'generation_in_flight', 'A generation is already running for this conversation.')
 
     const images = b.images ?? []
+    const textAttachments = b.textAttachments ?? []
 
     // Persist user message — only the typed text is stored as content; images are
     // kept in attachments (the full doc context is folded into the engine prompt below).
-    const userMsg = db.addMessage(convId, 'user', content, { attachments: images })
+    const userMsg = db.addMessage(convId, 'user', content, { attachments: images, textAttachments })
 
     // Create a placeholder assistant message
     db.addMessage(convId, 'assistant', '', { stats: { aborted: false } })

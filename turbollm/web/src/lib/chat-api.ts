@@ -65,11 +65,12 @@ export async function* sendMessage(
   signal: AbortSignal,
   images?: string[],
   docContext?: string,
+  textAttachments?: string[],
 ): AsyncGenerator<ChatSseEvent> {
   const res = await fetch(`/api/v1/conversations/${encodeURIComponent(convId)}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content, images: images?.length ? images : undefined, docContext: docContext || undefined }),
+    body: JSON.stringify({ content, images: images?.length ? images : undefined, docContext: docContext || undefined, textAttachments: textAttachments?.length ? textAttachments : undefined }),
     signal,
   })
   if (!res.ok || !res.body) {

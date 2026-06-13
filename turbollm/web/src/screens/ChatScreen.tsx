@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowDown, Paperclip, SendHorizontal, SlidersHorizontal, Square, X } from 'lucide-react'
+import { ArrowDown, Brain, Paperclip, SendHorizontal, SlidersHorizontal, Square, X } from 'lucide-react'
 import { continueConversation, sendMessage } from '../lib/chat-api'
 import { useConversation, useConversationMutations } from '../lib/chat-queries'
 import { useModelActions, useModels, useStatus } from '../lib/queries'
@@ -38,6 +38,22 @@ export function ChatScreen() {
   const [showScrollBtn, setShowScrollBtn] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [attachments, setAttachments] = useState<{ file: File; dataUrl: string }[]>([])
+
+  // Thinking toggle — per-conversation, persisted in localStorage (spec 07 §7).
+  // Reads per-conv key first; falls back to global default; defaults to ON.
+  const readShowThinking = (convId: string | null): boolean => {
+    if (convId) {
+      const perConv = localStorage.getItem(`tllm.showThinking.${convId}`)
+      if (perConv !== null) return perConv !== 'false'
+    }
+    const global = localStorage.getItem('tllm.showThinking.default')
+    return global !== 'false'
+  }
+  const [showThinking, setShowThinkingState] = useState<boolean>(() => readShowThinking(null))
+  const setShowThinking = (val: boolean) => {
+    if (activeId) localStorage.setItem(`tllm.showThinking.${activeId}`, String(val))
+    setShowThinkingState(val)
+  }
   const abortRef = useRef<AbortController | null>(null)
   const deltaTimestamps = useRef<number[]>([])
   const scrollerRef = useRef<HTMLDivElement>(null)
@@ -127,6 +143,12 @@ export function ChatScreen() {
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   })
+
+  // Sync thinking toggle when conversation changes.
+  useEffect(() => {
+    setShowThinkingState(readShowThinking(activeId))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId])
 
   const handleNew = () => {
     setActiveId(null)
@@ -239,7 +261,8 @@ export function ChatScreen() {
       const ac = new AbortController()
       abortRef.current = ac
 
-      await streamFrom(convId, sendMessage(convId, text, ac.signal, images, docContext))
+      const textAttachmentNames = textAttachments.map((a) => a.file.name)
+      await streamFrom(convId, sendMessage(convId, text, ac.signal, images, docContext, textAttachmentNames))
     } catch (e) {
       setLive(null)
       if ((e as Error)?.name !== 'AbortError') {
@@ -334,6 +357,16 @@ export function ChatScreen() {
             </Button>
           )}
           <ConversationSettingsDialog conv={conv} />
+          <Button
+            size="icon"
+            variant="ghost"
+            className="h-8 w-8"
+            onClick={() => setShowThinking(!showThinking)}
+            title={showThinking ? 'Hide thinking blocks' : 'Show thinking blocks'}
+            style={{ color: showThinking ? 'var(--accent)' : 'var(--faint)' }}
+          >
+            <Brain size={15} />
+          </Button>
           {engineState === 'starting' && <span className="text-[12px] text-muted">Loading model…</span>}
           {engineState === 'stopping' && <span className="text-[12px] text-muted">Ejecting…</span>}
         </div>
@@ -379,6 +412,7 @@ export function ChatScreen() {
                 editingId={editingId}
                 onEditSave={(content) => handleEditSave(m.id, content)}
                 onEditCancel={() => setEditingId(null)}
+                showThinking={showThinking}
               />
             ))}
 

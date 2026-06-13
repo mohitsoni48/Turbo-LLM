@@ -1,13 +1,25 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Moon, Sun, Monitor, Save, ExternalLink, ShieldAlert, Sparkles } from 'lucide-react'
+import { Moon, Sun, Monitor, Save, ExternalLink, ShieldAlert, Sparkles, RefreshCw, Check, X, Loader2 } from 'lucide-react'
 import { ScreenHeader } from '../components/common'
 import { Button } from '../components/ui/button'
 import { useUiStore, type Theme } from '../stores/ui'
-import { useNetworkInfo, useSettings, useStatus, useSysInfo, useTelemetryPreview } from '../lib/queries'
+import {
+  useDaemonRestart,
+  useHfTokenTest,
+  useNetworkInfo,
+  useSettings,
+  useStatus,
+  useSysInfo,
+  useTelemetryPreview,
+} from '../lib/queries'
 import { useConversationMutations } from '../lib/chat-queries'
 import { ApiError, type TelemetryLevel } from '../lib/api'
 import { toast } from '../components/ui/sonner'
+
+/** localStorage key for the client-only "show thinking by default" preference
+ *  (ADR-038). Default ON when unset. */
+const SHOW_THINKING_KEY = 'tllm.showThinking.default'
 
 export function SettingsScreen() {
   const { theme, setTheme } = useUiStore()
@@ -15,6 +27,7 @@ export function SettingsScreen() {
   const settings = settingsQ.data
 
   const [ttl, setTtl] = useState<number>(60)
+  const [port, setPort] = useState<number>(6996)
   const [autoTitle, setAutoTitle] = useState(true)
   const [openBrowser, setOpenBrowser] = useState(true)
   const [autoLoad, setAutoLoad] = useState(false)
@@ -23,10 +36,16 @@ export function SettingsScreen() {
   const [defImageMax, setDefImageMax] = useState<number>(0)
   const [telemetry, setTelemetry] = useState<TelemetryLevel>('off')
   const [lanBind, setLanBind] = useState(false)
+  // Client-only "show thinking by default" preference (ADR-038); default ON.
+  const [showThinking, setShowThinking] = useState(() => localStorage.getItem(SHOW_THINKING_KEY) !== 'false')
+
+  // Full-screen overlay while the daemon re-execs (spec 08 §2).
+  const [restartOverlay, setRestartOverlay] = useState(false)
 
   useEffect(() => {
     if (settings) {
       setTtl(settings.idleTtlMinutes)
+      setPort(settings.port ?? 6996)
       setAutoTitle(settings.autoGenerateTitles)
       setOpenBrowser(settings.openBrowserOnStart)
       setAutoLoad(settings.autoLoadOnStart ?? false)
@@ -38,10 +57,16 @@ export function SettingsScreen() {
     }
   }, [settings])
 
+  // Persist the thinking preference immediately (no Save round-trip; it's client-only).
+  useEffect(() => {
+    localStorage.setItem(SHOW_THINKING_KEY, showThinking ? 'true' : 'false')
+  }, [showThinking])
+
   const handleSave = () => {
     save.mutate(
       {
         idleTtlMinutes: ttl,
+        port,
         autoGenerateTitles: autoTitle,
         openBrowserOnStart: openBrowser,
         autoLoadOnStart: autoLoad,
@@ -56,9 +81,13 @@ export function SettingsScreen() {
     )
   }
 
+  const requestRestart = () => setRestartOverlay(true)
+
   return (
     <div className="mx-auto max-w-2xl px-6 py-6">
       <ScreenHeader title="Settings" description="Configure TurboLLM behavior and appearance." />
+
+      {restartOverlay && <RestartOverlay onDismiss={() => setRestartOverlay(false)} />}
 
       <div className="flex flex-col gap-6">
 
@@ -95,6 +124,20 @@ export function SettingsScreen() {
               ))}
             </div>
           </div>
+
+          {/* Show thinking by default (ADR-038): client-only, default ON. */}
+          <label className="mt-2 flex cursor-pointer items-center justify-between border-t border-border py-2 pt-3">
+            <div>
+              <div className="text-[14px] font-medium text-ink">Show thinking by default</div>
+              <div className="text-[12px] text-muted">Expand a model's reasoning in new chats (you can still toggle it per message)</div>
+            </div>
+            <input
+              type="checkbox"
+              checked={showThinking}
+              onChange={(e) => setShowThinking(e.target.checked)}
+              className="h-4 w-4 accent-[var(--accent)]"
+            />
+          </label>
         </section>
 
         {/* Engine */}
@@ -232,7 +275,10 @@ export function SettingsScreen() {
         </section>
 
         {/* Network (spec 08 §2) */}
-        <NetworkSection lanBind={lanBind} setLanBind={setLanBind} />
+        <NetworkSection lanBind={lanBind} setLanBind={setLanBind} port={port} setPort={setPort} onRestart={requestRestart} />
+
+        {/* Models — Hugging Face token (spec 10 §4) */}
+        <HfTokenSection tokenSet={settings?.hfTokenSet ?? false} onSaved={() => void settingsQ.refetch()} />
 
         {/* Privacy & telemetry (spec 09 §5) */}
         <PrivacySection level={telemetry} setLevel={setTelemetry} />
@@ -247,6 +293,9 @@ export function SettingsScreen() {
             {save.isPending ? 'Saving…' : 'Save settings'}
           </Button>
         </div>
+
+        {/* Advanced (spec 08 §2): daemon restart */}
+        <AdvancedSection onRestart={requestRestart} />
 
         {/* Help */}
         <HelpSection />
@@ -317,7 +366,19 @@ function ExpertSection() {
 
 // ── Network (spec 08 §2): LAN expose toggle ───────────────────────────────────
 
-function NetworkSection({ lanBind, setLanBind }: { lanBind: boolean; setLanBind: (v: boolean) => void }) {
+function NetworkSection({
+  lanBind,
+  setLanBind,
+  port,
+  setPort,
+  onRestart,
+}: {
+  lanBind: boolean
+  setLanBind: (v: boolean) => void
+  port: number
+  setPort: (v: number) => void
+  onRestart: () => void
+}) {
   // hasApiKey + the reachable LAN URL come from the daemon (server-derived IP/port).
   const { data: net } = useNetworkInfo()
   const lanUrl = net?.lanUrl ?? ''
@@ -326,6 +387,21 @@ function NetworkSection({ lanBind, setLanBind }: { lanBind: boolean; setLanBind:
   return (
     <section className="rounded-lg border border-border bg-panel p-4">
       <h2 className="mb-3 text-[13px] font-semibold uppercase tracking-wide text-faint">Network</h2>
+
+      <div className="flex items-center justify-between py-2">
+        <div>
+          <div className="text-[14px] font-medium text-ink">Port</div>
+          <div className="text-[12px] text-muted">Port the daemon listens on (1024–65535)</div>
+        </div>
+        <input
+          type="number"
+          min={1024}
+          max={65535}
+          value={port}
+          onChange={(e) => setPort(Math.max(1024, Math.min(65535, Number(e.target.value) || 1024)))}
+          className="w-24 rounded-md border border-border bg-bg px-2 py-1 text-right text-[13px] text-ink outline-none"
+        />
+      </div>
 
       <label className="flex cursor-pointer items-center justify-between py-2">
         <div>
@@ -340,14 +416,12 @@ function NetworkSection({ lanBind, setLanBind }: { lanBind: boolean; setLanBind:
         />
       </label>
 
-      {lanBind && (
+      {lanBind && lanUrl && (
         <div className="mt-2 flex flex-col gap-2 border-t border-border pt-3">
-          {lanUrl && (
-            <div className="text-[13px]">
-              <span className="text-muted">LAN URL: </span>
-              <span className="font-mono text-ink">{lanUrl}</span>
-            </div>
-          )}
+          <div className="text-[13px]">
+            <span className="text-muted">LAN URL: </span>
+            <span className="font-mono text-ink">{lanUrl}</span>
+          </div>
           <div
             className="flex items-start gap-2 rounded-md border p-2.5 text-[12px]"
             style={{
@@ -367,7 +441,122 @@ function NetworkSection({ lanBind, setLanBind }: { lanBind: boolean; setLanBind:
               )}
             </div>
           </div>
-          <div className="text-[12px] text-faint">Restart the daemon to apply this change.</div>
+        </div>
+      )}
+
+      {/* Port + LAN binding only take effect on a daemon restart (spec 08 §2). */}
+      <div className="mt-2 flex flex-col gap-2 border-t border-border pt-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="text-[12px] text-faint">
+          Changes to the port or LAN binding require a daemon restart to take effect.
+        </div>
+        <Button variant="outline" size="sm" onClick={onRestart}>
+          <RefreshCw size={13} />
+          Restart now
+        </Button>
+      </div>
+    </section>
+  )
+}
+
+// ── Models — Hugging Face token (spec 10 §4) ───────────────────────────────────
+
+function HfTokenSection({ tokenSet, onSaved }: { tokenSet: boolean; onSaved: () => void }) {
+  const { query: settingsQ, save } = useSettings()
+  const test = useHfTokenTest()
+  const [token, setToken] = useState('')
+  // Tri-state test result: null = untested, then the daemon's {ok, name}.
+  const [tested, setTested] = useState<{ ok: boolean; name?: string } | null>(null)
+
+  // Reset the test result whenever the field changes (the prior result is stale).
+  const onChange = (v: string) => {
+    setToken(v)
+    setTested(null)
+  }
+
+  const runTest = () => {
+    if (!token.trim()) return
+    test.mutate(token.trim(), {
+      onSuccess: (r) => setTested(r),
+      onError: () => setTested({ ok: false }),
+    })
+  }
+
+  const handleSaveToken = () => {
+    save.mutate(
+      { hfToken: token.trim() },
+      {
+        onSuccess: () => {
+          toast.success(token.trim() ? 'Hugging Face token saved' : 'Hugging Face token cleared')
+          setToken('')
+          setTested(null)
+          onSaved()
+        },
+        onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not save the token.'),
+      },
+    )
+  }
+
+  return (
+    <section className="rounded-lg border border-border bg-panel p-4">
+      <h2 className="mb-1 text-[13px] font-semibold uppercase tracking-wide text-faint">Models</h2>
+      <p className="mb-3 text-[12px] text-muted">
+        A Hugging Face access token lets you download gated models (e.g. Llama). Accept the
+        model's license on huggingface.co, then paste a read token here.{' '}
+        <a
+          href="https://huggingface.co/settings/tokens"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-ink underline-offset-2 hover:underline"
+        >
+          Create a token
+        </a>
+        .
+      </p>
+
+      <div className="flex items-center justify-between py-1">
+        <div className="text-[13px] text-muted">
+          {tokenSet ? (
+            <span className="inline-flex items-center gap-1.5 text-ink">
+              <Check size={13} style={{ color: 'var(--ok)' }} />A token is configured
+            </span>
+          ) : (
+            'No token configured'
+          )}
+        </div>
+      </div>
+
+      <div className="mt-1 flex flex-col gap-2 sm:flex-row sm:items-center">
+        <input
+          type="password"
+          value={token}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={tokenSet ? 'Enter a new token to replace the current one' : 'hf_…'}
+          autoComplete="off"
+          className="flex-1 rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-[13px] text-ink outline-none"
+        />
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={runTest} disabled={!token.trim() || test.isPending}>
+            {test.isPending ? <Loader2 size={13} className="animate-spin" /> : 'Test'}
+          </Button>
+          <Button size="sm" onClick={handleSaveToken} disabled={save.isPending || settingsQ.isFetching}>
+            {token.trim() ? 'Save token' : 'Clear token'}
+          </Button>
+        </div>
+      </div>
+
+      {tested && (
+        <div className="mt-2 text-[12px]">
+          {tested.ok ? (
+            <span className="inline-flex items-center gap-1.5" style={{ color: 'var(--ok)' }}>
+              <Check size={13} />
+              Valid{tested.name ? ` — signed in as ${tested.name}` : ''}
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5" style={{ color: 'var(--err)' }}>
+              <X size={13} />
+              Invalid or unauthorized token
+            </span>
+          )}
         </div>
       )}
     </section>
@@ -433,6 +622,122 @@ function PrivacySection({ level, setLevel }: { level: TelemetryLevel; setLevel: 
         )}
       </div>
     </section>
+  )
+}
+
+// ── Advanced (spec 08 §2): daemon restart ─────────────────────────────────────
+
+function AdvancedSection({ onRestart }: { onRestart: () => void }) {
+  return (
+    <section className="rounded-lg border border-border bg-panel p-4">
+      <h2 className="mb-1 text-[13px] font-semibold uppercase tracking-wide text-faint">Advanced</h2>
+      <p className="mb-3 text-[12px] text-muted">
+        Restart the daemon to apply a new port or LAN binding without killing the terminal.
+        Any loaded model is unloaded by a restart and must be reloaded afterward.
+      </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="text-[14px] font-medium text-ink">Restart daemon</div>
+          <div className="text-[12px] text-muted">Stops the engine, then re-launches the daemon process</div>
+        </div>
+        <Button variant="outline" size="sm" onClick={onRestart}>
+          <RefreshCw size={13} />
+          Restart daemon
+        </Button>
+      </div>
+    </section>
+  )
+}
+
+// ── Restart overlay (spec 08 §2): fires the restart, then polls /status until the
+// new daemon answers and reloads the page. Tolerates the down window (fetch throws
+// → keep polling). Uses a raw fetch (not the query cache) since the socket drops. ──
+
+function RestartOverlay({ onDismiss }: { onDismiss: () => void }) {
+  const restart = useDaemonRestart()
+  const [phase, setPhase] = useState<'restarting' | 'failed'>('restarting')
+  const started = useRef(false)
+
+  useEffect(() => {
+    if (started.current) return
+    started.current = true
+
+    let cancelled = false
+    let pollTimer: ReturnType<typeof setTimeout> | undefined
+    let giveUpTimer: ReturnType<typeof setTimeout> | undefined
+
+    const poll = async () => {
+      if (cancelled) return
+      try {
+        const res = await fetch('/api/v1/status', { headers: { Accept: 'application/json' } })
+        if (res.ok) {
+          // Daemon is back — full reload so the SPA reconnects on the (possibly new) port.
+          if (!cancelled) window.location.reload()
+          return
+        }
+      } catch {
+        // Daemon still down (socket refused) — expected mid-restart; keep polling.
+      }
+      if (!cancelled) pollTimer = setTimeout(poll, 700)
+    }
+
+    restart.mutate(undefined, {
+      onSuccess: () => {
+        // Give the old process a beat to release the socket, then poll for the new one.
+        pollTimer = setTimeout(poll, 700)
+        // If it hasn't come back in 20s, surface a manual fallback.
+        giveUpTimer = setTimeout(() => {
+          if (!cancelled) setPhase('failed')
+        }, 20_000)
+      },
+      onError: (e) => {
+        if (!cancelled) {
+          setPhase('failed')
+          toast.error(e instanceof ApiError ? e.message : 'Could not restart the daemon.')
+        }
+      },
+    })
+
+    return () => {
+      cancelled = true
+      if (pollTimer) clearTimeout(pollTimer)
+      if (giveUpTimer) clearTimeout(giveUpTimer)
+    }
+    // Intentionally run once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg/90 backdrop-blur-sm">
+      <div className="flex max-w-sm flex-col items-center gap-3 rounded-lg border border-border bg-panel p-6 text-center">
+        {phase === 'restarting' ? (
+          <>
+            <Loader2 size={28} className="animate-spin" style={{ color: 'var(--accent)' }} />
+            <div className="text-[15px] font-medium text-ink">Restarting daemon…</div>
+            <div className="text-[12px] text-muted">
+              Applying your changes. The page will reload automatically when the daemon is back.
+            </div>
+          </>
+        ) : (
+          <>
+            <ShieldAlert size={28} style={{ color: 'var(--warn)' }} />
+            <div className="text-[15px] font-medium text-ink">Daemon is taking a while</div>
+            <div className="text-[12px] text-muted">
+              It may have moved to a new port. Try reloading, or check the terminal where you
+              started TurboLLM.
+            </div>
+            <div className="mt-1 flex gap-2">
+              <Button variant="outline" size="sm" onClick={onDismiss}>
+                Dismiss
+              </Button>
+              <Button size="sm" onClick={() => window.location.reload()}>
+                Reload now
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
   )
 }
 

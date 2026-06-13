@@ -33,9 +33,8 @@ export function Shell({
 }) {
   return (
     <div className="flex h-full">
-      <NavRail online={online} version={version} className="hidden md:flex" />
+      <NavRail status={status} online={online} version={version} className="hidden md:flex" />
       <div className="flex min-w-0 flex-1 flex-col">
-        <TopBar status={status} />
         <EngineProvisionBanner status={status} />
         <main className="min-h-0 flex-1 overflow-auto">{children}</main>
         <MobileNav />
@@ -45,16 +44,20 @@ export function Shell({
 }
 
 function NavRail({
+  status,
   online,
   version,
   className,
 }: {
+  status: Status | undefined
   online: boolean
   version: string
   className?: string
 }) {
   const { pathname } = useLocation()
   const navigate = useNavigate()
+  const engineState = status?.engine.state ?? 'stopped'
+  const activeDownloads = status?.downloads.active ?? 0
 
   // Keyboard shortcuts: Ctrl+1–5 (or Cmd+1–5 on Mac) navigate to the
   // corresponding NAV item. Ignored when focus is in an editable element.
@@ -106,16 +109,19 @@ function NavRail({
       <ul className="flex flex-1 flex-col items-center gap-1 xl:w-full xl:items-stretch">
         {NAV.map(({ to, label, icon: Icon }) => {
           const isActive = pathname === to || pathname.startsWith(`${to}/`)
+          // Downloads indicator (ADR-039): count badge on the Models item while
+          // downloads are active. No badge when zero.
+          const badge = to === '/models' && activeDownloads > 0 ? activeDownloads : 0
           return (
             <li key={to}>
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Link
                     to={to}
-                    aria-label={label}
+                    aria-label={badge ? `${label} (${badge} downloading)` : label}
                     aria-current={isActive ? 'page' : undefined}
                     className={cn(
-                      'flex h-10 w-10 items-center justify-center rounded-[var(--radius-md)] transition-colors',
+                      'relative flex h-10 w-10 items-center justify-center rounded-[var(--radius-md)] transition-colors',
                       // At xl+ stretch to full rail width, left-align icon+label
                       'xl:w-full xl:justify-start xl:gap-3 xl:px-3',
                       isActive
@@ -123,44 +129,67 @@ function NavRail({
                         : 'text-muted hover:bg-panel hover:text-ink',
                     )}
                   >
-                    <Icon size={20} className="shrink-0" />
+                    <span className="relative shrink-0">
+                      <Icon size={20} />
+                      {/* Collapsed rail: dot badge anchored to the icon */}
+                      {badge > 0 && (
+                        <span
+                          className="tllm-pulse absolute -right-1.5 -top-1.5 grid h-4 min-w-4 place-items-center rounded-full px-1 text-[10px] font-semibold leading-none text-on-accent xl:hidden"
+                          style={{ background: 'var(--ok)' }}
+                        >
+                          {badge}
+                        </span>
+                      )}
+                    </span>
                     <span className="hidden xl:inline text-sm font-medium">{label}</span>
+                    {/* Expanded rail: count badge trailing the label */}
+                    {badge > 0 && (
+                      <span
+                        className="tllm-pulse ml-auto hidden h-4 min-w-4 place-items-center rounded-full px-1 text-[10px] font-semibold leading-none text-on-accent xl:grid"
+                        style={{ background: 'var(--ok)' }}
+                      >
+                        {badge}
+                      </span>
+                    )}
                   </Link>
                 </TooltipTrigger>
                 {/* Hide tooltip at xl+ since label is already visible */}
-                <TooltipContent side="right" className="xl:hidden">{label}</TooltipContent>
+                <TooltipContent side="right" className="xl:hidden">
+                  {badge ? `${label} · ${badge} downloading` : label}
+                </TooltipContent>
               </Tooltip>
             </li>
           )
         })}
       </ul>
 
-      {/* Online indicator (version in tooltip) */}
-      <div className="mt-2 flex w-full flex-col items-center xl:items-start xl:pl-3">
+      {/* Engine state chip (ADR-039): bottom of the rail, just above the version.
+          Click → Engines screen. Collapsed rail shows just the dot; at xl+ the
+          full dot+label pill. */}
+      <div className="mt-2 flex w-full flex-col items-center gap-1.5 xl:items-start xl:pl-3">
         <Tooltip>
           <TooltipTrigger asChild>
-            <span
-              className="h-2 w-2 rounded-full"
-              style={{ background: online ? 'var(--ok)' : 'var(--muted)' }}
-              aria-label={online ? 'Daemon connected' : 'Daemon offline'}
-            />
+            <button
+              type="button"
+              onClick={() => navigate('/engines')}
+              aria-label={`Engine: ${engineState} — open Engines`}
+              className="flex items-center justify-center rounded-full transition-colors xl:justify-start"
+            >
+              {/* Collapsed rail: dot only */}
+              <StateChip state={engineState} dotOnly className="xl:hidden" />
+              {/* Expanded rail: dot + label pill */}
+              <StateChip state={engineState} className="hidden xl:inline-flex" />
+            </button>
           </TooltipTrigger>
-          <TooltipContent side="right">
+          {/* Tooltip carries the connection + version detail; hidden at xl+ where the label shows. */}
+          <TooltipContent side="right" className="xl:hidden">
             {(online ? 'Daemon connected' : 'Daemon offline') + ` · ${version}`}
           </TooltipContent>
         </Tooltip>
+        {/* Version string beneath the chip (xl+ only — no room when collapsed). */}
+        <span className="hidden text-[11px] text-faint xl:inline">{version}</span>
       </div>
     </nav>
-  )
-}
-
-function TopBar({ status }: { status: Status | undefined }) {
-  const engineState = status?.engine.state ?? 'stopped'
-  return (
-    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-bg px-4">
-      <div className="flex-1" />
-      <StateChip state={engineState} />
-    </header>
   )
 }
 

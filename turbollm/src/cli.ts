@@ -10,8 +10,11 @@ import { Scanner } from './models/scanner'
 import { resolveProfile, profileToArgs, type LoadProfile } from './models/profile'
 import { getSysInfo } from './sysinfo/sysinfo'
 import { ConversationStore } from './chat/db'
+import { HfClient } from './hf/hf'
+import { DownloadManager } from './downloads/downloads'
 import { launchCli } from './cli-launch'
 import { createApp } from './server'
+import type { Deps } from './deps'
 
 // Entrypoint for the TurboLLM daemon (npm bin "turbollm"): wiring + graceful
 // shutdown. ADR-023 (Node/TS stack).
@@ -98,8 +101,13 @@ const manager = new Manager(store)
 const scanner = new Scanner(store)
 void scanner.rescan() // discover models in the background
 const db = new ConversationStore(store.dir())
+const hf = new HfClient(() => store.snapshot().hf.token, version)
+// A completed download triggers a rescan so the new model shows up in the library.
+const downloads = new DownloadManager(store, () => void scanner.rescan(), () => hf.authHeaders())
 const startedAt = Date.now()
-const app = createApp({ store, registry, manager, scanner, db, provision, version, startedAt })
+// `requestRestart` is attached after the server is created (it must close over it).
+const deps: Deps = { store, registry, manager, scanner, db, provision, hf, downloads, version, startedAt }
+const app = createApp(deps)
 
 // ── Resolve listen address ────────────────────────────────────────────────────
 const cfg = store.snapshot()
@@ -168,6 +176,74 @@ const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
   // Keep the legacy one-liner for log parsers that key on it.
   process.stdout.write(`TurboLLM ${version} listening on http://${displayHost}:${info.port}\n`)
 })
+
+// ── Self-restart (spec 08 §2) ──────────────────────────────────────────────────
+// POST /api/v1/daemon/restart re-execs the daemon so port / LAN-bind changes take
+// effect without the user killing the terminal. Ordering is what makes this safe:
+//   1. stop the engine,
+//   2. force open keep-alive sockets shut (SSE log/chat streams would otherwise hold
+//      the listen socket open forever and block server.close),
+//   3. close the server so the OLD process releases the port,
+//   4. ONLY THEN spawn the detached replacement → no port-bind race,
+//   5. exit.
+// A watchdog spawns + exits anyway if close hasn't completed in time. Fail-safe:
+// on any thrown error we still spawn + exit, so the user is never left daemonless.
+let restarting = false
+function spawnReplacement(): void {
+  // Re-exec with the SAME interpreter + argv (minus argv[0]=node) and cwd, detached
+  // so it outlives this dying parent. `unref()` lets the parent exit immediately.
+  const child = spawn(process.execPath, process.argv.slice(1), {
+    cwd: process.cwd(),
+    detached: true,
+    stdio: 'inherit',
+  })
+  child.unref()
+}
+deps.requestRestart = () => {
+  if (restarting) return
+  restarting = true
+  let spawned = false
+  const finish = () => {
+    if (spawned) return
+    spawned = true
+    try {
+      spawnReplacement()
+    } catch (e) {
+      console.warn(`restart spawn failed: ${e}`)
+    }
+    process.exit(0)
+  }
+  // Watchdog: if graceful teardown stalls (e.g. a socket refuses to drain), restart
+  // anyway. 4s is comfortably under the UI's ~10s recovery budget (spec 08 §A8).
+  const watchdog = setTimeout(finish, 4_000)
+  watchdog.unref()
+  try {
+    void manager.shutdown().finally(() => {
+      try {
+        db.close()
+      } catch {
+        /* best-effort */
+      }
+      // Drop keep-alive connections first so close()'s callback can actually fire.
+      // closeAllConnections exists on Node 18.2+ http servers; guard for safety.
+      const s = server as unknown as { closeAllConnections?: () => void }
+      try {
+        s.closeAllConnections?.()
+      } catch {
+        /* best-effort */
+      }
+      server.close(() => {
+        clearTimeout(watchdog)
+        finish()
+      })
+    })
+  } catch (e) {
+    // Any synchronous failure in the teardown path: still restart.
+    console.warn(`restart teardown failed: ${e}`)
+    clearTimeout(watchdog)
+    finish()
+  }
+}
 
 // ── Auto-load last model on start (spec 05 §7) ────────────────────────────────
 // When enabled (Settings → Startup), re-load the last-used model so the daemon

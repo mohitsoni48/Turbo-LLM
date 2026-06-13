@@ -2,14 +2,14 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
-import { ChevronDown, ClipboardCopy, Pencil, RefreshCw, Trash2 } from 'lucide-react'
+import { ChevronDown, ClipboardCopy, FileText, Pencil, RefreshCw, Trash2 } from 'lucide-react'
 import type { Message, MessageStats } from '../../lib/chat-types'
 import { Button } from '../../components/ui/button'
 import { toast } from '../../components/ui/sonner'
 
 // ── Thinking block ────────────────────────────────────────────────────────────
 
-function ThinkingBlock({ reasoning, thinkMs, streaming }: { reasoning: string; thinkMs?: number; streaming?: boolean }) {
+function ThinkingBlock({ reasoning, thinkMs, streaming, showThinking = true }: { reasoning: string; thinkMs?: number; streaming?: boolean; showThinking?: boolean }) {
   // Always collapsed by default; expands into a fixed-height scroll window so long
   // reasoning never balloons the chat.
   const [open, setOpen] = useState(false)
@@ -20,6 +20,14 @@ function ThinkingBlock({ reasoning, thinkMs, streaming }: { reasoning: string; t
     }
   }, [reasoning, open, streaming])
   const label = thinkMs ? `Thought for ${(thinkMs / 1000).toFixed(1)}s` : streaming ? 'Thinking…' : 'Thinking'
+  // When thinking is globally hidden, show only the stats line (no expand toggle).
+  if (!showThinking) {
+    return (
+      <div className="mb-3 text-[12px] font-medium text-faint px-0 py-0.5">
+        {label}
+      </div>
+    )
+  }
   return (
     <div className="mb-3 rounded-lg border border-border bg-panel-2">
       <button
@@ -192,6 +200,7 @@ export function MessageBubble({
   editingId,
   onEditSave,
   onEditCancel,
+  showThinking = true,
 }: {
   message: Message
   isLast: boolean
@@ -202,6 +211,7 @@ export function MessageBubble({
   editingId: string | null
   onEditSave: (content: string) => void
   onEditCancel: () => void
+  showThinking?: boolean
 }) {
   const [editDraft, setEditDraft] = useState(message.content)
   const isEditing = editingId === message.id
@@ -236,6 +246,16 @@ export function MessageBubble({
               {message.attachments?.filter((a) => a.startsWith('data:image')).map((url, i) => (
                 <img key={i} src={url} className="mt-2 max-h-48 max-w-xs rounded-lg object-contain" alt="attached image" />
               ))}
+              {message.textAttachments?.length > 0 && (
+                <div className="mt-1.5 flex flex-wrap gap-1 justify-end">
+                  {message.textAttachments.map((name, i) => (
+                    <span key={i} className="flex items-center gap-1 rounded border border-border bg-panel-2 px-2 py-0.5 text-[12px] text-muted">
+                      <FileText size={11} className="shrink-0" />
+                      {name}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           )}
           {!isEditing && (
@@ -257,7 +277,7 @@ export function MessageBubble({
       <ModelAvatar />
       <div className="min-w-0 flex-1 pt-0.5">
         {message.reasoning && (
-          <ThinkingBlock reasoning={message.reasoning} thinkMs={message.stats.thinkMs} />
+          <ThinkingBlock reasoning={message.reasoning} thinkMs={message.stats.thinkMs} showThinking={showThinking} />
         )}
         {hasError ? (
           <div className="rounded-lg border px-4 py-3 text-[14px]" style={{ borderColor: 'var(--err)', color: 'var(--err)', background: 'color-mix(in srgb, var(--err) 8%, transparent)' }}>

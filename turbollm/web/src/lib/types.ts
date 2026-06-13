@@ -238,3 +238,72 @@ export type ModelDetail = ModelEntry & {
   /** Logical CPU cores — drives the threads slider max + the "Auto" hint. */
   cores: number
 }
+
+// ── Hugging Face discovery (spec 10) ─────────────────────────────────────────
+/** A search result row (spec 10 §2). `localCount` > 0 drives the "↓ N in library"
+ *  chip on the row. */
+export type HfSearchItem = {
+  repo: string
+  downloads: number
+  likes: number
+  updatedAt: string
+  gated: boolean
+  tags: string[]
+  localCount: number
+}
+
+export type HfSearchResult = {
+  results: HfSearchItem[]
+}
+
+/** One logical GGUF file in a repo (spec 10 §3): split parts are grouped into one
+ *  entry with summed size and `parts` > 1. */
+export type HfRepoFile = {
+  name: string
+  quant: string
+  sizeBytes: number
+  parts: number
+  mmproj: boolean
+  sha256?: string
+  url: string
+}
+
+export type HfRepoDetail = {
+  repo: string
+  gated: boolean
+  license: string
+  downloads: number
+  likes: number
+  card: string
+  files: HfRepoFile[]
+  /** Quant labels already present in the local library — mark matching files
+   *  "Downloaded" (spec 10 §3). */
+  localQuants: string[]
+}
+
+export type HfTokenTest = {
+  ok: boolean
+  name?: string
+}
+
+// ── Downloads (spec 10 §5–6, §8) ─────────────────────────────────────────────
+export type DownloadStatus = 'queued' | 'downloading' | 'paused' | 'done' | 'error' | 'cancelled'
+
+export type DownloadRecord = {
+  id: string
+  name: string
+  repo: string
+  url: string
+  dest: string
+  total: number
+  received: number
+  status: DownloadStatus
+  error: string | null
+  bytesPerSec: number
+  sha256?: string
+  createdAt: string
+}
+
+export type DownloadsList = {
+  downloads: DownloadRecord[]
+}

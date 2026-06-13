@@ -12,6 +12,8 @@ import {
   addEngine,
   addModelDir,
   browseFs,
+  cancelDownload,
+  enqueueDownload,
   getApiKeys,
   getConnect,
   getEngineBackends,
@@ -27,10 +29,15 @@ import {
   deleteEngineBackend,
   getStatus,
   getSettings,
+  hfRepo,
+  hfSearch,
+  hfTokenTest,
   installBackend,
   installMlx,
+  listDownloads,
   listEngines,
   loadModel,
+  removeDownload,
   removeEngine,
   removeModelDir,
   renameEngine,
@@ -38,16 +45,29 @@ import {
   reprobeEngine,
   rescanModels,
   resetModelProfile,
+  restartDaemon,
   restartEngine,
   saveModelProfile,
   saveSettings,
   startEngine,
   stopEngine,
-  type DaemonSettings,
+  type DaemonSettingsPatch,
   type SysInfo,
   type TelemetryLevel,
 } from './api'
-import type { EngineBackends, EngineStats, EnginesList, LoadProfile, ModelDetail, ModelDirs, ModelsList, Status } from './types'
+import type {
+  DownloadsList,
+  EngineBackends,
+  EngineStats,
+  EnginesList,
+  HfRepoDetail,
+  HfSearchResult,
+  LoadProfile,
+  ModelDetail,
+  ModelDirs,
+  ModelsList,
+  Status,
+} from './types'
 // SysInfo is defined in api.ts (not types.ts) — re-export for convenience
 export type { SysInfo }
 
@@ -57,6 +77,7 @@ export const queryKeys = {
   engineBackends: ['engine-backends'] as const,
   models: ['models'] as const,
   modelDirs: ['modeldirs'] as const,
+  downloads: ['downloads'] as const,
 }
 
 /** Status poll every 2s, paused when the tab is hidden (spec 00 §4). */
@@ -233,12 +254,18 @@ export function useSettings() {
     retry: false,
   })
   const save = useMutation({
-    mutationFn: (patch: Partial<DaemonSettings>) => saveSettings(patch),
+    mutationFn: (patch: DaemonSettingsPatch) => saveSettings(patch),
     onSuccess: (data) => {
       qc.setQueryData(['settings'], data)
     },
   })
   return { query, save }
+}
+
+/** Restart the whole daemon (spec 08 §2). The socket drops mid-restart, so the
+ *  caller drives a "Restarting…" overlay + /status poll itself. */
+export function useDaemonRestart() {
+  return useMutation({ mutationFn: () => restartDaemon() })
 }
 
 /** Model detail (entry + resolved profile + VRAM fit). Disabled when key is null. */
@@ -307,6 +334,69 @@ export function useConnect(cli: string) {
     retry: false,
     staleTime: Infinity,
   })
+}
+
+// ── Hugging Face discovery (spec 10 §2–4) ────────────────────────────────────
+/** Search GGUF repos. Disabled until a non-empty query is set (the Discover tab
+ *  debounces the input before passing it here). */
+export function useHfSearch(q: string): UseQueryResult<HfSearchResult> {
+  return useQuery({
+    queryKey: ['hf-search', q],
+    queryFn: () => hfSearch(q),
+    enabled: q.trim().length > 0,
+    retry: false,
+    placeholderData: (prev) => prev,
+  })
+}
+
+/** Repo detail (files + sizes + gated). Disabled until a repo is selected. */
+export function useHfRepo(repo: string | null): UseQueryResult<HfRepoDetail> {
+  return useQuery({
+    queryKey: ['hf-repo', repo],
+    queryFn: () => hfRepo(repo as string),
+    enabled: !!repo,
+    retry: false,
+  })
+}
+
+/** Test an HF token (spec 10 §4). Mutation so the Settings "Test" button can show
+ *  the username on success / error envelope on failure. */
+export function useHfTokenTest() {
+  return useMutation({ mutationFn: (token: string) => hfTokenTest(token) })
+}
+
+// ── Downloads (spec 10 §5–6, §8) ──────────────────────────────────────────────
+/** Downloads list, polled every 1.5s while any job is active so progress/speed
+ *  stay live; otherwise refetched on focus only. */
+export function useDownloads(): UseQueryResult<DownloadsList> {
+  return useQuery({
+    queryKey: queryKeys.downloads,
+    queryFn: listDownloads,
+    refetchInterval: (q) =>
+      q.state.data?.downloads.some((dl) => dl.status === 'downloading' || dl.status === 'queued') ? 1500 : false,
+    refetchIntervalInBackground: false,
+    placeholderData: (prev) => prev,
+    retry: false,
+  })
+}
+
+export function useDownloadMutations() {
+  const qc = useQueryClient()
+  const invalidate = () => {
+    void qc.invalidateQueries({ queryKey: queryKeys.downloads })
+    // A completed download adds a model to the library.
+    void qc.invalidateQueries({ queryKey: queryKeys.models })
+    void qc.invalidateQueries({ queryKey: queryKeys.status })
+  }
+  return {
+    enqueue: useMutation({
+      mutationFn: (input: { repo?: string; rfilename?: string; url?: string; size?: number; sha256?: string }) =>
+        enqueueDownload(input),
+      onSuccess: invalidate,
+    }),
+    cancel: useMutation({ mutationFn: (id: string) => cancelDownload(id), onSuccess: invalidate }),
+    remove: useMutation({ mutationFn: (id: string) => removeDownload(id), onSuccess: invalidate }),
+  }
 }
 
 // ── System info (spec 05 §6) — loaded once on mount, never re-polled ─────────

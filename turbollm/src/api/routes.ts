@@ -22,8 +22,10 @@ import { ensureMlxEnv } from '../engines/mlx'
 import { ScannerError, type ModelEntry } from '../models/scanner'
 import { estimateVram, type LoadProfile, profileToArgs, resolveProfile } from '../models/profile'
 import { getSysInfo, primaryVendor } from '../sysinfo/sysinfo'
+import { HfError } from '../hf/hf'
+import { DownloadError } from '../downloads/downloads'
 
-type Status = 200 | 201 | 202 | 400 | 401 | 403 | 404 | 409 | 500 | 503
+type Status = 200 | 201 | 202 | 400 | 401 | 403 | 404 | 409 | 500 | 501 | 503
 
 function err(c: Context, status: Status, code: string, message: string) {
   return c.json({ error: { code, message } }, status)
@@ -61,7 +63,7 @@ export function registerApi(app: Hono, d: Deps): void {
       model,
       engineStats,
       bench: { running: false },
-      downloads: { active: 0 },
+      downloads: { active: d.downloads.activeCount() },
       engineProvision: d.provision.get(),
       telemetryLevel: d.store.snapshot().telemetry.level,
       uptimeSec: Math.floor((Date.now() - d.startedAt) / 1000),
@@ -386,6 +388,19 @@ export function registerApi(app: Hono, d: Deps): void {
     return c.json({ ok: true }, 202)
   })
 
+  // ---- daemon self-restart (spec 08 §2) ----
+  // Re-execs the whole daemon so port / LAN-bind changes take effect. Schedule on a
+  // short timeout so this 202 flushes before the listen socket is torn down; the UI
+  // then shows a "Restarting…" overlay and polls /status until the new process is up.
+  app.post('/api/v1/daemon/restart', (c) => {
+    if (!d.requestRestart) {
+      return err(c, 501, 'not_supported', 'Daemon restart is not available in this run mode.')
+    }
+    const restart = d.requestRestart
+    setTimeout(() => restart(), 200).unref()
+    return c.json({ ok: true, restarting: true }, 202)
+  })
+
   app.get('/api/v1/engine/logs', (c) => {
     const tail = Math.min(Number(c.req.query('tail')) || 200, 2000)
     return c.json({ lines: readTail(d.manager.logPath(), tail) })
@@ -485,6 +500,7 @@ export function registerApi(app: Hono, d: Deps): void {
   app.patch('/api/v1/settings', async (c) => {
     const b = await body<{
       idleTtlMinutes?: number
+      port?: number
       theme?: string
       autoGenerateTitles?: boolean
       openBrowserOnStart?: boolean
@@ -492,6 +508,7 @@ export function registerApi(app: Hono, d: Deps): void {
       lanBind?: boolean
       telemetryLevel?: string
       modelDefaults?: { ctx?: number; ngl?: number; imageMaxTokens?: number }
+      hfToken?: string
     }>(c)
 
     const updates: Record<string, unknown> = {}
@@ -499,6 +516,15 @@ export function registerApi(app: Hono, d: Deps): void {
       const v = Number(b.idleTtlMinutes)
       if (!Number.isFinite(v) || v < 0) return err(c, 400, 'invalid_config_value', 'idleTtlMinutes must be a non-negative number.')
       updates.idleTtlMinutes = v
+    }
+    // Listen port (spec 08 §2). Takes effect on the next daemon restart; the UI shows
+    // a "restart required" note. config.validate() also enforces the 1024–65535 floor.
+    if (b.port !== undefined) {
+      const v = Number(b.port)
+      // config.validate() enforces 1024–65535 and would throw on update() otherwise;
+      // reject out-of-range here so the client gets a clean 400, not a 500.
+      if (!Number.isInteger(v) || v < 1024 || v > 65535) return err(c, 400, 'invalid_config_value', 'port must be 1024–65535.')
+      updates.port = v
     }
     if (b.theme !== undefined) {
       if (!['system', 'light', 'dark'].includes(b.theme)) return err(c, 400, 'invalid_config_value', 'theme must be system, light, or dark.')
@@ -546,6 +572,8 @@ export function registerApi(app: Hono, d: Deps): void {
       Object.assign(cfg.modelDefaults, mdUpdates)
       if (b.autoLoadOnStart !== undefined) cfg.autoLoadOnStart = !!b.autoLoadOnStart
       if (telemetryLevel !== undefined) cfg.telemetry.level = telemetryLevel
+      // HF token (spec 10 §4): write-only. An explicit '' clears it. Never logged.
+      if (b.hfToken !== undefined) cfg.hf.token = String(b.hfToken).trim()
     })
     return c.json(settingsPayload(d))
   })
@@ -612,6 +640,70 @@ export function registerApi(app: Hono, d: Deps): void {
       cfg.primaryModelDir = dir
     })
     return c.json(modelDirsPayload(d))
+  })
+
+  // ── Hugging Face discovery (spec 10 §2–4) ────────────────────────────────
+  // Search GGUF repos. `localCount` is overlaid from the scan cache so the row
+  // can show a "↓ N in library" chip without a second round-trip.
+  app.get('/api/v1/hf/search', async (c) => {
+    const q = (c.req.query('q') ?? '').trim()
+    if (!q) return c.json({ results: [] })
+    try {
+      const results = await d.hf.searchModels(q)
+      const withLocal = results.map((r) => ({ ...r, localCount: localCountFor(d, r.repo) }))
+      return c.json({ results: withLocal })
+    } catch (e) {
+      return hfErr(c, e)
+    }
+  })
+
+  // Repo detail (files + sizes + gated). The id contains a '/', so capture the
+  // wildcard tail. `localQuants` lists the quant labels already present locally so
+  // the UI can mark "Downloaded" without another scan pass.
+  app.get('/api/v1/hf/models/:owner/:name', async (c) => {
+    const repo = `${c.req.param('owner')}/${c.req.param('name')}`
+    try {
+      const detail = await d.hf.getRepo(repo)
+      return c.json({ ...detail, localQuants: localQuantsFor(d) })
+    } catch (e) {
+      return hfErr(c, e)
+    }
+  })
+
+  // Validate an HF token against whoami-v2 (spec 10 §4). Never 5xx on a bad token.
+  app.post('/api/v1/hf/token/test', async (c) => {
+    const b = await body<{ token?: string }>(c)
+    try {
+      return c.json(await d.hf.testToken(b.token ?? ''))
+    } catch (e) {
+      return hfErr(c, e)
+    }
+  })
+
+  // ── Downloads (spec 10 §5–6, §8) ──────────────────────────────────────────
+  app.get('/api/v1/downloads', (c) => c.json({ downloads: d.downloads.list() }))
+
+  // Enqueue from an HF repo file {repo, rfilename} OR a raw URL {url}. 202.
+  app.post('/api/v1/downloads', async (c) => {
+    const b = await body<{ repo?: string; rfilename?: string; url?: string; size?: number; sha256?: string }>(c)
+    try {
+      const rec = d.downloads.enqueue(b)
+      return c.json(rec, 202)
+    } catch (e) {
+      return dlErr(c, e)
+    }
+  })
+
+  app.post('/api/v1/downloads/:id/cancel', (c) => {
+    const ok = d.downloads.cancel(c.req.param('id'))
+    if (!ok) return err(c, 404, 'no_such_download', 'No download with that id.')
+    return c.json({ ok: true })
+  })
+
+  app.delete('/api/v1/downloads/:id', (c) => {
+    const ok = d.downloads.remove(c.req.param('id'))
+    if (!ok) return err(c, 404, 'no_such_download', 'No download with that id.')
+    return c.json({ ok: true })
   })
 
   // ── API keys (spec 06 §5) ────────────────────────────────────────────────
@@ -728,6 +820,7 @@ function settingsPayload(d: Deps) {
   const telemetryLevel = lvl === 'anon' || lvl === 'full' ? lvl : 'off'
   return {
     idleTtlMinutes: cfg.daemon.idleTtlMinutes,
+    port: cfg.daemon.port,
     theme: cfg.daemon.theme,
     autoGenerateTitles: cfg.daemon.autoGenerateTitles,
     openBrowserOnStart: cfg.daemon.openBrowserOnStart,
@@ -735,6 +828,9 @@ function settingsPayload(d: Deps) {
     lanBind: cfg.daemon.lanBind,
     telemetryLevel,
     modelDefaults: cfg.modelDefaults,
+    // The HF token is write-only over the wire (spec 10 §4): we never echo it back,
+    // only whether one is set, so the UI can show "configured" without leaking it.
+    hfTokenSet: cfg.hf.token.length > 0,
   }
 }
 
@@ -785,6 +881,47 @@ function telemetryPreview(level: string, version: string) {
       ? 'Anonymized hardware + benchmark speed only. No prompts, paths, identifiers, or keys.'
       : 'Anonymous benchmarks plus crash/error fingerprints. Still no prompts, paths, or content.'
   return { level, sends: true, note, payload: events }
+}
+
+/** Heuristic count of local quant variants that plausibly belong to an HF repo
+ *  (spec 10 §2 `localCount`). Scanned entries carry no HF repo id, so we match the
+ *  repo's name segment (after the owner) against the local model name/path,
+ *  case-insensitively. Best-effort — drives a "↓ N in library" hint only. */
+function localCountFor(d: Deps, repo: string): number {
+  const seg = (repo.split('/')[1] ?? repo).toLowerCase().replace(/-gguf$/i, '')
+  if (!seg) return 0
+  const needle = seg.replace(/[-_.\s]+/g, '')
+  let n = 0
+  for (const m of d.scanner.list().models) {
+    const hay = `${m.name} ${basename(m.path)}`.toLowerCase().replace(/[-_.\s]+/g, '')
+    if (hay.includes(needle)) n++
+  }
+  return n
+}
+
+/** The set of quant labels present anywhere in the local library (spec 10 §3): the
+ *  repo-detail UI marks a file "Downloaded" when its quant is already on disk. */
+function localQuantsFor(d: Deps): string[] {
+  const set = new Set<string>()
+  for (const m of d.scanner.list().models) if (m.quant) set.add(m.quant.toUpperCase())
+  return [...set]
+}
+
+function hfErr(c: Context, e: unknown) {
+  if (e instanceof HfError) {
+    const status: Status = e.code === 'hf_unauthorized' ? 401 : e.code === 'hf_gated' ? 403 : 503
+    return err(c, status, e.code, e.message)
+  }
+  return err(c, 500, 'internal', (e as Error).message)
+}
+
+function dlErr(c: Context, e: unknown) {
+  if (e instanceof DownloadError) {
+    const status: Status =
+      e.code === 'no_model_dir' ? 409 : e.code === 'hf_unauthorized' ? 401 : e.code === 'hf_gated' ? 403 : 400
+    return err(c, status, e.code, e.message)
+  }
+  return err(c, 500, 'internal', (e as Error).message)
 }
 
 function engineBusy(d: Deps): boolean {

@@ -27,8 +27,10 @@ import {
 } from '../components/ui/dropdown-menu'
 import { toast } from '../components/ui/sonner'
 import { ModelDetailDialog } from './models/ModelDetailDialog'
+import { DiscoverTab } from './models/DiscoverTab'
 
 type Filter = 'all' | 'vision' | 'moe' | 'nextn'
+type Tab = 'library' | 'discover'
 
 /** A model name shared by 2+ quant variants becomes a collapsible group; a name
  *  with a single variant stays a flat row (spec 04 §2 / spec 11 §5). */
@@ -59,6 +61,7 @@ export function ModelsScreen() {
   const mut = useModelMutations()
   const actions = useModelActions()
   const del = useDeleteModel()
+  const [tab, setTab] = useState<Tab>('library')
   const [filter, setFilter] = useState<Filter>('all')
   const [openKey, setOpenKey] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<ModelEntry | null>(null)
@@ -95,15 +98,99 @@ export function ModelsScreen() {
     <div className="mx-auto max-w-5xl px-6 py-6">
       <ScreenHeader
         title="Models"
-        description="GGUF models discovered in your folders — reuse what you already have, no re-downloading."
+        description={
+          tab === 'library'
+            ? 'GGUF models discovered in your folders — reuse what you already have, no re-downloading.'
+            : 'Find and download GGUF models from Hugging Face, or import any direct .gguf URL.'
+        }
         actions={
-          <Button variant="outline" size="sm" onClick={() => mut.rescan.mutate()} disabled={scanning}>
-            <RefreshCw size={14} className={scanning ? 'tllm-pulse' : ''} />
-            {scanning ? 'Scanning…' : 'Rescan'}
-          </Button>
+          tab === 'library' ? (
+            <Button variant="outline" size="sm" onClick={() => mut.rescan.mutate()} disabled={scanning}>
+              <RefreshCw size={14} className={scanning ? 'tllm-pulse' : ''} />
+              {scanning ? 'Scanning…' : 'Rescan'}
+            </Button>
+          ) : undefined
         }
       />
 
+      <div className="mb-5 flex items-center gap-1 border-b border-border">
+        {(['library', 'discover'] as Tab[]).map((t) => (
+          <button
+            key={t}
+            type="button"
+            onClick={() => setTab(t)}
+            className="-mb-px border-b-2 px-3 py-2 text-[13px] font-medium capitalize transition-colors"
+            style={{
+              borderColor: tab === t ? 'var(--accent)' : 'transparent',
+              color: tab === t ? 'var(--ink)' : 'var(--muted)',
+            }}
+          >
+            {t === 'library' ? `Library${models.length ? ` (${models.length})` : ''}` : 'Discover'}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'discover' ? (
+        <DiscoverTab />
+      ) : (
+        <LibraryTab
+          modelsQ={modelsQ}
+          mut={mut}
+          actions={actions}
+          dirs={dirs}
+          primaryDir={primaryDir}
+          scanning={scanning}
+          models={models}
+          filter={filter}
+          setFilter={setFilter}
+          groups={groups}
+          setOpenKey={setOpenKey}
+          setConfirmDelete={setConfirmDelete}
+        />
+      )}
+
+      <ModelDetailDialog modelKey={openKey} onClose={() => setOpenKey(null)} />
+      <DeleteModelDialog
+        model={confirmDelete}
+        onCancel={() => setConfirmDelete(null)}
+        onConfirm={onConfirmDelete}
+        deleting={del.isPending}
+      />
+    </div>
+  )
+}
+
+/** The existing local-library view, unchanged in behavior — extracted so the Models
+ *  screen can switch between Library and Discover tabs (spec 10 §2). */
+function LibraryTab({
+  modelsQ,
+  mut,
+  actions,
+  dirs,
+  primaryDir,
+  scanning,
+  models,
+  filter,
+  setFilter,
+  groups,
+  setOpenKey,
+  setConfirmDelete,
+}: {
+  modelsQ: ReturnType<typeof useModels>
+  mut: ReturnType<typeof useModelMutations>
+  actions: ReturnType<typeof useModelActions>
+  dirs: string[]
+  primaryDir: string
+  scanning: boolean
+  models: ModelEntry[]
+  filter: Filter
+  setFilter: (f: Filter) => void
+  groups: Group[]
+  setOpenKey: (k: string | null) => void
+  setConfirmDelete: (m: ModelEntry | null) => void
+}) {
+  return (
+    <>
       <ModelDirs dirs={dirs} primaryDir={primaryDir} mut={mut} />
 
       {models.length > 0 && (
@@ -164,15 +251,7 @@ export function ModelsScreen() {
           )}
         </div>
       )}
-
-      <ModelDetailDialog modelKey={openKey} onClose={() => setOpenKey(null)} />
-      <DeleteModelDialog
-        model={confirmDelete}
-        onCancel={() => setConfirmDelete(null)}
-        onConfirm={onConfirmDelete}
-        deleting={del.isPending}
-      />
-    </div>
+    </>
   )
 }
 

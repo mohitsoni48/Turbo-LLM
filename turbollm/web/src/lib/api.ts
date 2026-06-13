@@ -5,10 +5,15 @@
 import type {
   ChatCompletionResponse,
   ChatMessage,
+  DownloadRecord,
+  DownloadsList,
   Engine,
   EngineBackends,
   EngineLogs,
   EnginesList,
+  HfRepoDetail,
+  HfSearchResult,
+  HfTokenTest,
   LoadProfile,
   ModelDetail,
   ModelDirs,
@@ -260,23 +265,39 @@ export type TelemetryLevel = 'off' | 'anon' | 'full'
 
 export type DaemonSettings = {
   idleTtlMinutes: number
+  /** Listen port (spec 08 §2). Takes effect on the next daemon restart. */
+  port: number
   theme: string
   autoGenerateTitles: boolean
   openBrowserOnStart: boolean
   autoLoadOnStart: boolean
-  /** Expose the API on the local network (spec 08 §2). Auto-restart is deferred —
-   *  changing this requires a daemon restart to take effect. */
+  /** Expose the API on the local network (spec 08 §2). Changing this requires a
+   *  daemon restart to take effect (POST /api/v1/daemon/restart). */
   lanBind: boolean
   telemetryLevel: TelemetryLevel
   modelDefaults: ModelDefaults
+  /** Whether an HF token is stored (spec 10 §4). The token itself is never echoed
+   *  back — write it via {@link saveSettings}'s `hfToken` patch field only. */
+  hfTokenSet: boolean
 }
+
+/** Settings patch: the persisted {@link DaemonSettings} fields plus a write-only
+ *  `hfToken` (spec 10 §4) that sets/clears the stored Hugging Face token. */
+export type DaemonSettingsPatch = Partial<DaemonSettings> & { hfToken?: string }
 
 export function getSettings(): Promise<DaemonSettings> {
   return request<DaemonSettings>('/api/v1/settings')
 }
 
-export function saveSettings(patch: Partial<DaemonSettings>): Promise<DaemonSettings> {
+export function saveSettings(patch: DaemonSettingsPatch): Promise<DaemonSettings> {
   return request<DaemonSettings>('/api/v1/settings', { method: 'PATCH', json: patch })
+}
+
+/** Re-exec the daemon so port / LAN-bind changes take effect (spec 08 §2). Returns
+ *  202 immediately, then the daemon tears down and restarts; the socket briefly
+ *  drops, so callers should poll /status until it responds again. */
+export function restartDaemon(): Promise<{ ok: true; restarting: true }> {
+  return request<{ ok: true; restarting: true }>('/api/v1/daemon/restart', { method: 'POST', json: {} })
 }
 
 /** Representative example of exactly what a given telemetry level would send
@@ -342,6 +363,50 @@ export interface SysInfo {
 
 export function getSysInfo(): Promise<SysInfo> {
   return request<SysInfo>('/api/v1/sysinfo')
+}
+
+// ── Hugging Face discovery (spec 10 §2–4) ────────────────────────────────────
+/** Search GGUF repos. Each row carries `localCount` (variants already in library). */
+export function hfSearch(q: string): Promise<HfSearchResult> {
+  return request<HfSearchResult>(`/api/v1/hf/search?q=${encodeURIComponent(q)}`)
+}
+
+/** Repo detail (files + sizes + gated). `repo` is "owner/name" — the slash is part
+ *  of the path so we do NOT encode it. */
+export function hfRepo(repo: string): Promise<HfRepoDetail> {
+  return request<HfRepoDetail>(`/api/v1/hf/models/${repo}`)
+}
+
+/** Validate an HF token against whoami-v2 (spec 10 §4). */
+export function hfTokenTest(token: string): Promise<HfTokenTest> {
+  return request<HfTokenTest>('/api/v1/hf/token/test', { method: 'POST', json: { token } })
+}
+
+// ── Downloads (spec 10 §5–6, §8) ──────────────────────────────────────────────
+export function listDownloads(): Promise<DownloadsList> {
+  return request<DownloadsList>('/api/v1/downloads')
+}
+
+/** Enqueue a download: an HF repo file {repo, rfilename} OR a raw {url}. */
+export function enqueueDownload(input: {
+  repo?: string
+  rfilename?: string
+  url?: string
+  size?: number
+  sha256?: string
+}): Promise<DownloadRecord> {
+  return request<DownloadRecord>('/api/v1/downloads', { method: 'POST', json: input })
+}
+
+export function cancelDownload(id: string): Promise<{ ok: true }> {
+  return request<{ ok: true }>(`/api/v1/downloads/${encodeURIComponent(id)}/cancel`, {
+    method: 'POST',
+    json: {},
+  })
+}
+
+export function removeDownload(id: string): Promise<{ ok: true }> {
+  return request<{ ok: true }>(`/api/v1/downloads/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 // ── Chat (non-streaming gateway passthrough) ─────────────────────────────────
