@@ -610,7 +610,7 @@ function TpsStat({ m }: { m: ModelEntry }) {
       <div className="w-[72px] text-right text-[13px]" title="Live tokens/sec (loaded now)">
         <span className="tllm-pulse inline-flex items-center gap-1 font-medium" style={{ color: 'var(--ok)' }}>
           <span className="h-1.5 w-1.5 rounded-full" style={{ background: 'var(--ok)' }} />
-          {m.liveTps} t/s
+          {Math.round(m.liveTps)} t/s
         </span>
       </div>
     )
@@ -618,14 +618,14 @@ function TpsStat({ m }: { m: ModelEntry }) {
   if (m.lastTps != null) {
     return (
       <div className="w-[72px] text-right text-[13px] text-ink" title="Last-session tokens/sec">
-        {m.lastTps} t/s
+        {Math.round(m.lastTps)} t/s
       </div>
     )
   }
   if (m.benchTps != null) {
     return (
       <div className="w-[72px] text-right text-[13px] text-muted" title="Benchmark tokens/sec">
-        {m.benchTps} t/s
+        {Math.round(m.benchTps)} t/s
       </div>
     )
   }
