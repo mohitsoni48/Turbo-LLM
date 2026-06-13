@@ -123,10 +123,12 @@ export function StreamingBubble({
   content,
   reasoning,
   progress,
+  liveGenTps,
 }: {
   content: string
   reasoning: string
   progress: { phase: string; pct: number; tps: number } | null
+  liveGenTps: number
 }) {
   return (
     <div className="flex gap-3">
@@ -138,14 +140,21 @@ export function StreamingBubble({
             <span className="text-muted">
               {progress
                 ? progress.phase === 'prompt'
-                  ? `Processing prompt · ${progress.pct}% · ${progress.tps > 0 ? `${progress.tps.toFixed(0)} tok/s` : ''}`
+                  ? `Processing prompt · ${progress.pct}%${progress.tps > 0 ? ` · ${progress.tps.toFixed(0)} tok/s` : ''}`
                   : 'Generating…'
                 : reasoning ? 'Generating…' : 'Thinking…'}
             </span>
           )}
         </div>
+        {/* Live progress indicator — shows prefill % during prompt phase, gen tok/s during generation */}
         <div className="mt-1 text-[11px] text-faint">
-          {content && progress?.phase !== 'prompt' && '…'}
+          {progress && progress.phase === 'prompt' ? (
+            <span>{progress.pct}%{progress.tps > 0 ? ` · ${progress.tps.toFixed(0)} tok/s` : ''}</span>
+          ) : content && liveGenTps > 0 ? (
+            <span>{liveGenTps.toFixed(1)} tok/s</span>
+          ) : content ? (
+            <span>…</span>
+          ) : null}
         </div>
       </div>
     </div>
@@ -201,8 +210,13 @@ export function MessageBubble({
               </div>
             </div>
           ) : (
-            <div className="max-w-[75%] whitespace-pre-wrap rounded-[var(--radius-lg)] bg-accent px-4 py-2.5 text-[15px] leading-[1.6] text-on-accent">
-              {message.content}
+            <div className="flex max-w-[75%] flex-col items-end">
+              <div className="whitespace-pre-wrap rounded-[var(--radius-lg)] bg-accent px-4 py-2.5 text-[15px] leading-[1.6] text-on-accent">
+                {message.content}
+              </div>
+              {message.attachments?.filter((a) => a.startsWith('data:image')).map((url, i) => (
+                <img key={i} src={url} className="mt-2 max-h-48 max-w-xs rounded-lg object-contain" alt="attached image" />
+              ))}
             </div>
           )}
           {!isEditing && (

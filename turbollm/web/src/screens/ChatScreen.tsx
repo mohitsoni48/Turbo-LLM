@@ -1,18 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowDown, Cpu, SendHorizontal, SlidersHorizontal, Square } from 'lucide-react'
-import { sendMessage } from '../lib/chat-api'
+import { ArrowDown, Paperclip, SendHorizontal, SlidersHorizontal, Square, X } from 'lucide-react'
+import { continueConversation, sendMessage } from '../lib/chat-api'
 import { useConversation, useConversationMutations } from '../lib/chat-queries'
 import { useModelActions, useModels, useStatus } from '../lib/queries'
-import type { Message } from '../lib/chat-types'
+import type { ChatSseEvent, Message } from '../lib/chat-types'
 import { ApiError } from '../lib/api'
 import { Button } from '../components/ui/button'
-import { Link } from 'react-router-dom'
 import { toast } from '../components/ui/sonner'
 import { useQueryClient } from '@tanstack/react-query'
 import { MessageBubble, StreamingBubble } from './chat/MessageBubble'
 import { ConversationSidebar } from './chat/ConversationSidebar'
 import { ModelLoadMenu } from '../components/ModelLoadMenu'
 import { ModelDetailDialog } from './models/ModelDetailDialog'
+import { ConversationSettingsDialog } from './chat/ConversationSettingsDialog'
+import { useUiStore } from '../stores/ui'
 
 // Streaming state
 interface LiveState {
@@ -20,6 +21,7 @@ interface LiveState {
   content: string
   reasoning: string
   progress: { phase: string; pct: number; tps: number } | null
+  liveGenTps: number  // rolling 2s window estimate during generation phase
 }
 
 export function ChatScreen() {
@@ -33,10 +35,14 @@ export function ChatScreen() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [settingsKey, setSettingsKey] = useState<string | null>(null)
   const [showScrollBtn, setShowScrollBtn] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [attachments, setAttachments] = useState<{ file: File; dataUrl: string }[]>([])
   const abortRef = useRef<AbortController | null>(null)
+  const deltaTimestamps = useRef<number[]>([])
   const scrollerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const userScrolledUp = useRef(false)
   const qc = useQueryClient()
   const mut = useConversationMutations()
@@ -46,6 +52,16 @@ export function ChatScreen() {
   const convQ = useConversation(activeId)
   const conv = convQ.data
   const messages = conv?.messages ?? []
+
+  // Open a conversation another screen handed off (e.g. Launch Expert in Settings).
+  const pendingConversationId = useUiStore((s) => s.pendingConversationId)
+  const setPendingConversationId = useUiStore((s) => s.setPendingConversationId)
+  useEffect(() => {
+    if (!pendingConversationId) return
+    handleSelect(pendingConversationId)
+    setPendingConversationId(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingConversationId])
 
   const allModels = modelsQ.data?.models ?? []
   const modelBusy =
@@ -131,12 +147,76 @@ export function ChatScreen() {
     if (activeId) await mut.stop.mutateAsync(activeId).catch(() => {})
   }
 
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? [])
+    const loaded = await Promise.all(files.map(async (file) => {
+      const dataUrl = await new Promise<string>((res) => {
+        const r = new FileReader()
+        r.onload = () => res(r.result as string)
+        if (file.type.startsWith('image/')) r.readAsDataURL(file)
+        else r.readAsText(file)
+      })
+      return { file, dataUrl }
+    }))
+    setAttachments((prev) => [...prev, ...loaded])
+    e.target.value = ''
+  }
+
+  // Shared SSE consumer: drives live streaming state for either a fresh send or a continue.
+  const streamFrom = async (convId: string, gen: AsyncGenerator<ChatSseEvent>) => {
+    try {
+      for await (const evt of gen) {
+        if (evt.event === 'meta') {
+          deltaTimestamps.current = []
+          setLive({ assistantId: evt.data.assistantMessageId, content: '', reasoning: '', progress: null, liveGenTps: 0 })
+          // Optimistically reflect the new/last user msg in the UI by invalidating
+          void qc.invalidateQueries({ queryKey: ['conversation', convId] })
+        } else if (evt.event === 'progress') {
+          setLive((l) => l ? { ...l, progress: { phase: evt.data.phase, pct: evt.data.pct, tps: evt.data.tps } } : l)
+        } else if (evt.event === 'reasoning') {
+          setLive((l) => l ? { ...l, reasoning: l.reasoning + evt.data.delta, progress: null } : l)
+        } else if (evt.event === 'delta') {
+          const now = Date.now()
+          deltaTimestamps.current.push(now)
+          const cutoff = now - 2000
+          deltaTimestamps.current = deltaTimestamps.current.filter((t) => t > cutoff)
+          const liveTps = Math.round((deltaTimestamps.current.length / 2) * 10) / 10
+          setLive((l) => l ? { ...l, content: l.content + evt.data.delta, progress: null, liveGenTps: liveTps } : l)
+        } else if (evt.event === 'done') {
+          setLive(null)
+          void qc.invalidateQueries({ queryKey: ['conversation', convId] })
+          void qc.invalidateQueries({ queryKey: ['conversations'] })
+          setTimeout(() => scrollToBottom(true), 80)
+        } else if (evt.event === 'error') {
+          setLive(null)
+          void qc.invalidateQueries({ queryKey: ['conversation', convId] })
+          toast.error(evt.data.message)
+        }
+      }
+      // Stream ended without an explicit done/error (e.g. network cut, silent close)
+      setLive(null)
+      void qc.invalidateQueries({ queryKey: ['conversation', convId] })
+    } catch (e) {
+      setLive(null)
+      if ((e as Error)?.name !== 'AbortError') {
+        toast.error(e instanceof ApiError ? e.message : 'Request failed.')
+      }
+      void qc.invalidateQueries({ queryKey: ['conversation', convId] })
+    }
+  }
+
   const send = async (overrideInput?: string) => {
     const text = (overrideInput ?? input).trim()
-    if (!text || live) return
+    if ((!text && attachments.length === 0) || live) return
     if (engineState !== 'running' || !model) { toast.error('Load a model first.'); return }
 
+    const imageAttachments = attachments.filter((a) => a.dataUrl.startsWith('data:image/'))
+    const textAttachments = attachments.filter((a) => !a.dataUrl.startsWith('data:image/'))
+    const images = imageAttachments.map((a) => a.dataUrl)
+    const docContext = textAttachments.map((a) => `[Attached: ${a.file.name}]\n${a.dataUrl}`).join('\n\n')
+
     setInput('')
+    setAttachments([])
     setTimeout(autoResize, 0)
     userScrolledUp.current = false
 
@@ -152,30 +232,7 @@ export function ChatScreen() {
       const ac = new AbortController()
       abortRef.current = ac
 
-      const gen = sendMessage(convId, text, ac.signal)
-
-      for await (const evt of gen) {
-        if (evt.event === 'meta') {
-          setLive({ assistantId: evt.data.assistantMessageId, content: '', reasoning: '', progress: null })
-          // Optimistically add user msg to UI by invalidating
-          void qc.invalidateQueries({ queryKey: ['conversation', convId] })
-        } else if (evt.event === 'progress') {
-          setLive((l) => l ? { ...l, progress: { phase: evt.data.phase, pct: evt.data.pct, tps: evt.data.tps } } : l)
-        } else if (evt.event === 'reasoning') {
-          setLive((l) => l ? { ...l, reasoning: l.reasoning + evt.data.delta, progress: null } : l)
-        } else if (evt.event === 'delta') {
-          setLive((l) => l ? { ...l, content: l.content + evt.data.delta, progress: null } : l)
-        } else if (evt.event === 'done') {
-          setLive(null)
-          void qc.invalidateQueries({ queryKey: ['conversation', convId] })
-          void qc.invalidateQueries({ queryKey: ['conversations'] })
-          setTimeout(() => scrollToBottom(true), 80)
-        } else if (evt.event === 'error') {
-          setLive(null)
-          void qc.invalidateQueries({ queryKey: ['conversation', convId] })
-          toast.error(evt.data.message)
-        }
-      }
+      await streamFrom(convId, sendMessage(convId, text, ac.signal, images, docContext))
     } catch (e) {
       setLive(null)
       if ((e as Error)?.name !== 'AbortError') {
@@ -189,16 +246,25 @@ export function ChatScreen() {
     if (!activeId) return
     setEditingId(null)
     mut.editMsg.mutate({ convId: activeId, msgId, content }, {
-      onSuccess: () => { userScrolledUp.current = false; void send(undefined) },
+      onSuccess: () => {
+        userScrolledUp.current = false
+        if (engineState === 'running' && model) {
+          const ac = new AbortController()
+          abortRef.current = ac
+          void streamFrom(activeId, continueConversation(activeId, ac.signal))
+        }
+      },
       onError: () => toast.error('Could not edit message.'),
     })
   }
 
   const handleRegenerate = async () => {
     if (!activeId || live) return
+    if (engineState !== 'running' || !model) { toast.error('Load a model first.'); return }
     await mut.regenerate.mutateAsync(activeId).catch(() => {})
-    const last = messages.filter((m) => m.role === 'user').at(-1)
-    if (last) await send(last.content)
+    const ac = new AbortController()
+    abortRef.current = ac
+    void streamFrom(activeId, continueConversation(activeId, ac.signal))
   }
 
   const handleCopy = (m: Message) => {
@@ -224,9 +290,15 @@ export function ChatScreen() {
 
   return (
     <div className="flex h-full overflow-hidden">
-      {/* Sidebar */}
-      <div className="w-56 shrink-0">
-        <ConversationSidebar activeId={activeId} onSelect={handleSelect} onNew={handleNew} />
+      {/* Sidebar (collapsible) */}
+      <div className={sidebarOpen ? 'w-56 shrink-0' : 'w-10 shrink-0'} style={{ transition: 'width 0.15s' }}>
+        <ConversationSidebar
+          activeId={activeId}
+          onSelect={handleSelect}
+          onNew={handleNew}
+          collapsed={!sidebarOpen}
+          onToggle={() => setSidebarOpen((o) => !o)}
+        />
       </div>
 
       {/* Thread */}
@@ -238,8 +310,10 @@ export function ChatScreen() {
             loadedKey={model?.key ?? null}
             loadedName={model?.name ?? null}
             pending={modelBusy}
+            ejecting={modelActions.eject.isPending}
             onLoad={handleLoadModel}
             onEject={handleEject}
+            onSettings={(key) => setSettingsKey(key)}
           />
           {model && (
             <Button
@@ -252,36 +326,19 @@ export function ChatScreen() {
               <SlidersHorizontal size={15} />
             </Button>
           )}
+          <ConversationSettingsDialog conv={conv} />
           {engineState === 'starting' && <span className="text-[12px] text-muted">Loading model…</span>}
           {engineState === 'stopping' && <span className="text-[12px] text-muted">Ejecting…</span>}
         </div>
 
-        {/* No model loaded */}
-        {!model && (
-          <div className="flex flex-1 items-center justify-center p-6">
-            <div className="w-full max-w-md rounded-[var(--radius-lg)] border border-border bg-panel p-6 text-center shadow-[var(--shadow-1)]">
-              <Cpu size={24} className="mx-auto mb-3 text-muted" />
-              <h2 className="text-[16px] font-semibold text-ink">No model loaded</h2>
-              <p className="mt-1 text-[13px] text-muted">
-                {allModels.length > 0
-                  ? 'Pick a model from the selector above to start chatting.'
-                  : 'Add a model folder on the Models screen to get started.'}
-              </p>
-              {allModels.length === 0 && (
-                <Button asChild className="mt-4"><Link to="/models">Go to Models</Link></Button>
-              )}
-            </div>
-          </div>
-        )}
-
-        {model && (
-          <>
-            {/* Message list */}
-            <div ref={scrollerRef} className="min-h-0 flex-1 overflow-y-auto">
-              <div className="mx-auto flex w-full max-w-[768px] flex-col gap-6 px-6 py-6">
-                {/* Empty state */}
-                {messages.length === 0 && !live && (
-                  <div className="flex flex-col items-center gap-3 py-16">
+        {/* Message list — always visible; empty state shown only when no messages */}
+        <div ref={scrollerRef} className="min-h-0 flex-1 overflow-y-auto">
+          <div className="mx-auto flex w-full max-w-[768px] flex-col gap-6 px-6 py-6">
+            {/* Empty state */}
+            {messages.length === 0 && !live && (
+              <div className="flex flex-col items-center gap-3 py-16">
+                {model ? (
+                  <>
                     <p className="text-[15px] font-medium text-ink">{model.name}</p>
                     <div className="flex flex-wrap justify-center gap-2">
                       {['Explain something to me', 'Help me write', 'Review this code'].map((s) => (
@@ -295,104 +352,142 @@ export function ChatScreen() {
                         </button>
                       ))}
                     </div>
-                  </div>
+                  </>
+                ) : (
+                  <p className="text-[14px] text-muted">Select a model above to begin</p>
                 )}
-
-                {/* Messages */}
-                {messages.map((m, i) => (
-                  <MessageBubble
-                    key={m.id}
-                    message={m}
-                    isLast={i === messages.length - 1 && !live}
-                    onCopy={handleCopy}
-                    onEdit={(msg) => setEditingId(msg.id)}
-                    onDelete={handleDelete}
-                    onRegenerate={handleRegenerate}
-                    editingId={editingId}
-                    onEditSave={(content) => handleEditSave(m.id, content)}
-                    onEditCancel={() => setEditingId(null)}
-                  />
-                ))}
-
-                {/* Streaming bubble */}
-                {live && (
-                  <StreamingBubble content={live.content} reasoning={live.reasoning} progress={live.progress} />
-                )}
-
-                <div ref={bottomRef} />
               </div>
-            </div>
-
-            {/* Scroll-to-bottom pill */}
-            {showScrollBtn && (
-              <button
-                type="button"
-                onClick={() => { userScrolledUp.current = false; scrollToBottom(true) }}
-                className="absolute bottom-28 left-1/2 -translate-x-1/2 flex items-center gap-1.5 rounded-full border border-border bg-panel px-3 py-1.5 text-[12px] text-muted shadow-[var(--shadow-1)] hover:text-ink"
-              >
-                <ArrowDown size={13} /> Jump to latest
-              </button>
             )}
 
-            {/* Composer area */}
-            <div className="px-6 pb-5">
-              <div className="mx-auto w-full max-w-[768px]">
-                {/* Context meter */}
-                {ctxMax > 0 && ctxUsed > 0 && (
-                  <div className="mb-2 flex items-center gap-2">
-                    <div className="h-1 flex-1 overflow-hidden rounded-full" style={{ background: 'var(--border)' }}>
-                      <div
-                        className="h-full rounded-full transition-all"
-                        style={{
-                          width: `${Math.min(100, ctxPct * 100).toFixed(1)}%`,
-                          background: ctxPct > 0.9 ? 'var(--err)' : ctxPct > 0.7 ? 'var(--warn)' : 'var(--accent)',
-                        }}
-                      />
-                    </div>
-                    <span
-                      className="shrink-0 text-[11px] text-faint"
-                      title={ctxPct > 0.9 ? 'Context almost full — older messages may be truncated' : undefined}
-                      style={{ color: ctxPct > 0.9 ? 'var(--err)' : ctxPct > 0.7 ? 'var(--warn)' : undefined }}
-                    >
-                      {ctxUsed.toLocaleString()} / {ctxMax.toLocaleString()}
-                    </span>
-                  </div>
-                )}
+            {/* Messages */}
+            {messages.map((m, i) => (
+              <MessageBubble
+                key={m.id}
+                message={m}
+                isLast={i === messages.length - 1 && !live}
+                onCopy={handleCopy}
+                onEdit={(msg) => setEditingId(msg.id)}
+                onDelete={handleDelete}
+                onRegenerate={handleRegenerate}
+                editingId={editingId}
+                onEditSave={(content) => handleEditSave(m.id, content)}
+                onEditCancel={() => setEditingId(null)}
+              />
+            ))}
 
-                <div className="flex items-end gap-2 rounded-[var(--radius-lg)] border border-border bg-panel p-2 shadow-[var(--shadow-2)] focus-within:border-[color:var(--accent)]">
-                  <textarea
-                    ref={inputRef}
-                    rows={1}
-                    className="max-h-40 min-h-9 flex-1 resize-none bg-transparent px-2 py-1.5 text-[15px] text-ink outline-none placeholder:text-faint"
-                    placeholder={ready ? `Message ${model.name}…` : 'Model not ready…'}
-                    value={input}
-                    disabled={!ready || !!live || !!editingId}
-                    onChange={(e) => { setInput(e.target.value); autoResize() }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send() }
-                      if (e.key === 'ArrowUp' && !input && !live) {
-                        const lastUser = messages.findLast((m) => m.role === 'user')
-                        if (lastUser) { setEditingId(lastUser.id) }
-                      }
+            {/* Streaming bubble */}
+            {live && (
+              <StreamingBubble content={live.content} reasoning={live.reasoning} progress={live.progress} liveGenTps={live.liveGenTps} />
+            )}
+
+            <div ref={bottomRef} />
+          </div>
+        </div>
+
+        {/* Scroll-to-bottom pill */}
+        {showScrollBtn && (
+          <button
+            type="button"
+            onClick={() => { userScrolledUp.current = false; scrollToBottom(true) }}
+            className="absolute bottom-28 left-1/2 -translate-x-1/2 flex items-center gap-1.5 rounded-full border border-border bg-panel px-3 py-1.5 text-[12px] text-muted shadow-[var(--shadow-1)] hover:text-ink"
+          >
+            <ArrowDown size={13} /> Jump to latest
+          </button>
+        )}
+
+        {/* Composer area (always visible; disabled when no model) */}
+        <div className="px-6 pb-5">
+          <div className="mx-auto w-full max-w-[768px]">
+            {/* Context meter */}
+            {ctxMax > 0 && ctxUsed > 0 && (
+              <div className="mb-2 flex items-center gap-2">
+                <div className="h-1 flex-1 overflow-hidden rounded-full" style={{ background: 'var(--border)' }}>
+                  <div
+                    className="h-full rounded-full transition-all"
+                    style={{
+                      width: `${Math.min(100, ctxPct * 100).toFixed(1)}%`,
+                      background: ctxPct > 0.9 ? 'var(--err)' : ctxPct > 0.7 ? 'var(--warn)' : 'var(--accent)',
                     }}
                   />
-                  {live ? (
-                    <Button size="icon" variant="outline" onClick={() => void handleStop()} title="Stop generation (Esc)">
-                      <Square size={15} />
-                    </Button>
-                  ) : (
-                    <Button size="icon" onClick={() => void send()} disabled={!ready || !input.trim() || !!editingId} aria-label="Send">
-                      <SendHorizontal size={15} />
-                    </Button>
-                  )}
                 </div>
-                <p className="mt-1.5 px-1 text-[11px] text-faint">
-                  {model.name} · Enter to send · Shift+Enter for newline
-                </p>
+                <span
+                  className="shrink-0 text-[11px] text-faint"
+                  title={ctxPct > 0.9 ? 'Context almost full — older messages may be truncated' : undefined}
+                  style={{ color: ctxPct > 0.9 ? 'var(--err)' : ctxPct > 0.7 ? 'var(--warn)' : undefined }}
+                >
+                  {ctxUsed.toLocaleString()} / {ctxMax.toLocaleString()}
+                </span>
+              </div>
+            )}
+
+            <div className="rounded-[var(--radius-lg)] border border-border bg-panel shadow-[var(--shadow-2)] focus-within:border-[color:var(--accent)]">
+              {/* Attachment previews */}
+              {attachments.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 px-2 pt-2">
+                  {attachments.map((a, i) => (
+                    <div key={i} className="relative flex items-center gap-1 rounded border border-border bg-panel-2 px-2 py-1 text-[12px]">
+                      {a.file.type.startsWith('image/')
+                        ? <img src={a.dataUrl} className="h-8 w-8 rounded object-cover" alt="" />
+                        : <span className="text-muted">{a.file.name}</span>
+                      }
+                      <button type="button" onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))} className="text-faint hover:text-err">
+                        <X size={11} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex items-end gap-2 p-2">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={!ready || !!live}
+                  className="grid h-9 w-9 shrink-0 place-items-center rounded-md hover:bg-panel-2 disabled:opacity-40"
+                  title="Attach image or document"
+                >
+                  <Paperclip size={15} className="text-muted" />
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept="image/*,.pdf,.txt,.md,.csv"
+                  hidden
+                  onChange={handleFileSelect}
+                />
+                <textarea
+                  ref={inputRef}
+                  rows={1}
+                  className="max-h-40 min-h-9 flex-1 resize-none bg-transparent px-2 py-1.5 text-[15px] text-ink outline-none placeholder:overflow-hidden placeholder:whitespace-nowrap placeholder:text-faint"
+                  placeholder={ready ? `Message ${model.name}…` : 'Load a model above to start chatting'}
+                  value={input}
+                  disabled={!ready || !!live || !!editingId}
+                  onChange={(e) => { setInput(e.target.value); autoResize() }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send() }
+                    if (e.key === 'ArrowUp' && !input && !live) {
+                      const lastUser = messages.findLast((m) => m.role === 'user')
+                      if (lastUser) { setEditingId(lastUser.id) }
+                    }
+                  }}
+                />
+                {live ? (
+                  <Button size="icon" variant="outline" onClick={() => void handleStop()} title="Stop generation (Esc)">
+                    <Square size={15} />
+                  </Button>
+                ) : (
+                  <Button size="icon" onClick={() => void send()} disabled={!ready || (!input.trim() && attachments.length === 0) || !!editingId} aria-label="Send">
+                    <SendHorizontal size={15} />
+                  </Button>
+                )}
               </div>
             </div>
-          </>
-        )}
+            <p className="mt-1.5 px-1 text-[11px] text-faint">
+              {model ? `${model.name} · Enter to send · Shift+Enter for newline` : 'Load a model above to start chatting'}
+            </p>
+          </div>
+        </div>
       </div>
 
       <ModelDetailDialog modelKey={settingsKey} onClose={() => setSettingsKey(null)} />
