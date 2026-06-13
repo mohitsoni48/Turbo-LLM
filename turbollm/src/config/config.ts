@@ -26,6 +26,9 @@ export interface Daemon {
   host: string
   port: number
   lanBind: boolean
+  /** When LAN-exposed, require an API key for non-loopback requests (spec 06 §5).
+   *  Off = open/unauthenticated LAN access (no key needed). Default on. */
+  requireApiKey: boolean
   authToken: string
   idleTtlMinutes: number
   openBrowserOnStart: boolean
@@ -183,6 +186,7 @@ export function defaultConfig(): Config {
       host: '127.0.0.1',
       port: 6996,
       lanBind: false,
+      requireApiKey: true,
       authToken: '',
       idleTtlMinutes: 60,
       openBrowserOnStart: true,

@@ -37,6 +37,7 @@ export function SettingsScreen() {
   const [defImageMax, setDefImageMax] = useState<number>(0)
   const [telemetry, setTelemetry] = useState<TelemetryLevel>('off')
   const [lanBind, setLanBind] = useState(false)
+  const [requireApiKey, setRequireApiKey] = useState(true)
   // Client-only "show thinking by default" preference (ADR-038); default ON.
   const [showThinking, setShowThinking] = useState(() => localStorage.getItem(SHOW_THINKING_KEY) !== 'false')
 
@@ -55,6 +56,7 @@ export function SettingsScreen() {
       setDefImageMax(settings.modelDefaults?.imageMaxTokens ?? 0)
       setTelemetry(settings.telemetryLevel ?? 'off')
       setLanBind(settings.lanBind ?? false)
+      setRequireApiKey(settings.requireApiKey ?? true)
     }
   }, [settings])
 
@@ -71,6 +73,7 @@ export function SettingsScreen() {
     autoLoadOnStart: autoLoad,
     telemetryLevel: telemetry,
     lanBind,
+    requireApiKey,
     modelDefaults: { ctx: defCtx, ngl: defNgl, imageMaxTokens: defImageMax },
   })
 
@@ -298,7 +301,7 @@ export function SettingsScreen() {
         </section>
 
         {/* Network (spec 08 §2) */}
-        <NetworkSection lanBind={lanBind} setLanBind={setLanBind} port={port} setPort={setPort} />
+        <NetworkSection lanBind={lanBind} setLanBind={setLanBind} requireApiKey={requireApiKey} setRequireApiKey={setRequireApiKey} port={port} setPort={setPort} />
 
         {/* Models — Hugging Face token (spec 10 §4) */}
         <HfTokenSection tokenSet={settings?.hfTokenSet ?? false} onSaved={() => void settingsQ.refetch()} />
@@ -392,11 +395,15 @@ function ExpertSection() {
 function NetworkSection({
   lanBind,
   setLanBind,
+  requireApiKey,
+  setRequireApiKey,
   port,
   setPort,
 }: {
   lanBind: boolean
   setLanBind: (v: boolean) => void
+  requireApiKey: boolean
+  setRequireApiKey: (v: boolean) => void
   port: number
   setPort: (v: number) => void
 }) {
@@ -437,12 +444,30 @@ function NetworkSection({
         />
       </label>
 
-      {lanBind && lanUrl && (
-        <div className="mt-2 flex flex-col gap-2 border-t border-border pt-3">
-          <div className="text-[13px]">
-            <span className="text-muted">LAN URL: </span>
-            <span className="font-mono text-ink">{lanUrl}</span>
-          </div>
+      {lanBind && (
+        <div className="mt-2 flex flex-col gap-3 border-t border-border pt-3">
+          {lanUrl && (
+            <div className="text-[13px]">
+              <span className="text-muted">LAN URL: </span>
+              <span className="font-mono text-ink">{lanUrl}</span>
+            </div>
+          )}
+
+          <label className="flex cursor-pointer items-center justify-between">
+            <div>
+              <div className="text-[14px] font-medium text-ink">Require an API key</div>
+              <div className="text-[12px] text-muted">
+                When off, any device on your network can use this TurboLLM with no key
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              checked={requireApiKey}
+              onChange={(e) => setRequireApiKey(e.target.checked)}
+              className="h-4 w-4 accent-[var(--accent)]"
+            />
+          </label>
+
           <div
             className="flex items-start gap-2 rounded-md border p-2.5 text-[12px]"
             style={{
@@ -452,12 +477,21 @@ function NetworkSection({
           >
             <ShieldAlert size={14} className="mt-0.5 shrink-0" style={{ color: 'var(--warn)' }} />
             <div className="text-muted">
-              Anyone on your network can reach the API. An API key is required for non-local access.
-              {!hasApiKey && (
+              {requireApiKey ? (
                 <>
-                  {' '}
-                  No API key exists yet — create one on the{' '}
-                  <span className="font-medium text-ink">Developer</span> screen.
+                  Other devices can reach the API, but a valid API key is required.
+                  {!hasApiKey && (
+                    <>
+                      {' '}
+                      No API key exists yet — create one on the{' '}
+                      <span className="font-medium text-ink">Developer</span> screen.
+                    </>
+                  )}
+                </>
+              ) : (
+                <>
+                  <span className="font-medium text-ink">Open access:</span> any device on your
+                  network can use this TurboLLM with no key. Only enable this on a network you trust.
                 </>
               )}
             </div>

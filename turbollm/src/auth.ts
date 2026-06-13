@@ -60,7 +60,9 @@ function isLoopback(c: Context): boolean | null {
  *  pass-through, so local dev and the UI can never be locked out. */
 export function lanAuth(d: Deps): MiddlewareHandler {
   return async (c, next) => {
-    if (!d.store.snapshot().daemon.lanBind) return next() // loopback-only bind: no enforcement
+    const daemon = d.store.snapshot().daemon
+    if (!daemon.lanBind) return next() // loopback-only bind: no enforcement
+    if (!daemon.requireApiKey) return next() // user opted into open (unauthenticated) LAN access
 
     const loopback = isLoopback(c)
     // Unknown address while LAN-exposed → treat as remote (fail closed).

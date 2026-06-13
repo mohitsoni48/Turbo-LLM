@@ -297,6 +297,9 @@ export type DaemonSettings = {
   /** Expose the API on the local network (spec 08 §2). Changing this requires a
    *  daemon restart to take effect (POST /api/v1/daemon/restart). */
   lanBind: boolean
+  /** Require an API key for non-loopback requests when LAN-exposed (spec 06 §5).
+   *  Off = open/unauthenticated LAN access. */
+  requireApiKey: boolean
   telemetryLevel: TelemetryLevel
   modelDefaults: ModelDefaults
   /** Whether an HF token is stored (spec 10 §4). The token itself is never echoed

@@ -533,6 +533,7 @@ export function registerApi(app: Hono, d: Deps): void {
       openBrowserOnStart?: boolean
       autoLoadOnStart?: boolean
       lanBind?: boolean
+      requireApiKey?: boolean
       telemetryLevel?: string
       modelDefaults?: { ctx?: number; ngl?: number; imageMaxTokens?: number }
       hfToken?: string
@@ -562,6 +563,8 @@ export function registerApi(app: Hono, d: Deps): void {
     // LAN expose toggle (spec 08 §2). Persist only; auto daemon-restart is deferred —
     // the UI tells the user to restart to apply.
     if (b.lanBind !== undefined) updates.lanBind = !!b.lanBind
+    // Require-API-key toggle (spec 06 §5). Off → open/unauthenticated LAN access.
+    if (b.requireApiKey !== undefined) updates.requireApiKey = !!b.requireApiKey
 
     // Telemetry consent level (spec 09 §3): off | anon | full. Validate the enum.
     let telemetryLevel: string | undefined
@@ -873,6 +876,7 @@ function settingsPayload(d: Deps) {
     openBrowserOnStart: cfg.daemon.openBrowserOnStart,
     autoLoadOnStart: cfg.autoLoadOnStart,
     lanBind: cfg.daemon.lanBind,
+    requireApiKey: cfg.daemon.requireApiKey,
     telemetryLevel,
     modelDefaults: cfg.modelDefaults,
     // The HF token is write-only over the wire (spec 10 §4): we never echo it back,
