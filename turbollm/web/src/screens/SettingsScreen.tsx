@@ -21,6 +21,7 @@ import { toast } from '../components/ui/sonner'
  *  (ADR-038). Default ON when unset. */
 const SHOW_THINKING_KEY = 'tllm.showThinking.default'
 
+
 export function SettingsScreen() {
   const { theme, setTheme } = useUiStore()
   const { query: settingsQ, save } = useSettings()

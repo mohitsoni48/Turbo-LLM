@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { openSync } from 'node:fs'
 import { serve } from '@hono/node-server'
 import { join } from 'node:path'
 import { ConfigStore, defaultConfigPath, migrateLegacyDataDir } from './config/config'
@@ -222,10 +223,19 @@ function spawnReplacement(): void {
   // streams the moment we exit (and fails outright when the parent was itself launched
   // detached). `unref()` lets the parent exit immediately. The replacement retries the
   // port bind, so it survives the brief window where this process still holds it.
+  // Send the replacement's stdout/stderr to a log file (NOT the dead parent's
+  // streams) so a failed restart leaves something to diagnose. Falls back to
+  // 'ignore' if the file can't be opened.
+  let out: number | 'ignore' = 'ignore'
+  try {
+    out = openSync(join(store.dir(), 'restart.log'), 'a')
+  } catch {
+    out = 'ignore'
+  }
   const child = spawn(process.execPath, process.argv.slice(1), {
     cwd: process.cwd(),
     detached: true,
-    stdio: 'ignore',
+    stdio: ['ignore', out, out],
   })
   child.unref()
 }
@@ -243,9 +253,13 @@ deps.requestRestart = () => {
     }
     process.exit(0)
   }
-  // Watchdog: if graceful teardown stalls (e.g. a socket refuses to drain), restart
-  // anyway. 4s is comfortably under the UI's ~10s recovery budget (spec 08 §A8).
-  const watchdog = setTimeout(finish, 4_000)
+  // Watchdog: if graceful teardown truly stalls, restart anyway. MUST exceed the
+  // engine's own force-kill window (gracefulStop force-kills llama-server after ~8s —
+  // on Windows the graceful taskkill is usually ignored, so a loaded model takes the
+  // full 8s to die). A shorter watchdog would force-exit mid-shutdown and ORPHAN the
+  // engine child (it holds GPU VRAM, so the restarted daemon then can't load a model).
+  // 14s clears the 8s kill and stays under the UI's 20s recovery give-up.
+  const watchdog = setTimeout(finish, 14_000)
   watchdog.unref()
   try {
     void manager.shutdown().finally(() => {
