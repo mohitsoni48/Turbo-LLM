@@ -1,0 +1,285 @@
+import { useState } from 'react'
+import { Check, Copy, Globe, Key, Plus, Terminal, Trash2 } from 'lucide-react'
+import { ScreenHeader } from '../components/common'
+import { Button } from '../components/ui/button'
+import { useApiKeys } from '../lib/queries'
+import { ApiError, getConnect, type ConnectInfo, type ConnectStep } from '../lib/api'
+import { toast } from '../components/ui/sonner'
+
+const BASE = window.location.origin
+
+const PUBLIC_APIS = [
+  { method: 'POST', path: '/v1/chat/completions', desc: 'OpenAI Chat Completions' },
+  { method: 'POST', path: '/v1/messages',          desc: 'Anthropic Messages' },
+  { method: 'GET',  path: '/v1/models',             desc: 'OpenAI Models List' },
+  { method: 'GET',  path: '/api/v1/status',         desc: 'Daemon Status' },
+  { method: 'GET',  path: '/api/v1/engines',        desc: 'Engine Registry' },
+  { method: 'GET',  path: '/api/v1/models',         desc: 'Model Library' },
+  { method: 'GET',  path: '/api/v1/keys',           desc: 'API Keys' },
+] as const
+
+const CLI_LIST = [
+  { id: 'claude-code', name: 'Claude Code', desc: 'Anthropic-compatible endpoint — the hero demo' },
+  { id: 'opencode',    name: 'opencode',    desc: 'OpenAI-compatible, AI SDK provider config' },
+  { id: 'kilo',        name: 'Kilo Code',   desc: 'OpenAI-compatible, kilo.jsonc provider entry' },
+  { id: 'qwen',        name: 'Qwen Code',   desc: 'OpenAI-compatible (OPENAI_BASE_URL)' },
+]
+
+export function DeveloperScreen() {
+  return (
+    <div className="mx-auto max-w-2xl px-6 py-6">
+      <ScreenHeader title="Developer" description="Server URLs, API endpoints, keys, and CLI setup." />
+      <div className="flex flex-col gap-6">
+        <ServerSection />
+        <ApiKeysSection />
+        <ApisSection />
+        <ConnectSection />
+      </div>
+    </div>
+  )
+}
+
+// ── Server ────────────────────────────────────────────────────────────────────
+
+function ServerSection() {
+  return (
+    <section className="rounded-lg border border-border bg-panel p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <Globe size={15} className="text-accent" />
+        <h2 className="text-[13px] font-semibold uppercase tracking-wide text-faint">Server</h2>
+      </div>
+      <div className="flex items-center justify-between py-1">
+        <span className="text-[13px] text-muted">Local URL</span>
+        <div className="flex items-center gap-2">
+          <code className="font-mono text-[13px] text-ink">{BASE}</code>
+          <CopyBtn text={BASE} />
+        </div>
+      </div>
+    </section>
+  )
+}
+
+// ── API Keys ──────────────────────────────────────────────────────────────────
+
+function ApiKeysSection() {
+  const { query, create, revoke } = useApiKeys()
+  const [newName, setNewName] = useState('')
+  const [justCreated, setJustCreated] = useState<string | null>(null)
+  const keys = query.data?.keys ?? []
+
+  const handleCreate = () => {
+    const name = newName.trim()
+    if (!name) return
+    create.mutate(name, {
+      onSuccess: (data) => { setNewName(''); setJustCreated(data.key) },
+      onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not create key.'),
+    })
+  }
+
+  const handleRevoke = (id: string, prefix: string) => {
+    revoke.mutate(id, {
+      onSuccess: () => {
+        if (justCreated?.startsWith(prefix)) setJustCreated(null)
+      },
+      onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not revoke key.'),
+    })
+  }
+
+  return (
+    <section className="rounded-lg border border-border bg-panel p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <Key size={15} className="text-accent" />
+        <h2 className="text-[13px] font-semibold uppercase tracking-wide text-faint">API Keys</h2>
+      </div>
+
+      {justCreated && (
+        <div
+          className="mb-4 rounded-md border p-3"
+          style={{ borderColor: 'var(--ok)', background: 'color-mix(in srgb, var(--ok) 8%, transparent)' }}
+        >
+          <p className="mb-1.5 text-[12px] font-medium" style={{ color: 'var(--ok)' }}>
+            Key created — copy it now, it won't be shown again.
+          </p>
+          <div className="flex items-center gap-2 rounded border border-border bg-bg px-2 py-1.5">
+            <code className="min-w-0 flex-1 break-all font-mono text-[12px] text-ink">{justCreated}</code>
+            <CopyBtn text={justCreated} />
+          </div>
+        </div>
+      )}
+
+      {keys.length === 0 && !justCreated && (
+        <p className="mb-3 text-[13px] text-faint">No API keys yet.</p>
+      )}
+
+      {keys.length > 0 && (
+        <div className="mb-3 divide-y divide-border rounded-md border border-border">
+          {keys.map((k) => (
+            <div key={k.id} className="flex items-center justify-between px-3 py-2.5">
+              <div>
+                <span className="text-[13px] font-medium text-ink">{k.name}</span>
+                <span className="ml-2 font-mono text-[11px] text-faint">{k.prefix}…</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleRevoke(k.id, k.prefix)}
+                className="rounded p-1 text-faint transition-colors hover:text-err"
+                title="Revoke key"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        <input
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          placeholder="Key name (e.g. claude-code)"
+          className="flex-1 rounded-md border border-border bg-bg px-2.5 py-1.5 text-[13px] text-ink outline-none placeholder:text-faint focus:border-[color:var(--accent)]"
+          onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
+        />
+        <Button size="sm" onClick={handleCreate} disabled={!newName.trim() || create.isPending}>
+          <Plus size={13} />
+          {create.isPending ? 'Creating…' : 'Create'}
+        </Button>
+      </div>
+    </section>
+  )
+}
+
+// ── Available APIs ─────────────────────────────────────────────────────────────
+
+function ApisSection() {
+  return (
+    <section className="rounded-lg border border-border bg-panel p-4">
+      <h2 className="mb-3 text-[13px] font-semibold uppercase tracking-wide text-faint">Available APIs</h2>
+      <div className="divide-y divide-border rounded-md border border-border">
+        {PUBLIC_APIS.map(({ method, path, desc }) => (
+          <div key={path} className="flex items-center gap-3 px-3 py-2">
+            <span
+              className="w-10 shrink-0 rounded px-1 py-0.5 text-center font-mono text-[10px] font-bold uppercase"
+              style={{
+                background: method === 'GET'
+                  ? 'color-mix(in srgb, var(--ok) 15%, transparent)'
+                  : 'color-mix(in srgb, var(--accent) 15%, transparent)',
+                color: method === 'GET' ? 'var(--ok)' : 'var(--accent)',
+              }}
+            >
+              {method}
+            </span>
+            <span className="min-w-0 flex-1 truncate font-mono text-[13px] text-ink">{path}</span>
+            <span className="hidden shrink-0 text-[11px] text-muted sm:block">{desc}</span>
+            <CopyBtn text={`${BASE}${path}`} />
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+// ── Connect a CLI ─────────────────────────────────────────────────────────────
+
+function ConnectSection() {
+  return (
+    <section className="rounded-lg border border-border bg-panel p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <Terminal size={15} className="text-accent" />
+        <h2 className="text-[13px] font-semibold uppercase tracking-wide text-faint">Connect a CLI</h2>
+      </div>
+      <div className="flex flex-col gap-2.5">
+        {CLI_LIST.map((cli) => (
+          <ConnectCard key={cli.id} cli={cli} />
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function ConnectCard({ cli }: { cli: { id: string; name: string; desc: string } }) {
+  const [info, setInfo] = useState<ConnectInfo | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [visible, setVisible] = useState(false)
+
+  const toggle = () => {
+    if (visible) { setVisible(false); return }
+    if (info) { setVisible(true); return }
+    setLoading(true)
+    void getConnect(cli.id)
+      .then((data) => { setInfo(data); setVisible(true) })
+      .catch(() => toast.error('Could not fetch setup snippets.'))
+      .finally(() => setLoading(false))
+  }
+
+  return (
+    <div className="rounded-md border border-border bg-bg">
+      <div className="flex items-center justify-between px-3 py-2.5">
+        <div>
+          <span className="text-[13px] font-semibold text-ink">{cli.name}</span>
+          <span className="ml-2 text-[11px] text-muted">{cli.desc}</span>
+        </div>
+        <Button size="sm" variant={visible ? 'outline' : 'default'} onClick={toggle} disabled={loading}>
+          {loading ? 'Loading…' : visible ? 'Hide' : 'Get setup'}
+        </Button>
+      </div>
+      {visible && info && (
+        <div className="flex flex-col gap-2.5 border-t border-border px-3 pb-3 pt-2.5">
+          {info.steps.map((step, i) => (
+            <SnippetBlock key={i} step={step} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SnippetBlock({ step }: { step: ConnectStep }) {
+  const [copied, setCopied] = useState(false)
+  const copy = () => {
+    void navigator.clipboard.writeText(step.snippet).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
+  }
+  return (
+    <div>
+      <div className="mb-1 text-[11px] text-faint">{step.label}</div>
+      <div className="relative rounded border border-border bg-panel-2">
+        <pre className="overflow-x-auto whitespace-pre-wrap break-all px-3 py-2 pr-10 font-mono text-[12px] leading-relaxed text-ink">
+          {step.snippet}
+        </pre>
+        <button
+          type="button"
+          onClick={copy}
+          title="Copy"
+          className="absolute right-2 top-2 rounded p-1 text-muted transition-colors hover:text-ink"
+        >
+          {copied ? <Check size={13} className="text-green-500" /> : <Copy size={13} />}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ── Shared ────────────────────────────────────────────────────────────────────
+
+function CopyBtn({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+  const copy = () => {
+    void navigator.clipboard.writeText(text).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
+  }
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      className="shrink-0 rounded p-1 text-faint transition-colors hover:text-ink"
+      title="Copy"
+    >
+      {copied ? <Check size={13} style={{ color: 'var(--ok)' }} /> : <Copy size={13} />}
+    </button>
+  )
+}

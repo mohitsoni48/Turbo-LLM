@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { MessageSquarePlus, Search, Trash2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, MessageSquarePlus, Search, Trash2 } from 'lucide-react'
 import type { Conversation } from '../../lib/chat-types'
 import { useConversationMutations, useConversations } from '../../lib/chat-queries'
 import { Button } from '../../components/ui/button'
@@ -18,10 +18,14 @@ export function ConversationSidebar({
   activeId,
   onSelect,
   onNew,
+  collapsed,
+  onToggle,
 }: {
   activeId: string | null
   onSelect: (id: string) => void
   onNew: () => void
+  collapsed?: boolean
+  onToggle?: () => void
 }) {
   const [q, setQ] = useState('')
   const [debouncedQ, setDebouncedQ] = useState('')
@@ -50,9 +54,29 @@ export function ConversationSidebar({
     })
   }
 
+  if (collapsed) {
+    return (
+      <div className="flex h-full flex-col items-center gap-1 border-r border-border bg-panel-2 py-3">
+        {onToggle && (
+          <Button size="icon" variant="ghost" onClick={onToggle} title="Expand sidebar" className="h-7 w-7">
+            <ChevronRight size={15} />
+          </Button>
+        )}
+        <Button size="icon" variant="ghost" onClick={onNew} title="New chat (Ctrl+N)" className="h-7 w-7">
+          <MessageSquarePlus size={15} />
+        </Button>
+      </div>
+    )
+  }
+
   return (
     <div className="flex h-full flex-col border-r border-border bg-panel-2">
       <div className="flex items-center gap-2 px-3 py-3">
+        {onToggle && (
+          <Button size="icon" variant="ghost" onClick={onToggle} title="Collapse sidebar" className="h-7 w-7 shrink-0">
+            <ChevronLeft size={15} />
+          </Button>
+        )}
         <div className="relative flex-1">
           <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-faint" />
           <Input

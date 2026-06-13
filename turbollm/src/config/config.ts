@@ -3,7 +3,7 @@
 // so no locking is needed. Unknown JSON fields ride along on `data` and are
 // preserved across round-trips for free.
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -51,6 +51,15 @@ export interface LastLoaded {
 export interface HF {
   token: string
 }
+/** Global model defaults (spec 05 §3): the base LoadProfile values applied when a
+ *  model is first seen and has no saved per-model profile. Saved profiles and
+ *  per-request overrides still take precedence; these only replace the built-in
+ *  heuristics for the listed fields. */
+export interface ModelDefaults {
+  ctx: number
+  ngl: number
+  imageMaxTokens?: number
+}
 /** TRANSITIONAL (A1/A2): carries the model path + extra args until the
  *  model/profile system (spec 05, A4) replaces it. */
 export interface DevModel {
@@ -66,10 +75,14 @@ export interface Config {
   engines: Engine[]
   activeEngineId: string
   modelDirs: string[]
+  /** The folder downloads/imports land in (spec 01 §3, ADR-035). When '' or not in
+   *  modelDirs, the FIRST entry in modelDirs is the effective default. */
+  primaryModelDir: string
   modelProfiles: Record<string, unknown>
   lastLoaded: LastLoaded
   autoLoadOnStart: boolean
   hf: HF
+  modelDefaults: ModelDefaults
   featuredOverrideUrl: string
   devModel?: DevModel
 }
@@ -84,14 +97,69 @@ export class ValueError extends Error {
   }
 }
 
-function userConfigDir(): string {
-  if (process.platform === 'win32') return process.env.APPDATA || join(homedir(), 'AppData', 'Roaming')
-  if (process.platform === 'darwin') return join(homedir(), 'Library', 'Application Support')
-  return process.env.XDG_CONFIG_HOME || join(homedir(), '.config')
+/** Pre-0.x location: the platform config dir (`%APPDATA%`, `~/Library/Application
+ *  Support`, `~/.config`). Kept only so {@link migrateLegacyDataDir} can move old
+ *  state into the canonical `~/.turbollm` dir. */
+function legacyDataDir(): string {
+  const base =
+    process.platform === 'win32'
+      ? process.env.APPDATA || join(homedir(), 'AppData', 'Roaming')
+      : process.platform === 'darwin'
+        ? join(homedir(), 'Library', 'Application Support')
+        : process.env.XDG_CONFIG_HOME || join(homedir(), '.config')
+  return join(base, 'turbollm')
+}
+
+/** Canonical data directory: `~/.turbollm` on every OS (one stable, discoverable
+ *  home for config, chats, engines, caches — same model as `~/.ollama`). All
+ *  daemon state lives here; a `--config` override redirects it elsewhere. */
+export function defaultDataDir(): string {
+  return join(homedir(), '.turbollm')
 }
 
 export function defaultConfigPath(): string {
-  return join(userConfigDir(), 'turbollm', 'config.json')
+  return join(defaultDataDir(), 'config.json')
+}
+
+/** One-time move of pre-0.x state from the platform config dir into `~/.turbollm`,
+ *  so existing config/engines/chats/caches survive the relocation. No-op once the
+ *  new dir exists, when there's nothing to migrate, or when the two coincide.
+ *  Call ONLY for the default location — never when `--config` overrides the path. */
+export function migrateLegacyDataDir(): void {
+  const next = defaultDataDir()
+  const prev = legacyDataDir()
+  if (prev === next || existsSync(next) || !existsSync(prev)) return
+  try {
+    mkdirSync(dirname(next), { recursive: true })
+    renameSync(prev, next) // same volume (both under the home tree) → atomic
+  } catch {
+    // Cross-device or a locked file (e.g. an old daemon still holding the DB):
+    // fall back to a recursive copy and leave the legacy dir in place.
+    try {
+      cpSync(prev, next, { recursive: true })
+    } catch {
+      /* leave legacy state where it is; a fresh default config will be written */
+      return
+    }
+  }
+  // Engine binPaths are absolute and may point into the old data dir (managed
+  // llama.cpp builds live under <dataDir>/engines/…). Repoint them at the new
+  // location so they don't dangle after the move.
+  try {
+    const cfgPath = join(next, 'config.json')
+    if (!existsSync(cfgPath)) return
+    const cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as { engines?: { binPath?: string }[] }
+    let changed = false
+    for (const e of cfg.engines ?? []) {
+      if (typeof e.binPath === 'string' && e.binPath.startsWith(prev)) {
+        e.binPath = next + e.binPath.slice(prev.length)
+        changed = true
+      }
+    }
+    if (changed) writeFileSync(cfgPath, JSON.stringify(cfg, null, 2))
+  } catch {
+    /* best effort — a dangling managed build is pruned at startup anyway */
+  }
 }
 
 export function defaultConfig(): Config {
@@ -112,10 +180,12 @@ export function defaultConfig(): Config {
     engines: [],
     activeEngineId: '',
     modelDirs: [],
+    primaryModelDir: '',
     modelProfiles: {},
     lastLoaded: { modelKey: '', engineId: '' },
     autoLoadOnStart: false,
     hf: { token: '' },
+    modelDefaults: { ctx: 8192, ngl: 99, imageMaxTokens: 0 },
     featuredOverrideUrl: '',
   }
 }
@@ -247,13 +317,22 @@ function normalize(c: Config): void {
   c.daemon = { ...d.daemon, ...(c.daemon ?? {}) }
   c.telemetry = { ...d.telemetry, ...(c.telemetry ?? {}) }
   c.hf = { ...d.hf, ...(c.hf ?? {}) }
+  // Missing in pre-modelDefaults config files → fall back to the built-in defaults
+  // (treat absent as defaults; never throw on an old file).
+  c.modelDefaults = { ...d.modelDefaults, ...(c.modelDefaults ?? {}) }
   c.lastLoaded = { ...d.lastLoaded, ...(c.lastLoaded ?? {}) }
   c.apiKeys ??= []
   c.engines ??= []
   c.modelDirs ??= []
+  // Primary model dir (spec 01 §3, ADR-035): absent in old files → '' (effective
+  // default falls back to the first modelDir). Never throw on an old config.
+  c.primaryModelDir ??= ''
   c.modelProfiles ??= {}
   c.autoLoadOnStart ??= false
   c.featuredOverrideUrl ??= ''
+  // Telemetry level (spec 09 §3): the UI exposes 'off' | 'anon' | 'full'. Migrate
+  // legacy/unknown values safely → 'off' (the conservative, opt-in default).
+  c.telemetry.level = normalizeTelemetryLevel(c.telemetry.level)
   for (const e of c.engines) {
     e.capabilities ??= { kvTypes: [], flags: [] }
     e.capabilities.kvTypes ??= []
@@ -261,7 +340,24 @@ function normalize(c: Config): void {
   }
   if (c.activeEngineId && !c.engines.some((e) => e.id === c.activeEngineId)) c.activeEngineId = ''
   if (!c.activeEngineId && c.engines.length > 0) c.activeEngineId = c.engines[0].id
+  // A primary that no longer exists in modelDirs (folder removed/renamed) falls
+  // back to the effective default (first dir) — reset rather than throw.
+  if (c.primaryModelDir && !c.modelDirs.includes(c.primaryModelDir)) c.primaryModelDir = ''
   c.version = SCHEMA_VERSION
+}
+
+/** Telemetry consent levels exposed in the UI (spec 09 §3). The stored config may
+ *  additionally hold the first-run sentinel 'unset' (drives the consent modal); it
+ *  is preserved on disk but maps to 'off' when surfaced as a settings enum value. */
+export type TelemetryLevel = 'off' | 'anon' | 'full'
+
+/** Coerce a stored telemetry level to a known value. Preserves the first-run
+ *  sentinel 'unset'; migrates the legacy 'benchmarks' label → 'anon'; anything
+ *  unrecognized → 'off'. Never throws (fail-safe on old/garbage config). */
+function normalizeTelemetryLevel(level: unknown): string {
+  if (level === 'unset' || level === 'off' || level === 'anon' || level === 'full') return level
+  if (level === 'benchmarks' || level === 'anonymous') return 'anon' // legacy spec label
+  return 'off'
 }
 
 function validate(c: Config): void {

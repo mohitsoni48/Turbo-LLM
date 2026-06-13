@@ -46,10 +46,22 @@ export type EngineProvision = {
   error: string | null
 }
 
+/** Live running-session stats (B4), from GET /api/v1/status. Null unless the
+ *  engine is running; resets each time the engine starts/stops. */
+export type EngineStats = {
+  requests: number
+  inputTokens: number
+  outputTokens: number
+  avgPromptTps: number
+  avgGenTps: number
+  sinceMs: number
+}
+
 export type Status = {
   version: string
   engine: EngineRuntime
   model: LoadedModel | null
+  engineStats?: EngineStats | null
   bench: { running: boolean; step?: number; total?: number; label?: string }
   downloads: { active: number }
   engineProvision?: EngineProvision
@@ -78,19 +90,22 @@ export type EnginesList = {
   activeEngineId: string
 }
 
-/** A selectable llama.cpp backend variant (ADR-025). */
+/** A selectable llama.cpp backend variant (ADR-025). A "build" of the official
+ *  engine. `engineId` is the registered engine to activate once installed. */
 export type BackendInfo = {
   id: string
   label: string
   installed: boolean
   recommended: boolean
   active: boolean
+  engineId: string
 }
 
 export type MlxInfo = {
   supported: boolean
   installed: boolean
   active: boolean
+  engineId: string
 }
 
 export type EngineBackends = {
@@ -138,6 +153,8 @@ export type ModelEntry = {
   headCountKv: number
   moe: boolean
   expertCount: number
+  /** >0 when the GGUF carries a built-in NextN multi-token-prediction head. */
+  nextnLayers: number
   vision: boolean
   mmprojPath: string | null
   hasChatTemplate: boolean
@@ -146,6 +163,12 @@ export type ModelEntry = {
   loaded: boolean
   hasProfile: boolean
   benchTps: number | null
+  /** Most-recent gen t/s recorded for this model in chat (spec 04 §5); null if
+   *  never chatted with. */
+  lastTps: number | null
+  /** Live gen t/s for the currently-loaded model; null unless this model is loaded
+   *  and a recent figure exists (best-effort until a full session accumulator lands). */
+  liveTps: number | null
   mtime: string
 }
 
@@ -157,6 +180,9 @@ export type ModelsList = {
 
 export type ModelDirs = {
   dirs: string[]
+  /** The EFFECTIVE primary folder downloads/imports land in (spec 01 §3, ADR-035):
+   *  the configured primary, or the first folder when unset. '' when no folders. */
+  primaryDir: string
 }
 
 // ── Load profiles + VRAM fit (A4, spec 05) ───────────────────────────────────
@@ -209,4 +235,6 @@ export type ModelDetail = ModelEntry & {
   profile: LoadProfile
   vramFit: VramFit
   gpu: SysGpu | null
+  /** Logical CPU cores — drives the threads slider max + the "Auto" hint. */
+  cores: number
 }

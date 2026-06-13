@@ -1,7 +1,7 @@
 // Engine probe (spec 03 §3): run <bin> --version and --help to capture the
 // version + a capability fingerprint. Ports the verified Go probe.
 import { execFile } from 'node:child_process'
-import { existsSync, statSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 export interface ProbeResult {
@@ -23,11 +23,31 @@ const RE_VERSION = /^\s*version:\s*(.+?)\s*$/im
 const RE_FLAG = /--[a-z0-9][a-z0-9-]+/g
 const KNOWN_KV = ['f16', 'q8_0', 'q4_0', 'q4_1', 'q5_0', 'q5_1', 'q8_1']
 
+/** execFile error carrying the Node-specific fields we inspect for the timeout
+ *  case (`killed` + `signal` are set when the `timeout` option fires). */
+type ExecError = Error & { killed?: boolean; signal?: NodeJS.Signals | null; code?: string | number }
+
+/** True when execFile aborted the process because it exceeded the `timeout`
+ *  option — Node sets `killed: true` and `signal` to the kill signal (SIGTERM by
+ *  default). Distinguishes a hung binary from one that exits non-zero. */
+function isTimeout(err: Error | null): boolean {
+  if (!err) return false
+  const e = err as ExecError
+  return e.killed === true && (e.signal === 'SIGTERM' || e.signal != null)
+}
+
 function runCaptured(bin: string, arg: string): Promise<{ out: string; err: Error | null }> {
   return new Promise((resolve) => {
-    execFile(bin, [arg], { cwd: dirname(bin), timeout: 10_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
-      resolve({ out: (stdout || '') + (stderr || ''), err: error })
-    })
+    // execFile normally reports spawn failures via the callback, but on Windows a
+    // corrupt / wrong-arch binary can make it throw synchronously — catch that so
+    // it folds into a clean `probe_failed` instead of escaping as a 500.
+    try {
+      execFile(bin, [arg], { cwd: dirname(bin), timeout: 10_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
+        resolve({ out: (stdout || '') + (stderr || ''), err: error })
+      })
+    } catch (e) {
+      resolve({ out: '', err: e as Error })
+    }
   })
 }
 
@@ -35,9 +55,33 @@ export async function probe(bin: string): Promise<ProbeResult> {
   if (!existsSync(bin) || statSync(bin).isDirectory()) {
     throw new ProbeError('binary_not_found', 'Binary not found at that path.')
   }
+
+  // Catch the common mistake — a binary built for a different OS (e.g. a Windows
+  // .exe selected on macOS) — and explain it precisely instead of letting the
+  // OS refuse to run it and surfacing a vague "could not run" (spec 03 §2
+  // `binary_not_executable`). Native-format check via magic bytes; foreign
+  // formats only — an unrecognised header (e.g. a shell-script wrapper) is left
+  // to the execution probe below rather than blocked here.
+  const fmt = detectFormat(bin)
+  const expected: BinFormat =
+    process.platform === 'win32' ? 'pe' : process.platform === 'darwin' ? 'macho' : 'elf'
+  if (fmt !== 'unknown' && fmt !== expected) {
+    throw new ProbeError(
+      'binary_not_executable',
+      `This looks like a ${osLabel(fmt)} binary, but TurboLLM is running on ${osLabel(expected)}. ` +
+        `Use the ${osLabel(expected)} build of the engine.`,
+    )
+  }
+
   const v = await runCaptured(bin, '--version')
   const h = await runCaptured(bin, '--help')
   if (v.err && h.err) {
+    // Both invocations failed because the binary never exited within the 10s
+    // timeout — surface a distinct `probe_timeout` (spec 03 §2) so the UI can
+    // tell a hung/arg-hungry binary apart from one that exited non-zero.
+    if (isTimeout(v.err) && isTimeout(h.err)) {
+      throw new ProbeError('probe_timeout', 'The binary did not respond within 10 seconds.')
+    }
     let msg = 'Could not run the binary (--version and --help both failed).'
     const tail = lastLine(v.out)
     if (tail) msg += ' ' + tail
@@ -53,7 +97,55 @@ export async function probe(bin: string): Promise<ProbeResult> {
   const kvTypes = flags.includes('--cache-type-k') ? [...KNOWN_KV] : ['f16']
   if (combined.toLowerCase().includes('turbo')) kvTypes.push('turbo2', 'turbo3', 'turbo4')
 
-  return { version, capabilities: { kvTypes, flags } }
+  // Capture the accepted `--spec-type` enum values (e.g. `none,draft-mtp,nextn`)
+  // as `spec-type:<value>` pseudo-flags. The enum differs by engine — official
+  // llama.cpp has no `nextn`, the TurboQuant fork does — so speculative-decoding
+  // arg emission must check the VALUE is accepted, not just that the flag exists.
+  // The enum's printed form differs by engine: official llama.cpp lists it
+  // comma-separated (`none,draft-mtp,...`), the TurboQuant fork bracket/pipe
+  // (`[none|draft|nextn|...]`). Match only the actual enum (a bracket group, or a
+  // multi-value comma/pipe list) — never the prose mentions like `--spec-type mtp,
+  // or ...` — and union the values across all such occurrences.
+  const ENUM_RE = /--spec-type\s+(\[[^\]\n]+\]|[a-z][a-z0-9_-]*(?:[,|][a-z0-9_-]+)+)/gi
+  for (const m2 of h.out.matchAll(ENUM_RE)) {
+    for (const v of m2[1].replace(/[[\]]/g, '').split(/[,|]/)) {
+      const t = v.trim()
+      if (t) flags.push(`spec-type:${t}`)
+    }
+  }
+
+  return { version, capabilities: { kvTypes, flags: [...new Set(flags)].sort() } }
+}
+
+type BinFormat = 'pe' | 'elf' | 'macho' | 'unknown'
+
+/** Identify a native executable by its leading magic bytes. Returns 'unknown'
+ *  for anything we can't positively classify (scripts, unreadable files). */
+function detectFormat(bin: string): BinFormat {
+  let fd: number | undefined
+  try {
+    fd = openSync(bin, 'r')
+    const buf = Buffer.alloc(4)
+    const n = readSync(fd, buf, 0, 4, 0)
+    if (n >= 2 && buf[0] === 0x4d && buf[1] === 0x5a) return 'pe' // "MZ" — Windows PE
+    if (n >= 4) {
+      if (buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46) return 'elf' // 0x7F ELF
+      const be = buf.readUInt32BE(0)
+      const le = buf.readUInt32LE(0)
+      // Mach-O thin (feedface/feedfacf) + universal/fat (cafebabe/cafebabf).
+      const macho = new Set([0xfeedface, 0xfeedfacf, 0xcafebabe, 0xcafebabf])
+      if (macho.has(be) || macho.has(le)) return 'macho'
+    }
+    return 'unknown'
+  } catch {
+    return 'unknown'
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
+
+function osLabel(fmt: BinFormat): string {
+  return fmt === 'pe' ? 'Windows' : fmt === 'macho' ? 'macOS' : 'Linux'
 }
 
 function firstNonEmptyLine(s: string): string {

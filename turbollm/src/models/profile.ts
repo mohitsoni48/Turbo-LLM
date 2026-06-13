@@ -1,7 +1,7 @@
 // LoadProfile: per-model launch parameters, default derivation, VRAM-fit
 // estimation, and the profile->llama-server arg mapping (spec 05). This
 // productizes the hand-tuned models.json knowledge.
-import type { Capabilities } from '../config/config'
+import type { Capabilities, ModelDefaults } from '../config/config'
 import type { SysInfo } from '../sysinfo/sysinfo'
 import type { ModelEntry } from './scanner'
 
@@ -101,10 +101,12 @@ export function deriveDefault(m: ModelEntry, sys: SysInfo): LoadProfile {
     kvUnified: true,
     kvTypeK: 'f16',
     kvTypeV: 'f16',
-    flashAttn: 'auto',
-    // Default CPU threads = half the logical cores (leaves headroom for the OS
-    // and other work); user-overridable in the load settings.
-    threads: Math.max(1, Math.floor(sys.cores / 2)),
+    // Flash attention on by default — faster and lower KV memory on every modern
+    // backend; gated by engine capability in profileToArgs so it's a safe default.
+    flashAttn: 'on',
+    // CPU threads: 0 = auto, resolved to half the logical cores at launch
+    // (profileToArgs) — leaves headroom for the OS; user-overridable via slider.
+    threads: 0,
     threadsBatch: 0,
     useMmproj: m.vision,
     mmprojGpu: true,
@@ -112,7 +114,10 @@ export function deriveDefault(m: ModelEntry, sys: SysInfo): LoadProfile {
     cacheReuse: 256,
     useJinja: m.hasChatTemplate,
     chatTemplateFile: '',
-    speculative: 'off',
+    // Enable NextN self-speculative decoding by default whenever the GGUF carries
+    // a built-in head (`nextn_predict_layers` > 0) — free speed-up. Only actually
+    // applied when the engine supports it (profileToArgs gates on --spec-type).
+    speculative: m.nextnLayers > 0 ? 'nextn' : 'off',
     mtpHeadPath: '',
     draftModelPath: '',
     sampling: defaultSampling(),
@@ -133,14 +138,34 @@ export function deriveDefault(m: ModelEntry, sys: SysInfo): LoadProfile {
   return base
 }
 
-/** Merge defaults <- saved <- overrides (field-level; sampling deep-merged). */
+/** Apply the global model defaults (spec 05 §3) on top of the built-in heuristics.
+ *  Only the fields the user can set globally are overlaid; everything else keeps
+ *  the per-model heuristic value. `ngl` is clamped to 0 when no GPU is present so a
+ *  default tuned for a GPU box can't force layer offload on a CPU-only machine. */
+function applyGlobalDefaults(base: LoadProfile, m: ModelEntry, sys: SysInfo, defaults?: ModelDefaults): LoadProfile {
+  if (!defaults) return base
+  const hasGpu = sys.gpus.length > 0
+  // Honor the global ctx but never exceed the model's native context window.
+  const nativeCap = m.nativeCtx
+  return {
+    ...base,
+    ctx: defaults.ctx > 0 ? (nativeCap > 0 ? Math.min(defaults.ctx, nativeCap) : defaults.ctx) : base.ctx,
+    ngl: hasGpu ? defaults.ngl : 0,
+    imageMaxTokens: defaults.imageMaxTokens ?? base.imageMaxTokens,
+  }
+}
+
+/** Merge heuristics <- global defaults <- saved <- overrides (field-level; sampling
+ *  deep-merged). Precedence highest→lowest: per-request overrides > saved per-model
+ *  profile > global model defaults > built-in heuristics (spec 05 §3). */
 export function resolveProfile(
   m: ModelEntry,
   sys: SysInfo,
   saved?: Partial<LoadProfile>,
   overrides?: Partial<LoadProfile>,
+  defaults?: ModelDefaults,
 ): LoadProfile {
-  const base = deriveDefault(m, sys)
+  const base = applyGlobalDefaults(deriveDefault(m, sys), m, sys, defaults)
   return {
     ...base,
     ...(saved ?? {}),
@@ -152,7 +177,7 @@ export function resolveProfile(
 /** Map a profile to llama-server args (spec 05 §8). The manager injects
  *  -m/--host/--port/--metrics/--no-webui; this returns everything else.
  *  Flags absent from the engine's capabilities are skipped (graceful degrade). */
-export function profileToArgs(p: LoadProfile, m: ModelEntry, caps: Capabilities): string[] {
+export function profileToArgs(p: LoadProfile, m: ModelEntry, caps: Capabilities, cores = 0): string[] {
   const has = (flag: string) => caps.flags.length === 0 || caps.flags.includes(flag)
   const a: string[] = ['-c', String(p.ctx)]
   if (p.ngl > 0) a.push('-ngl', String(p.ngl))
@@ -164,7 +189,9 @@ export function profileToArgs(p: LoadProfile, m: ModelEntry, caps: Capabilities)
   if (p.kvTypeK !== 'f16' && has('--cache-type-k')) a.push('--cache-type-k', p.kvTypeK)
   if (p.kvTypeV !== 'f16' && has('--cache-type-v')) a.push('--cache-type-v', p.kvTypeV)
   if (p.flashAttn !== 'auto' && has('--flash-attn')) a.push('--flash-attn', p.flashAttn)
-  if (p.threads > 0) a.push('--threads', String(p.threads))
+  // threads 0 = auto → half the logical cores (matches the UI's "Auto" label).
+  const threads = p.threads > 0 ? p.threads : cores > 0 ? Math.max(1, Math.floor(cores / 2)) : 0
+  if (threads > 0) a.push('--threads', String(threads))
   if (p.threadsBatch > 0) a.push('--threads-batch', String(p.threadsBatch))
   if (m.vision && p.useMmproj && m.mmprojPath) a.push('--mmproj', m.mmprojPath)
   if (m.vision && p.useMmproj && !p.mmprojGpu && has('--no-mmproj-offload')) a.push('--no-mmproj-offload')
@@ -177,11 +204,18 @@ export function profileToArgs(p: LoadProfile, m: ModelEntry, caps: Capabilities)
   //   nextn → Qwen3 NextN: point --model-draft at the SAME main-model GGUF
   //   draft → mainline: a separate small draft GGUF
   const specType = has('--spec-type')
+  // Whether the engine accepts a given `--spec-type` value (captured by the probe
+  // as `spec-type:<value>`). Empty flags = unprobed → allow (graceful degrade).
+  const specAccepts = (v: string) => caps.flags.length === 0 || caps.flags.includes(`spec-type:${v}`)
   if (p.speculative === 'mtp' && p.mtpHeadPath && has('--mtp-head')) {
     if (specType) a.push('--spec-type', 'mtp')
     a.push('--mtp-head', p.mtpHeadPath)
   } else if (p.speculative === 'nextn' && specType && has('--model-draft')) {
-    a.push('--spec-type', 'nextn', '--model-draft', m.path)
+    // Qwen3 NextN drives the model's OWN built-in head as the draft. The fork
+    // names that spec-type `nextn`; mainline llama.cpp names the same mechanism
+    // `draft-mtp`. Use whichever the engine accepts — skip if neither.
+    const nextnVal = ['nextn', 'draft-mtp'].find((v) => specAccepts(v))
+    if (nextnVal) a.push('--spec-type', nextnVal, '--model-draft', m.path)
   } else if (p.speculative === 'draft' && p.draftModelPath && has('--model-draft')) {
     if (specType) a.push('--spec-type', 'draft')
     a.push('--model-draft', p.draftModelPath, '--draft-max', '16', '--draft-min', '1')

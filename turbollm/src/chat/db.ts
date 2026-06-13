@@ -9,6 +9,9 @@ export interface Conversation {
   systemPrompt: string
   modelKey: string
   sampling: Record<string, number>
+  /** When true, this is the built-in TurboLLM Expert thread: its system prompt is
+   *  managed server-side and hidden from the UI (spec 08 §2). */
+  expertMode: boolean
   createdAt: string
   updatedAt: string
   messages?: Message[]
@@ -43,8 +46,8 @@ export interface Message {
   createdAt: string
 }
 
-interface ConvRow { id: string; title: string; system_prompt: string; model_key: string; sampling: string; created_at: string; updated_at: string }
-interface MsgRow  { id: string; conv_id: string; seq: number; role: 'user' | 'assistant'; content: string; reasoning: string; attachments: string; stats: string; created_at: string }
+interface ConvRow { id: string; title: string; system_prompt: string; model_key: string; sampling: string; expert_mode: number; created_at: string; updated_at: string }
+interface MsgRow  { id: string; conv_id: string; seq: number; role: 'user' | 'assistant'; content: string; reasoning: string; attachments: string; stats: string; model_key: string | null; created_at: string }
 
 // node:sqlite named-param objects need an explicit cast to Record<string, SQLInputValue>
 type P = Record<string, SQLInputValue>
@@ -52,7 +55,7 @@ type P = Record<string, SQLInputValue>
 function safeJson(s: string): unknown { try { return JSON.parse(s) } catch { return {} } }
 
 function rowToConv(r: ConvRow): Conversation {
-  return { id: r.id, title: r.title, systemPrompt: r.system_prompt, modelKey: r.model_key, sampling: safeJson(r.sampling) as Record<string, number>, createdAt: r.created_at, updatedAt: r.updated_at }
+  return { id: r.id, title: r.title, systemPrompt: r.system_prompt, modelKey: r.model_key, sampling: safeJson(r.sampling) as Record<string, number>, expertMode: r.expert_mode === 1, createdAt: r.created_at, updatedAt: r.updated_at }
 }
 
 function rowToMsg(r: MsgRow): Message {
@@ -90,6 +93,24 @@ export class ConversationStore {
         PRAGMA user_version = 1;
       `)
     }
+    // v2 (spec 04 §5): attribute each assistant reply to the model that produced it
+    // so the Models screen can show last-session gen t/s per model. Nullable — old
+    // rows stay NULL and are simply not counted (non-breaking).
+    if (v < 2) {
+      this.db.exec(`
+        ALTER TABLE messages ADD COLUMN model_key TEXT;
+        CREATE INDEX IF NOT EXISTS idx_messages_model ON messages(model_key, created_at);
+        PRAGMA user_version = 2;
+      `)
+    }
+    // v3 (spec 08 §2): mark the built-in TurboLLM Expert thread so its server-managed
+    // system prompt stays hidden from the UI. Additive — existing conversations get 0.
+    if (v < 3) {
+      this.db.exec(`
+        ALTER TABLE conversations ADD COLUMN expert_mode INTEGER NOT NULL DEFAULT 0;
+        PRAGMA user_version = 3;
+      `)
+    }
   }
 
   listConversations(q?: string): Conversation[] {
@@ -105,11 +126,11 @@ export class ConversationStore {
     return (this.db.prepare(`SELECT * FROM conversations ORDER BY updated_at DESC LIMIT 200`).all() as unknown as ConvRow[]).map(rowToConv)
   }
 
-  createConversation(partial?: Partial<Pick<Conversation, 'title' | 'systemPrompt' | 'modelKey' | 'sampling'>>): Conversation {
+  createConversation(partial?: Partial<Pick<Conversation, 'title' | 'systemPrompt' | 'modelKey' | 'sampling' | 'expertMode'>>): Conversation {
     const now = new Date().toISOString()
     const id = randomUUID()
-    this.db.prepare(`INSERT INTO conversations (id,title,system_prompt,model_key,sampling,created_at,updated_at) VALUES ($id,$title,$sp,$mk,$samp,$now,$now)`)
-      .run({ $id: id, $title: partial?.title ?? 'New chat', $sp: partial?.systemPrompt ?? '', $mk: partial?.modelKey ?? '', $samp: JSON.stringify(partial?.sampling ?? {}), $now: now } as P)
+    this.db.prepare(`INSERT INTO conversations (id,title,system_prompt,model_key,sampling,expert_mode,created_at,updated_at) VALUES ($id,$title,$sp,$mk,$samp,$expert,$now,$now)`)
+      .run({ $id: id, $title: partial?.title ?? 'New chat', $sp: partial?.systemPrompt ?? '', $mk: partial?.modelKey ?? '', $samp: JSON.stringify(partial?.sampling ?? {}), $expert: partial?.expertMode ? 1 : 0, $now: now } as P)
     return this.getConversation(id)!
   }
 
@@ -147,10 +168,19 @@ export class ConversationStore {
     const id = randomUUID()
     const now = new Date().toISOString()
     const row = this.db.prepare(`SELECT COALESCE(MAX(seq),0) AS ms FROM messages WHERE conv_id = $id`).get({ $id: convId } as P) as unknown as { ms: number }
-    this.db.prepare(`INSERT INTO messages (id,conv_id,seq,role,content,reasoning,attachments,stats,created_at) VALUES ($id,$cid,$seq,$role,$content,$reasoning,$attachments,$stats,$now)`)
-      .run({ $id: id, $cid: convId, $seq: row.ms + 1, $role: role, $content: content, $reasoning: extra?.reasoning ?? '', $attachments: JSON.stringify(extra?.attachments ?? []), $stats: JSON.stringify(extra?.stats ?? {}), $now: now } as P)
+    // Attribute assistant replies to the conversation's model so the Models screen
+    // can surface last-session gen t/s (spec 04 §5). User turns are left NULL.
+    const modelKey = role === 'assistant' ? this.conversationModelKey(convId) : null
+    this.db.prepare(`INSERT INTO messages (id,conv_id,seq,role,content,reasoning,attachments,stats,model_key,created_at) VALUES ($id,$cid,$seq,$role,$content,$reasoning,$attachments,$stats,$mk,$now)`)
+      .run({ $id: id, $cid: convId, $seq: row.ms + 1, $role: role, $content: content, $reasoning: extra?.reasoning ?? '', $attachments: JSON.stringify(extra?.attachments ?? []), $stats: JSON.stringify(extra?.stats ?? {}), $mk: modelKey, $now: now } as P)
     this.touchConversation(convId)
     return this.getMessage(id)!
+  }
+
+  /** The model_key a conversation is bound to (empty string → null). */
+  private conversationModelKey(convId: string): string | null {
+    const r = this.db.prepare(`SELECT model_key FROM conversations WHERE id = $id`).get({ $id: convId } as P) as { model_key?: string } | undefined
+    return r?.model_key ? r.model_key : null
   }
 
   getMessage(id: string): Message | null {
@@ -174,6 +204,25 @@ export class ConversationStore {
 
   deleteMessagesAfterSeq(convId: string, seq: number): void {
     this.db.prepare(`DELETE FROM messages WHERE conv_id = $id AND seq > $seq`).run({ $id: convId, $seq: seq } as P)
+  }
+
+  /** Most-recent assistant gen t/s per model (spec 04 §5 `lastTps`). For each
+   *  model_key, takes the newest assistant message that recorded a positive
+   *  `stats.tps` and returns its value. Rows with NULL model_key (pre-v2) or no
+   *  usable t/s are skipped. Returns an empty map when there's no chat history. */
+  lastGenTpsByModel(): Map<string, number> {
+    const rows = this.db.prepare(`
+      SELECT model_key, stats FROM messages
+      WHERE role = 'assistant' AND model_key IS NOT NULL
+      ORDER BY created_at DESC, seq DESC
+    `).all() as unknown as { model_key: string; stats: string }[]
+    const out = new Map<string, number>()
+    for (const r of rows) {
+      if (out.has(r.model_key)) continue // rows are newest-first → newest valid wins
+      const tps = (safeJson(r.stats) as Partial<MessageStats>).tps
+      if (typeof tps === 'number' && tps > 0) out.set(r.model_key, Math.round(tps * 10) / 10)
+    }
+    return out
   }
 
   getLastMessage(convId: string): Message | null {

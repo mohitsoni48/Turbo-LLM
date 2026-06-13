@@ -11,11 +11,22 @@ import {
   activateEngine,
   addEngine,
   addModelDir,
+  browseFs,
+  getApiKeys,
+  getConnect,
   getEngineBackends,
   getModelDetail,
   getModelDirs,
   getModels,
+  getNetworkInfo,
+  getSysInfo,
+  getTelemetryPreview,
+  cancelBackendDownload,
+  createApiKey,
+  deleteApiKey,
+  deleteEngineBackend,
   getStatus,
+  getSettings,
   installBackend,
   installMlx,
   listEngines,
@@ -23,15 +34,22 @@ import {
   removeEngine,
   removeModelDir,
   renameEngine,
+  setPrimaryModelDir,
   reprobeEngine,
   rescanModels,
   resetModelProfile,
   restartEngine,
   saveModelProfile,
+  saveSettings,
   startEngine,
   stopEngine,
+  type DaemonSettings,
+  type SysInfo,
+  type TelemetryLevel,
 } from './api'
-import type { EngineBackends, EnginesList, LoadProfile, ModelDetail, ModelDirs, ModelsList, Status } from './types'
+import type { EngineBackends, EngineStats, EnginesList, LoadProfile, ModelDetail, ModelDirs, ModelsList, Status } from './types'
+// SysInfo is defined in api.ts (not types.ts) — re-export for convenience
+export type { SysInfo }
 
 export const queryKeys = {
   status: ['status'] as const,
@@ -52,6 +70,13 @@ export function useStatus(): UseQueryResult<Status> {
     placeholderData: (prev) => prev,
     retry: false,
   })
+}
+
+/** Live running-session stats (B4), selected off the status poll (no extra
+ *  request). Null unless the engine is running. */
+export function useEngineStats(): EngineStats | null {
+  const { data } = useStatus()
+  return data?.engine.state === 'running' ? data.engineStats ?? null : null
 }
 
 export function useEngines(): UseQueryResult<EnginesList> {
@@ -83,6 +108,8 @@ export function useBackendInstall() {
   return {
     backend: useMutation({ mutationFn: (backend: string) => installBackend(backend), onSuccess: invalidate }),
     mlx: useMutation({ mutationFn: () => installMlx(), onSuccess: invalidate }),
+    cancel: useMutation({ mutationFn: () => cancelBackendDownload(), onSuccess: invalidate }),
+    remove: useMutation({ mutationFn: (id: string) => deleteEngineBackend(id), onSuccess: invalidate }),
   }
 }
 
@@ -91,6 +118,9 @@ export function useEngineMutations() {
   const invalidate = () => {
     void qc.invalidateQueries({ queryKey: queryKeys.engines })
     void qc.invalidateQueries({ queryKey: queryKeys.status })
+    // Activating/removing an engine changes the official backends' active/installed
+    // projection too — keep the Engine→Build selector in sync.
+    void qc.invalidateQueries({ queryKey: queryKeys.engineBackends })
   }
 
   return {
@@ -120,12 +150,35 @@ export function useEngineMutations() {
   }
 }
 
-/** Model list; polls faster while a scan is in flight (spec 04). */
+/** Browse a directory for the engine-binary picker (spec 03 §9). `path` is the
+ *  directory to list; null defers to the daemon's home dir. Disabled until the
+ *  browser is opened so it doesn't fetch on mount. */
+export function useFsBrowse(path: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ['fs-browse', path],
+    queryFn: () => browseFs(path ?? undefined),
+    enabled,
+    retry: false,
+    placeholderData: (prev) => prev,
+  })
+}
+
+/** Model list; polls faster while a scan is in flight, gently while a model is
+ *  loaded so the live t/s chip stays fresh (spec 04 §5), and at 1s while the
+ *  engine is starting so the loaded flag updates as soon as the model is ready. */
 export function useModels(): UseQueryResult<ModelsList> {
+  const qc = useQueryClient()
   return useQuery({
     queryKey: queryKeys.models,
     queryFn: getModels,
-    refetchInterval: (q) => (q.state.data?.scanning ? 1200 : false),
+    refetchInterval: (q) => {
+      if (q.state.data?.scanning) return 1200
+      if (q.state.data?.models.some((m) => m.loaded)) return 4000
+      const status = qc.getQueryData<Status>(queryKeys.status)
+      if (status?.engine.state === 'starting') return 1000
+      return false
+    },
+    refetchIntervalInBackground: false,
     placeholderData: (prev) => prev,
     retry: false,
   })
@@ -145,7 +198,47 @@ export function useModelMutations() {
     rescan: useMutation({ mutationFn: rescanModels, onSuccess: invalidate }),
     addDir: useMutation({ mutationFn: (dir: string) => addModelDir(dir), onSuccess: invalidate }),
     removeDir: useMutation({ mutationFn: (dir: string) => removeModelDir(dir), onSuccess: invalidate }),
+    setPrimaryDir: useMutation({ mutationFn: (dir: string) => setPrimaryModelDir(dir), onSuccess: invalidate }),
   }
+}
+
+/** LAN network info (spec 08 §2). Disabled by default; the Settings Network section
+ *  enables it when shown. Polled lightly so the hasApiKey hint stays fresh. */
+export function useNetworkInfo(enabled = true) {
+  return useQuery({
+    queryKey: ['network'],
+    queryFn: getNetworkInfo,
+    enabled,
+    retry: false,
+  })
+}
+
+/** Telemetry preview for a level (spec 09 §4): a representative example of what
+ *  would be sent. Nothing is transmitted. Disabled until a level is requested. */
+export function useTelemetryPreview(level: TelemetryLevel | null) {
+  return useQuery({
+    queryKey: ['telemetry-preview', level],
+    queryFn: () => getTelemetryPreview(level as TelemetryLevel),
+    enabled: !!level,
+    retry: false,
+    staleTime: Infinity,
+  })
+}
+
+export function useSettings() {
+  const qc = useQueryClient()
+  const query = useQuery({
+    queryKey: ['settings'],
+    queryFn: getSettings,
+    retry: false,
+  })
+  const save = useMutation({
+    mutationFn: (patch: Partial<DaemonSettings>) => saveSettings(patch),
+    onSuccess: (data) => {
+      qc.setQueryData(['settings'], data)
+    },
+  })
+  return { query, save }
 }
 
 /** Model detail (entry + resolved profile + VRAM fit). Disabled when key is null. */
@@ -191,4 +284,37 @@ export function useModelActions() {
       onSuccess: invalidate,
     }),
   }
+}
+
+// ── API keys (spec 06 §5) ─────────────────────────────────────────────────────
+export function useApiKeys() {
+  const qc = useQueryClient()
+  const query = useQuery({ queryKey: ['apiKeys'], queryFn: getApiKeys, retry: false })
+  const invalidate = () => void qc.invalidateQueries({ queryKey: ['apiKeys'] })
+  return {
+    query,
+    create: useMutation({ mutationFn: (name: string) => createApiKey(name), onSuccess: invalidate }),
+    revoke: useMutation({ mutationFn: (id: string) => deleteApiKey(id), onSuccess: invalidate }),
+  }
+}
+
+// ── CLI connect snippets (spec 06 §6) ─────────────────────────────────────────
+export function useConnect(cli: string) {
+  return useQuery({
+    queryKey: ['connect', cli],
+    queryFn: () => getConnect(cli),
+    enabled: false,
+    retry: false,
+    staleTime: Infinity,
+  })
+}
+
+// ── System info (spec 05 §6) — loaded once on mount, never re-polled ─────────
+export function useSysInfo(): UseQueryResult<SysInfo> {
+  return useQuery({
+    queryKey: ['sysinfo'],
+    queryFn: getSysInfo,
+    staleTime: Infinity,
+    retry: false,
+  })
 }

@@ -1,6 +1,6 @@
 // Model discovery (A3, spec 04): scan model directories for GGUFs, parse their
 // headers, group split/mmproj files, and expose a rich model list. Path-cached.
-import { existsSync, lstatSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import type { ConfigStore } from '../config/config'
 import { GgufError, type GgufMeta, parseGguf, quantFromName } from '../gguf/gguf'
@@ -20,6 +20,7 @@ export interface ModelEntry {
   headCountKv: number
   moe: boolean
   expertCount: number
+  nextnLayers: number
   vision: boolean
   mmprojPath: string | null
   hasChatTemplate: boolean
@@ -37,7 +38,19 @@ interface CacheRow {
   meta: GgufMeta
 }
 
+// Bump when GgufMeta gains a field so on-disk caches re-parse (see loadCache).
+const CACHE_VERSION = 2
+
 const SPLIT_RE = /^(.*)-(\d{5})-of-(\d{5})\.gguf$/i
+
+/** Thrown by Scanner operations that fail in a caller-actionable way (e.g. delete
+ *  of an unknown key). Carries a machine-checkable `code` for the API envelope. */
+export class ScannerError extends Error {
+  constructor(public code: string, message: string) {
+    super(message)
+    this.name = 'ScannerError'
+  }
+}
 
 export class Scanner {
   private entries: ModelEntry[] = []
@@ -57,6 +70,50 @@ export class Scanner {
 
   get(key: string): ModelEntry | undefined {
     return this.entries.find((e) => e.key === key)
+  }
+
+  /** All on-disk file paths that make up a model (spec 04 §2): every shard of a
+   *  split GGUF, or the single file for an unsplit one. The shared mmproj projector
+   *  is intentionally NOT included — it pairs to other models in the same dir. For
+   *  MLX models (a whole directory) the directory path is returned. */
+  filesFor(key: string): string[] {
+    const e = this.get(key)
+    if (!e) return []
+    if (e.format === 'mlx') return [e.path]
+    const m = basename(e.path).match(SPLIT_RE)
+    if (!m) return [e.path]
+    // Resolve every present shard of this split group from its sibling files.
+    const prefix = m[1]
+    const total = m[3]
+    let names: string[]
+    try {
+      names = readdirSync(e.dir)
+    } catch {
+      return [e.path]
+    }
+    const shards: string[] = []
+    for (const name of names) {
+      const sm = name.match(SPLIT_RE)
+      if (sm && sm[1] === prefix && sm[3] === total) shards.push(join(e.dir, name))
+    }
+    return shards.length > 0 ? shards.sort() : [e.path]
+  }
+
+  /** Delete a model's file(s) from disk (spec 05) and re-scan. Returns the paths
+   *  that were removed; throws if the model key is unknown. MLX models delete the
+   *  whole model directory recursively. */
+  async delete(key: string): Promise<string[]> {
+    const e = this.get(key)
+    if (!e) throw new ScannerError('no_such_model', 'No model with that key.')
+    const paths = this.filesFor(key)
+    if (e.format === 'mlx') {
+      rmSync(e.path, { recursive: true, force: true })
+    } else {
+      for (const p of paths) rmSync(p, { force: true })
+      this.cache.delete(e.path)
+    }
+    await this.rescan()
+    return paths
   }
 
   /** Re-scan all configured model directories. Coalesces concurrent calls. */
@@ -169,6 +226,7 @@ export class Scanner {
       headCountKv: meta?.headCountKv ?? 0,
       moe: (meta?.expertCount ?? 0) > 0,
       expertCount: meta?.expertCount ?? 0,
+      nextnLayers: meta?.nextnLayers ?? 0,
       vision,
       mmprojPath: vision ? mmprojPath : null,
       hasChatTemplate: meta?.hasChatTemplate ?? false,
@@ -183,7 +241,13 @@ export class Scanner {
 
   private loadCache(): void {
     try {
-      const raw = JSON.parse(readFileSync(this.cachePath, 'utf8')) as { entries?: Record<string, CacheRow> }
+      const raw = JSON.parse(readFileSync(this.cachePath, 'utf8')) as {
+        version?: number
+        entries?: Record<string, CacheRow>
+      }
+      // Bump CACHE_VERSION whenever GgufMeta gains a field, so stale rows (missing
+      // the new field) are discarded and re-parsed instead of read back as defaults.
+      if (raw.version !== CACHE_VERSION) return
       for (const [k, v] of Object.entries(raw.entries ?? {})) this.cache.set(k, v)
     } catch {
       /* no cache yet */
@@ -194,7 +258,7 @@ export class Scanner {
     const entries: Record<string, CacheRow> = {}
     for (const [k, v] of this.cache) entries[k] = v
     try {
-      writeFileSync(this.cachePath, JSON.stringify({ version: 1, entries }))
+      writeFileSync(this.cachePath, JSON.stringify({ version: CACHE_VERSION, entries }))
     } catch {
       /* cache is a pure accelerator */
     }
@@ -317,6 +381,7 @@ function mlxEntryFor(dir: string): ModelEntry {
     headCountKv: cfg.num_key_value_heads ?? 0,
     moe: expertCount > 0,
     expertCount,
+    nextnLayers: 0,
     vision: false,
     mmprojPath: null,
     hasChatTemplate,

@@ -1,26 +1,29 @@
 // Internal API routes (/api/v1/*) per spec 02. Thin handlers over config/engines.
 import type { Context, Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
-import { existsSync, readFileSync } from 'node:fs'
-import { basename, join } from 'node:path'
-import { ValueError } from '../config/config'
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
+import { basename, dirname, join, resolve, sep } from 'node:path'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { homedir, networkInterfaces } from 'node:os'
+import { ValueError, type ApiKey } from '../config/config'
 import type { Deps } from '../deps'
 import { BusyError, type ModelInfo, type StartOpts } from '../engines/manager'
-import { NotFoundError } from '../engines/registry'
+import { NameTakenError, NotFoundError } from '../engines/registry'
 import { ProbeError } from '../engines/probe'
 import {
   LLAMA_BUILD,
   availableBackends,
+  deleteBackend,
   installedBackendServer,
   provisionBackend,
   recommendBackendId,
 } from '../engines/download'
 import { ensureMlxEnv } from '../engines/mlx'
-import type { ModelEntry } from '../models/scanner'
+import { ScannerError, type ModelEntry } from '../models/scanner'
 import { estimateVram, type LoadProfile, profileToArgs, resolveProfile } from '../models/profile'
 import { getSysInfo, primaryVendor } from '../sysinfo/sysinfo'
 
-type Status = 200 | 201 | 202 | 400 | 401 | 404 | 409 | 500 | 503
+type Status = 200 | 201 | 202 | 400 | 401 | 403 | 404 | 409 | 500 | 503
 
 function err(c: Context, status: Status, code: string, message: string) {
   return c.json({ error: { code, message } }, status)
@@ -50,10 +53,13 @@ export function registerApi(app: Hono, d: Deps): void {
     const model = ms.model
       ? { key: ms.model.key, name: ms.model.name, quant: ms.model.quant, ctx: ms.model.ctx, vision: ms.model.vision, loadElapsedMs: ms.loadElapsedMs }
       : null
+    // Live running-session stats (B4): only meaningful while the engine runs.
+    const engineStats = ms.state === 'running' ? d.manager.sessionStats() : null
     return c.json({
       version: d.version,
       engine,
       model,
+      engineStats,
       bench: { running: false },
       downloads: { active: 0 },
       engineProvision: d.provision.get(),
@@ -69,27 +75,34 @@ export function registerApi(app: Hono, d: Deps): void {
   })
 
   // ---- engine backends (ADR-025): hardware-aware default + override ----
+  // Tracks the in-flight backend download so it can be cancelled.
+  let provisionAbort: AbortController | null = null
+
   app.get('/api/v1/engines/backends', (c) => {
     const sys = getSysInfo()
     const vendor = primaryVendor(sys)
     const recommended = recommendBackendId(vendor, sys.gpus.length > 0)
     const root = join(d.store.dir(), 'engines')
     const active = d.registry.active()
+    const regEngines = d.registry.list().engines
     const backends = availableBackends().map((b) => {
       const bin = installedBackendServer(root, b.id)
+      const eng = bin ? regEngines.find((e) => e.binPath === bin) : undefined
       return {
         id: b.id,
         label: b.label,
         installed: !!bin,
         recommended: b.id === recommended,
         active: !!bin && !!active && active.binPath === bin,
+        engineId: eng?.id ?? '',
       }
     })
-    const mlxEngine = d.registry.list().engines.find((e) => e.kind === 'mlx')
+    const mlxEngine = regEngines.find((e) => e.kind === 'mlx')
     const mlx = {
       supported: process.platform === 'darwin',
       installed: !!mlxEngine,
       active: !!mlxEngine && !!active && active.id === mlxEngine.id,
+      engineId: mlxEngine?.id ?? '',
     }
     return c.json({ vendor, recommended, gpus: sys.gpus, backends, mlx })
   })
@@ -102,21 +115,51 @@ export function registerApi(app: Hono, d: Deps): void {
     if (!def) return err(c, 400, 'invalid_config_value', 'Unknown backend for this platform.')
     if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
     const root = join(d.store.dir(), 'engines')
+    const ac = new AbortController()
+    provisionAbort = ac
     void (async () => {
       try {
         d.provision.start(def.id)
-        const bin = await provisionBackend(root, def, LLAMA_BUILD, (p) =>
-          d.provision.progress(p.phase, p.pct, p.part, p.parts),
+        const bin = await provisionBackend(
+          root, def, LLAMA_BUILD,
+          (p) => d.provision.progress(p.phase, p.pct, p.part, p.parts),
+          ac.signal,
         )
         let eng = d.registry.list().engines.find((e) => e.binPath === bin)
-        if (!eng) eng = await d.registry.add(`llama.cpp ${LLAMA_BUILD} (${def.id})`, bin)
+        if (!eng) eng = (await d.registry.add(`llama.cpp ${LLAMA_BUILD} (${def.id})`, bin)).engine
         d.registry.activate(eng.id)
         d.provision.done()
       } catch (e) {
-        d.provision.fail(`Could not install the ${def.id} engine: ${e instanceof Error ? e.message : e}`)
+        if ((e as Error)?.name === 'AbortError') d.provision.done() // user cancelled
+        else d.provision.fail(`Could not install the ${def.id} engine: ${e instanceof Error ? e.message : e}`)
+      } finally {
+        if (provisionAbort === ac) provisionAbort = null
       }
     })()
     return c.json({ accepted: true, backend: def.id }, 202)
+  })
+
+  // Cancel an in-progress engine download (backend or MLX).
+  app.post('/api/v1/engines/backends/cancel', (c) => {
+    if (provisionAbort) {
+      provisionAbort.abort()
+      return c.json({ ok: true })
+    }
+    return c.json({ ok: false })
+  })
+
+  // Delete an installed backend's files + unregister its engine. Stops the engine
+  // first if it's the active, running one.
+  app.delete('/api/v1/engines/backends/:id', async (c) => {
+    const def = availableBackends().find((x) => x.id === c.req.param('id'))
+    if (!def) return err(c, 400, 'invalid_config_value', 'Unknown backend for this platform.')
+    const root = join(d.store.dir(), 'engines')
+    const bin = installedBackendServer(root, def.id)
+    const eng = bin ? d.registry.list().engines.find((e) => e.binPath === bin) : undefined
+    if (eng && d.registry.active()?.id === eng.id) await d.manager.stopAndWait()
+    if (eng) d.registry.remove(eng.id)
+    deleteBackend(root, def.id, LLAMA_BUILD)
+    return c.json({ ok: true })
   })
 
   // Provision the MLX engine (macOS-only, ADR-025 Phase 3): uv → venv → mlx-lm,
@@ -145,9 +188,12 @@ export function registerApi(app: Hono, d: Deps): void {
     const b = await body<{ name?: string; binPath?: string }>(c)
     if (!b.binPath || !b.binPath.trim()) return err(c, 400, 'invalid_config_value', 'binPath is required.')
     try {
-      const eng = await d.registry.add(b.name ?? '', b.binPath)
-      return c.json(eng, 201)
+      const { engine, warning } = await d.registry.add(b.name ?? '', b.binPath)
+      // `probe_no_version` is non-blocking (spec 03 §2): the engine is saved, but
+      // the response carries a warning flag so the dialog can prompt the user.
+      return c.json({ ...engine, warning: warning ?? null }, 201)
     } catch (e) {
+      if (e instanceof NameTakenError) return err(c, 400, 'name_already_taken', e.message)
       if (e instanceof ProbeError) return err(c, 400, e.code, e.message)
       return err(c, 500, 'internal', (e as Error).message)
     }
@@ -193,6 +239,53 @@ export function registerApi(app: Hono, d: Deps): void {
       if (e instanceof ProbeError) return err(c, 400, e.code, e.message)
       return regErr(c, e)
     }
+  })
+
+  // ---- filesystem browser (spec 03 §9): pick an engine binary by navigating the
+  // disk from the browser. Loopback-only and confined to the user's home dir so a
+  // page on the LAN cannot read arbitrary files through the daemon.
+  app.get('/api/v1/fs/browse', (c) => {
+    const home = realHome()
+    const raw = (c.req.query('path') ?? '').trim()
+    // Resolve the requested path; default to the home dir when none is given.
+    const target = raw ? resolve(raw) : home
+    // Canonicalize symlinks before the containment check so a symlink inside home
+    // that points outside cannot be used to escape. Fall back to the lexical path
+    // if the target doesn't exist yet (it then fails the readdir below cleanly).
+    let real: string
+    try {
+      real = realpathSync(target)
+    } catch {
+      real = target
+    }
+    if (!isWithinHome(real, home)) {
+      return err(c, 403, 'path_outside_home', 'That folder is outside your home directory.')
+    }
+    let entries: { name: string; path: string; isDir: boolean }[]
+    try {
+      entries = readdirSync(real, { withFileTypes: true })
+        .filter((d) => !d.name.startsWith('.')) // hide dotfiles
+        .map((d) => {
+          // A dirent can be a symlink — resolve its target type so symlinked dirs
+          // still navigate. Errors (dangling links) fall back to file.
+          let isDir = d.isDirectory()
+          if (d.isSymbolicLink()) {
+            try {
+              isDir = statSync(join(real, d.name)).isDirectory()
+            } catch {
+              isDir = false
+            }
+          }
+          return { name: d.name, path: join(real, d.name), isDir }
+        })
+        .sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1))
+    } catch {
+      return err(c, 400, 'fs_read_failed', 'Could not read that folder (permission denied or not a directory).')
+    }
+    // Parent is null at the home root or once it would escape home.
+    const parentDir = real === home ? null : dirname(real)
+    const parent = parentDir && isWithinHome(parentDir, home) ? parentDir : null
+    return c.json({ path: real, parent, entries })
   })
 
   // ---- lifecycle (A2) ----
@@ -243,12 +336,12 @@ export function registerApi(app: Hono, d: Deps): void {
         }
       } else {
         const saved = cfg.modelProfiles[entry.key] as Partial<LoadProfile> | undefined
-        const profile = resolveProfile(entry, sys, saved, b.profileOverrides)
+        const profile = resolveProfile(entry, sys, saved, b.profileOverrides, cfg.modelDefaults)
         opts = {
           engine: active,
           model: { key: entry.key, name: entry.name, quant: entry.quant, ctx: profile.ctx, vision: entry.vision },
           modelPath: entry.path,
-          extraArgs: profileToArgs(profile, entry, active.capabilities),
+          extraArgs: profileToArgs(profile, entry, active.capabilities, sys.cores),
         }
       }
       await d.manager.stopAndWait()
@@ -323,7 +416,8 @@ export function registerApi(app: Hono, d: Deps): void {
   // ---- models (A3, spec 04) ----
   app.get('/api/v1/models', (c) => {
     const { models, scanning, lastScanAt } = d.scanner.list()
-    return c.json({ models: models.map((m) => overlayModel(m, d)), scanning, lastScanAt })
+    const lastTps = d.db.lastGenTpsByModel()
+    return c.json({ models: models.map((m) => overlayModel(m, d, lastTps)), scanning, lastScanAt })
   })
 
   app.post('/api/v1/models/rescan', (c) => {
@@ -331,13 +425,34 @@ export function registerApi(app: Hono, d: Deps): void {
     return c.json({ ok: true }, 202)
   })
 
+  // Delete a model's file(s) from disk (spec 05). Split GGUFs delete all shards.
+  // Blocked while the model is the one currently loaded in the running engine.
+  app.delete('/api/v1/models/:key', async (c) => {
+    const key = decodeURIComponent(c.req.param('key'))
+    const e = d.scanner.get(key)
+    if (!e) return err(c, 404, 'no_such_model', 'No model with that key.')
+    const ms = d.manager.status()
+    const loadedKey = ms.state === 'running' || ms.state === 'starting' ? ms.model?.key : undefined
+    if (loadedKey === e.path || loadedKey === e.key) {
+      return err(c, 409, 'model_loaded', 'This model is currently loaded. Eject it before deleting.')
+    }
+    try {
+      const deleted = await d.scanner.delete(key)
+      return c.json({ ok: true, deleted })
+    } catch (e2) {
+      if (e2 instanceof ScannerError) return err(c, 404, e2.code, e2.message)
+      return err(c, 500, 'delete_failed', (e2 as Error).message)
+    }
+  })
+
   app.get('/api/v1/models/:key', (c) => {
     const e = d.scanner.get(decodeURIComponent(c.req.param('key')))
     if (!e) return err(c, 404, 'no_such_model', 'No model with that key.')
     const sys = getSysInfo()
-    const saved = d.store.snapshot().modelProfiles[e.key] as Partial<LoadProfile> | undefined
-    const profile = resolveProfile(e, sys, saved)
-    return c.json({ ...overlayModel(e, d), profile, vramFit: estimateVram(profile, e, sys), gpu: sys.gpus[0] ?? null })
+    const snap = d.store.snapshot()
+    const saved = snap.modelProfiles[e.key] as Partial<LoadProfile> | undefined
+    const profile = resolveProfile(e, sys, saved, undefined, snap.modelDefaults)
+    return c.json({ ...overlayModel(e, d), profile, vramFit: estimateVram(profile, e, sys), gpu: sys.gpus[0] ?? null, cores: sys.cores })
   })
 
   app.put('/api/v1/models/:key/profile', async (c) => {
@@ -364,8 +479,99 @@ export function registerApi(app: Hono, d: Deps): void {
 
   app.get('/api/v1/sysinfo', (c) => c.json(getSysInfo()))
 
-  // ---- model directories (spec 02 §5) ----
-  app.get('/api/v1/modeldirs', (c) => c.json({ dirs: d.store.snapshot().modelDirs }))
+  // ── daemon settings (UI-exposed subset) ──
+  app.get('/api/v1/settings', (c) => c.json(settingsPayload(d)))
+
+  app.patch('/api/v1/settings', async (c) => {
+    const b = await body<{
+      idleTtlMinutes?: number
+      theme?: string
+      autoGenerateTitles?: boolean
+      openBrowserOnStart?: boolean
+      autoLoadOnStart?: boolean
+      lanBind?: boolean
+      telemetryLevel?: string
+      modelDefaults?: { ctx?: number; ngl?: number; imageMaxTokens?: number }
+    }>(c)
+
+    const updates: Record<string, unknown> = {}
+    if (b.idleTtlMinutes !== undefined) {
+      const v = Number(b.idleTtlMinutes)
+      if (!Number.isFinite(v) || v < 0) return err(c, 400, 'invalid_config_value', 'idleTtlMinutes must be a non-negative number.')
+      updates.idleTtlMinutes = v
+    }
+    if (b.theme !== undefined) {
+      if (!['system', 'light', 'dark'].includes(b.theme)) return err(c, 400, 'invalid_config_value', 'theme must be system, light, or dark.')
+      updates.theme = b.theme
+    }
+    if (b.autoGenerateTitles !== undefined) updates.autoGenerateTitles = !!b.autoGenerateTitles
+    if (b.openBrowserOnStart !== undefined) updates.openBrowserOnStart = !!b.openBrowserOnStart
+    // LAN expose toggle (spec 08 §2). Persist only; auto daemon-restart is deferred —
+    // the UI tells the user to restart to apply.
+    if (b.lanBind !== undefined) updates.lanBind = !!b.lanBind
+
+    // Telemetry consent level (spec 09 §3): off | anon | full. Validate the enum.
+    let telemetryLevel: string | undefined
+    if (b.telemetryLevel !== undefined) {
+      if (!['off', 'anon', 'full'].includes(b.telemetryLevel)) {
+        return err(c, 400, 'invalid_config_value', 'telemetryLevel must be off, anon, or full.')
+      }
+      telemetryLevel = b.telemetryLevel
+    }
+
+    // Global model defaults (spec 05 §3): validate the supplied fields; missing
+    // fields keep their current value (partial patch).
+    const md = b.modelDefaults
+    const mdUpdates: { ctx?: number; ngl?: number; imageMaxTokens?: number } = {}
+    if (md) {
+      if (md.ctx !== undefined) {
+        const v = Number(md.ctx)
+        if (!Number.isFinite(v) || v < 256) return err(c, 400, 'invalid_config_value', 'modelDefaults.ctx must be at least 256.')
+        mdUpdates.ctx = Math.floor(v)
+      }
+      if (md.ngl !== undefined) {
+        const v = Number(md.ngl)
+        if (!Number.isFinite(v) || v < 0 || v > 99) return err(c, 400, 'invalid_config_value', 'modelDefaults.ngl must be 0–99.')
+        mdUpdates.ngl = Math.floor(v)
+      }
+      if (md.imageMaxTokens !== undefined) {
+        const v = Number(md.imageMaxTokens)
+        if (!Number.isFinite(v) || v < 0) return err(c, 400, 'invalid_config_value', 'modelDefaults.imageMaxTokens must be a non-negative number.')
+        mdUpdates.imageMaxTokens = Math.floor(v)
+      }
+    }
+
+    d.store.update((cfg) => {
+      Object.assign(cfg.daemon, updates)
+      Object.assign(cfg.modelDefaults, mdUpdates)
+      if (b.autoLoadOnStart !== undefined) cfg.autoLoadOnStart = !!b.autoLoadOnStart
+      if (telemetryLevel !== undefined) cfg.telemetry.level = telemetryLevel
+    })
+    return c.json(settingsPayload(d))
+  })
+
+  // ── telemetry preview (spec 09 §4): a representative example of exactly what
+  // each consent level would send. Illustrative only — built from getSysInfo() + a
+  // sample bench record; nothing is transmitted and no real data leaves the machine.
+  app.get('/api/v1/telemetry/preview', (c) => {
+    const raw = (c.req.query('level') ?? '').trim()
+    const level = ['off', 'anon', 'full'].includes(raw) ? raw : 'off'
+    return c.json(telemetryPreview(level, d.version))
+  })
+
+  // ── network info (spec 08 §2): LAN expose state + the reachable LAN URL + whether
+  // an API key exists (non-local access requires one).
+  app.get('/api/v1/settings/network', (c) => {
+    const cfg = d.store.snapshot()
+    return c.json({
+      lanBind: cfg.daemon.lanBind,
+      lanUrl: `http://${getLanIp()}:${cfg.daemon.port}`,
+      hasApiKey: cfg.apiKeys.length > 0,
+    })
+  })
+
+  // ---- model directories (spec 02 §5; primary dir spec 01 §3 / ADR-035) ----
+  app.get('/api/v1/modeldirs', (c) => c.json(modelDirsPayload(d)))
 
   app.post('/api/v1/modeldirs', async (c) => {
     const b = await body<{ dir?: string }>(c)
@@ -380,28 +586,206 @@ export function registerApi(app: Hono, d: Deps): void {
       return regErr(c, e)
     }
     void d.scanner.rescan()
-    return c.json({ dirs: d.store.snapshot().modelDirs }, 201)
+    return c.json(modelDirsPayload(d), 201)
   })
 
   app.delete('/api/v1/modeldirs', async (c) => {
     const b = await body<{ dir?: string }>(c)
     d.store.update((cfg) => {
       cfg.modelDirs = cfg.modelDirs.filter((x) => x !== b.dir)
+      // If the removed folder was the configured primary, reset to the effective
+      // default (first remaining dir). validate() also guards this on load.
+      if (cfg.primaryModelDir === b.dir) cfg.primaryModelDir = ''
     })
     void d.scanner.rescan()
-    return c.json({ dirs: d.store.snapshot().modelDirs })
+    return c.json(modelDirsPayload(d))
+  })
+
+  // Set the primary download/import folder. Must be one of the configured dirs.
+  app.post('/api/v1/modeldirs/primary', async (c) => {
+    const b = await body<{ dir?: string }>(c)
+    const dir = (b.dir ?? '').trim()
+    if (!dir || !d.store.snapshot().modelDirs.includes(dir)) {
+      return err(c, 400, 'invalid_config_value', 'Primary folder must be one of your model folders.')
+    }
+    d.store.update((cfg) => {
+      cfg.primaryModelDir = dir
+    })
+    return c.json(modelDirsPayload(d))
+  })
+
+  // ── API keys (spec 06 §5) ────────────────────────────────────────────────
+  app.get('/api/v1/keys', (c) => {
+    const keys = d.store.snapshot().apiKeys.map(({ id, name, prefix, createdAt, lastUsedAt }) => ({
+      id,
+      name,
+      prefix,
+      createdAt,
+      lastUsedAt,
+    }))
+    return c.json({ keys })
+  })
+
+  app.post('/api/v1/keys', async (c) => {
+    const b = await body<{ name?: string }>(c)
+    const name = (b.name ?? '').trim()
+    if (!name) return err(c, 400, 'invalid_config_value', 'name is required.')
+    const { full, hash, prefix } = generateApiKey()
+    const key: ApiKey = {
+      id: randomUUID(),
+      name,
+      hash,
+      prefix,
+      createdAt: new Date().toISOString(),
+      lastUsedAt: null,
+    }
+    d.store.update((cfg) => cfg.apiKeys.push(key))
+    return c.json(
+      { key: full, meta: { id: key.id, name: key.name, prefix, createdAt: key.createdAt, lastUsedAt: null } },
+      201,
+    )
+  })
+
+  app.delete('/api/v1/keys/:id', (c) => {
+    const id = c.req.param('id')
+    d.store.update((cfg) => {
+      cfg.apiKeys = cfg.apiKeys.filter((k) => k.id !== id)
+    })
+    return c.json({ ok: true })
+  })
+
+  // ── CLI connect snippets (spec 06 §6) ────────────────────────────────────
+  app.get('/api/v1/connect/:cli', (c) => {
+    const cli = c.req.param('cli')
+    const cfg = d.store.snapshot()
+    const { port, lanBind } = cfg.daemon
+    const host = lanBind ? getLanIp() : '127.0.0.1'
+    const base = `http://${host}:${port}`
+    const ms = d.manager.status()
+    const modelName = ms.state === 'running' ? (ms.model?.name ?? 'local') : 'local'
+
+    let apiKey = 'not-needed-on-localhost'
+    if (lanBind) {
+      const keyName = `cli-${cli}`
+      const { full, hash, prefix } = generateApiKey()
+      const fresh: ApiKey = {
+        id: randomUUID(),
+        name: keyName,
+        hash,
+        prefix,
+        createdAt: new Date().toISOString(),
+        lastUsedAt: null,
+      }
+      d.store.update((cfgMut) => {
+        cfgMut.apiKeys = cfgMut.apiKeys.filter((k) => k.name !== keyName)
+        cfgMut.apiKeys.push(fresh)
+      })
+      apiKey = full
+    }
+
+    return c.json(buildConnectSnippets(cli, base, apiKey, modelName))
   })
 }
 
-/** Overlay the live-dynamic flags (loaded, hasProfile) onto a scanned entry. */
-function overlayModel(e: ModelEntry, d: Deps) {
+/** Overlay the live-dynamic flags (loaded, hasProfile) and tiered t/s (lastTps,
+ *  liveTps) onto a scanned entry (spec 04 §5). `lastTps` is the most-recent gen
+ *  t/s recorded for this model; pass the precomputed map on the list endpoint to
+ *  avoid one DB query per row. `liveTps` is best-effort: there is no full live
+ *  session-stats accumulator yet (that's a separate B4 task), so we surface the
+ *  loaded model's last recorded gen t/s as its live figure — non-null only while
+ *  that model is the one currently loaded. */
+function overlayModel(e: ModelEntry, d: Deps, lastTpsMap?: Map<string, number>) {
   const ms = d.manager.status()
   const loadedKey = ms.state === 'running' ? ms.model?.key : undefined
   const profiles = d.store.snapshot().modelProfiles
-  return { ...e, loaded: loadedKey === e.path || loadedKey === e.key, hasProfile: e.key in profiles }
+  const loaded = loadedKey === e.path || loadedKey === e.key
+  const lastTps = (lastTpsMap ?? d.db.lastGenTpsByModel()).get(e.key) ?? null
+  // Best-effort live: only when this model is loaded AND a recent gen t/s exists.
+  const liveTps = loaded && lastTps !== null ? lastTps : null
+  return { ...e, loaded, hasProfile: e.key in profiles, lastTps, liveTps }
 }
 
 // ---- helpers ----
+
+/** The /modeldirs response: the configured folders plus the EFFECTIVE primary
+ *  (spec 01 §3, ADR-035) — the configured primary when it's still a valid dir,
+ *  otherwise the first folder. Empty string when no folders are configured. */
+function modelDirsPayload(d: Deps): { dirs: string[]; primaryDir: string } {
+  const cfg = d.store.snapshot()
+  const primaryDir =
+    cfg.primaryModelDir && cfg.modelDirs.includes(cfg.primaryModelDir)
+      ? cfg.primaryModelDir
+      : (cfg.modelDirs[0] ?? '')
+  return { dirs: cfg.modelDirs, primaryDir }
+}
+
+/** The UI-exposed settings subset. Telemetry is surfaced as the 3-option enum;
+ *  the stored first-run sentinel 'unset' maps to 'off' here (consent UX reads the
+ *  raw value off /status separately). */
+function settingsPayload(d: Deps) {
+  const cfg = d.store.snapshot()
+  const lvl = cfg.telemetry.level
+  const telemetryLevel = lvl === 'anon' || lvl === 'full' ? lvl : 'off'
+  return {
+    idleTtlMinutes: cfg.daemon.idleTtlMinutes,
+    theme: cfg.daemon.theme,
+    autoGenerateTitles: cfg.daemon.autoGenerateTitles,
+    openBrowserOnStart: cfg.daemon.openBrowserOnStart,
+    autoLoadOnStart: cfg.autoLoadOnStart,
+    lanBind: cfg.daemon.lanBind,
+    telemetryLevel,
+    modelDefaults: cfg.modelDefaults,
+  }
+}
+
+/** A REPRESENTATIVE illustration of exactly what each telemetry level would send
+ *  (spec 09 §3–4). Built from real hardware (getSysInfo) + a sample bench record so
+ *  the user can see the shape. NOTHING is transmitted; 'off' sends nothing. Forbidden
+ *  fields (prompts, paths, dir names, tokens, IPs, hostnames, usernames) are excluded
+ *  by construction — only whitelisted fields are placed here. */
+function telemetryPreview(level: string, version: string) {
+  if (level === 'off') {
+    return { level, sends: false, note: 'Telemetry is off. Nothing is collected or sent.', payload: null }
+  }
+  const sys = getSysInfo()
+  const hw = {
+    cpu: sys.cpu,
+    ramMb: sys.ramMB,
+    gpus: sys.gpus.map((g) => ({ name: g.name, vramMb: g.vramMb })),
+  }
+  const benchEvent = {
+    schema: 1,
+    event: 'bench_result',
+    ts: new Date().toISOString(),
+    machineId: '00000000-0000-0000-0000-000000000000', // random per-install uuid (example)
+    app: { version, os: sys.os },
+    hw,
+    payload: {
+      model: { name: 'Qwen3.6-35B', quant: 'Q4_K_M', sizeBytes: 21_000_000_000, arch: 'qwen3moe', moe: true },
+      engine: { version: 'b1234' },
+      params: { ctx: 8192, ngl: 99, nCpuMoe: 0, parallel: 1, kvTypeK: 'q8_0', flashAttn: 'auto' },
+      result: { tps: 48.2, ttftMs: 310, vramMb: 15800, outcome: 'ok' },
+    },
+  }
+  const events: unknown[] = [benchEvent]
+  if (level === 'full') {
+    events.push({
+      schema: 1,
+      event: 'crash_report',
+      ts: new Date().toISOString(),
+      machineId: '00000000-0000-0000-0000-000000000000',
+      app: { version, os: sys.os },
+      hw,
+      // Error fingerprint only — exit code + first matching error line, never full logs.
+      payload: { engineExitCode: 1, errorFingerprint: 'CUDA error: out of memory' },
+    })
+  }
+  const note =
+    level === 'anon'
+      ? 'Anonymized hardware + benchmark speed only. No prompts, paths, identifiers, or keys.'
+      : 'Anonymous benchmarks plus crash/error fingerprints. Still no prompts, paths, or content.'
+  return { level, sends: true, note, payload: events }
+}
 
 function engineBusy(d: Deps): boolean {
   const s = d.manager.status().state
@@ -439,5 +823,151 @@ function readTail(path: string, n: number): string[] {
     return lines.length > n ? lines.slice(-n) : lines
   } catch {
     return []
+  }
+}
+
+// ── API key helpers ────────────────────────────────────────────────────────
+
+function generateApiKey(): { full: string; hash: string; prefix: string } {
+  const charset = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+  const buf = randomBytes(60)
+  let key = ''
+  for (let i = 0; i < 40; i++) key += charset[buf[i] % 62]
+  const full = `tllm-${key}`
+  const hash = createHash('sha256').update(full).digest('hex')
+  return { full, hash, prefix: full.slice(0, 12) }
+}
+
+// ── filesystem browser helpers (spec 03 §9) ─────────────────────────────────
+
+/** The user's home dir, canonicalized (symlinks resolved) so the containment
+ *  check below compares like-with-like. */
+function realHome(): string {
+  const h = homedir()
+  try {
+    return realpathSync(h)
+  } catch {
+    return h
+  }
+}
+
+/** True when `p` is the home dir itself or a descendant of it. Compares the
+ *  normalized paths and requires a trailing separator on the prefix so
+ *  `/home/bobby` is not treated as inside `/home/bob`. Cross-platform: `sep`
+ *  is `\` on Windows, `/` elsewhere. */
+function isWithinHome(p: string, home: string): boolean {
+  if (p === home) return true
+  return p.startsWith(home.endsWith(sep) ? home : home + sep)
+}
+
+function getLanIp(): string {
+  const nets = networkInterfaces()
+  for (const ifaces of Object.values(nets)) {
+    if (!ifaces) continue
+    for (const iface of ifaces) {
+      if (iface.family === 'IPv4' && !iface.internal) return iface.address
+    }
+  }
+  return '127.0.0.1'
+}
+
+// ── CLI connect snippet builders ───────────────────────────────────────────
+
+type ConnectStep = { label: string; snippet: string; lang: string }
+type ConnectResult = { cli: string; title: string; steps: ConnectStep[] }
+
+function buildConnectSnippets(cli: string, base: string, apiKey: string, modelName: string): ConnectResult {
+  switch (cli) {
+    case 'claude-code':
+      return {
+        cli,
+        title: 'Claude Code',
+        steps: [
+          {
+            label: 'Quickest — one command (ships with TurboLLM)',
+            snippet: `turbollm launch claude`,
+            lang: 'bash',
+          },
+          {
+            label: 'PowerShell one-liner',
+            snippet: `$env:ANTHROPIC_BASE_URL="${base}"; $env:ANTHROPIC_AUTH_TOKEN="${apiKey}"; $env:ANTHROPIC_MODEL="${modelName}"; claude`,
+            lang: 'powershell',
+          },
+          {
+            label: 'bash / zsh',
+            snippet: `ANTHROPIC_BASE_URL="${base}" ANTHROPIC_AUTH_TOKEN="${apiKey}" ANTHROPIC_MODEL="${modelName}" claude`,
+            lang: 'bash',
+          },
+        ],
+      }
+    case 'opencode':
+      return {
+        cli,
+        title: 'opencode',
+        steps: [
+          {
+            label: 'Merge into ~/.config/opencode/opencode.json',
+            snippet: JSON.stringify(
+              {
+                providers: {
+                  turbollm: {
+                    npm: '@ai-sdk/openai-compatible',
+                    options: {
+                      baseURL: `${base}/v1`,
+                      ...(apiKey !== 'not-needed-on-localhost' ? { apiKey } : {}),
+                    },
+                    models: { [modelName]: { id: modelName } },
+                  },
+                },
+              },
+              null,
+              2,
+            ),
+            lang: 'json',
+          },
+        ],
+      }
+    case 'kilo':
+      return {
+        cli,
+        title: 'Kilo Code',
+        steps: [
+          {
+            label: 'Add to ~/.config/kilo/kilo.jsonc providers array',
+            snippet: JSON.stringify(
+              {
+                id: 'turbollm',
+                name: 'TurboLLM (local)',
+                type: 'openai-compatible',
+                baseURL: `${base}/v1`,
+                apiKey: apiKey !== 'not-needed-on-localhost' ? apiKey : 'not-required',
+                models: [{ id: modelName, name: modelName }],
+              },
+              null,
+              2,
+            ),
+            lang: 'jsonc',
+          },
+        ],
+      }
+    case 'qwen':
+      return {
+        cli,
+        title: 'Qwen Code',
+        steps: [
+          {
+            label: 'PowerShell one-liner',
+            snippet: `$env:OPENAI_BASE_URL="${base}/v1"; $env:OPENAI_API_KEY="${apiKey}"; $env:OPENAI_MODEL="${modelName}"; qwen`,
+            lang: 'powershell',
+          },
+          {
+            label: 'bash / zsh',
+            snippet: `OPENAI_BASE_URL="${base}/v1" OPENAI_API_KEY="${apiKey}" OPENAI_MODEL="${modelName}" qwen`,
+            lang: 'bash',
+          },
+        ],
+      }
+    default:
+      return { cli, title: cli, steps: [] }
   }
 }

@@ -11,6 +11,7 @@ import { useStatus } from './lib/queries'
 import { ChatScreen } from './screens/ChatScreen'
 import { ModelsScreen } from './screens/ModelsScreen'
 import { EnginesScreen } from './screens/EnginesScreen'
+import { DeveloperScreen } from './screens/DeveloperScreen'
 import { SettingsScreen } from './screens/SettingsScreen'
 
 export function App() {
@@ -39,6 +40,7 @@ export function App() {
           <Route path="/chat" element={<ChatScreen />} />
           <Route path="/models" element={<ModelsScreen />} />
           <Route path="/engines" element={<EnginesScreen />} />
+          <Route path="/developer" element={<DeveloperScreen />} />
           <Route path="/settings" element={<SettingsScreen />} />
           <Route path="*" element={<Navigate to="/chat" replace />} />
         </Routes>

@@ -1,8 +1,5 @@
 import { useState } from 'react'
 import {
-  Check,
-  Circle,
-  CircleDot,
   MoreHorizontal,
   Pencil,
   RefreshCw,
@@ -13,7 +10,6 @@ import { useEngineMutations } from '../../lib/queries'
 import { truncateMiddle } from '../../lib/utils'
 import type { Engine } from '../../lib/types'
 import { Badge } from '../../components/ui/badge'
-import { Button } from '../../components/ui/button'
 import { Input } from '../../components/ui/input'
 import { WithTooltip } from '../../components/ui/tooltip'
 import {
@@ -55,12 +51,10 @@ function capabilityBadges(engine: Engine) {
 
 export function EngineRow({
   engine,
-  active,
 }: {
   engine: Engine
-  active: boolean
 }) {
-  const { rename, activate, reprobe, remove } = useEngineMutations()
+  const { rename, reprobe, remove } = useEngineMutations()
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(engine.name)
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -86,13 +80,6 @@ export function EngineRow({
     )
   }
 
-  const onActivate = () =>
-    activate.mutate(engine.id, {
-      onSuccess: () => toast.success(`${engine.name} is now active`),
-      onError: (e) =>
-        toast.error(e instanceof ApiError ? e.message : 'Could not activate engine.'),
-    })
-
   const onReprobe = () =>
     reprobe.mutate(engine.id, {
       onSuccess: () => toast.success('Engine re-probed'),
@@ -115,17 +102,6 @@ export function EngineRow({
   return (
     <div className="rounded-[var(--radius)] border border-border bg-panel p-4">
       <div className="flex items-start gap-3">
-        {/* active radio marker */}
-        <button
-          type="button"
-          aria-label={active ? 'Active engine' : 'Activate engine'}
-          onClick={() => !active && onActivate()}
-          className="mt-0.5 text-accent disabled:text-muted"
-          disabled={active || activate.isPending}
-        >
-          {active ? <CircleDot size={18} /> : <Circle size={18} className="text-faint" />}
-        </button>
-
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             {editing ? (
@@ -167,11 +143,6 @@ export function EngineRow({
         </div>
 
         <div className="flex shrink-0 items-center gap-1">
-          {!active && (
-            <Button size="sm" variant="outline" onClick={onActivate} disabled={activate.isPending}>
-              <Check size={14} /> Activate
-            </Button>
-          )}
           <DropdownMenu>
             <DropdownMenuTrigger
               aria-label="Engine actions"

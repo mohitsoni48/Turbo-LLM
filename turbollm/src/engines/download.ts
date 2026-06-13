@@ -141,8 +141,13 @@ export interface ProvisionProgress {
   parts?: number // total archives for this backend
 }
 
-export async function downloadFile(url: string, dest: string, onProgress?: (p: ProvisionProgress) => void): Promise<void> {
-  const res = await fetch(url, { redirect: 'follow' })
+export async function downloadFile(
+  url: string,
+  dest: string,
+  onProgress?: (p: ProvisionProgress) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(url, { redirect: 'follow', signal })
   if (!res.ok || !res.body) throw new Error(`download failed: HTTP ${res.status}`)
   const total = Number(res.headers.get('content-length') ?? 0)
   let got = 0
@@ -158,7 +163,7 @@ export async function downloadFile(url: string, dest: string, onProgress?: (p: P
       }
     }
   })
-  await pipeline(body, createWriteStream(dest))
+  await pipeline(body, createWriteStream(dest), { signal })
 }
 
 /**
@@ -185,6 +190,7 @@ export async function provisionBackend(
   backend: BackendDef,
   tag: string,
   onProgress?: (p: ProvisionProgress) => void,
+  signal?: AbortSignal,
 ): Promise<string> {
   const destDir = join(enginesRoot, `llama.cpp-${tag}-${backend.id}`)
 
@@ -195,19 +201,35 @@ export async function provisionBackend(
 
   mkdirSync(destDir, { recursive: true })
   const parts = backend.assets.length
-  for (let i = 0; i < parts; i++) {
-    const asset = backend.assets[i]
-    const part = i + 1
-    const tmp = join(enginesRoot, asset)
-    const url = `https://github.com/${REPO}/releases/download/${tag}/${asset}`
-    onProgress?.({ phase: 'downloading', pct: 0, part, parts })
-    await downloadFile(url, tmp, (p) => onProgress?.({ ...p, part, parts }))
-    onProgress?.({ phase: 'extracting', pct: -1, part, parts })
-    await extractArchive(tmp, destDir)
-    rmSync(tmp, { force: true })
+  try {
+    for (let i = 0; i < parts; i++) {
+      const asset = backend.assets[i]
+      const part = i + 1
+      const tmp = join(enginesRoot, asset)
+      const url = `https://github.com/${REPO}/releases/download/${tag}/${asset}`
+      onProgress?.({ phase: 'downloading', pct: 0, part, parts })
+      await downloadFile(url, tmp, (p) => onProgress?.({ ...p, part, parts }), signal)
+      onProgress?.({ phase: 'extracting', pct: -1, part, parts })
+      await extractArchive(tmp, destDir)
+      rmSync(tmp, { force: true })
+    }
+  } catch (e) {
+    // Cancelled or failed mid-download: remove partial archives + the half-built
+    // backend dir so it isn't mistaken for an installed backend.
+    for (const asset of backend.assets) rmSync(join(enginesRoot, asset), { force: true })
+    rmSync(destDir, { recursive: true, force: true })
+    throw e
   }
 
   const bin = findServer(destDir)
   if (!bin) throw new Error('llama-server not found in extracted archive(s)')
   return bin
+}
+
+/** Remove an installed backend's extracted files. Returns true if anything existed. */
+export function deleteBackend(enginesRoot: string, id: BackendId, tag = LLAMA_BUILD): boolean {
+  const dir = backendDir(enginesRoot, id, tag)
+  if (!existsSync(dir)) return false
+  rmSync(dir, { recursive: true, force: true })
+  return true
 }

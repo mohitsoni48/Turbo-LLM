@@ -24,10 +24,12 @@ export function applyTheme(theme: Theme): void {
 type UiState = {
   theme: Theme
   setTheme: (theme: Theme) => void
-  sidebarCollapsed: boolean
-  toggleSidebar: () => void
   logPanelOpen: boolean
   setLogPanelOpen: (open: boolean) => void
+  /** A conversation id another screen wants the Chat screen to open (e.g. the
+   *  Launch Expert button in Settings). ChatScreen consumes and clears it. */
+  pendingConversationId: string | null
+  setPendingConversationId: (id: string | null) => void
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -37,8 +39,8 @@ export const useUiStore = create<UiState>((set) => ({
     applyTheme(theme)
     set({ theme })
   },
-  sidebarCollapsed: false,
-  toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   logPanelOpen: false,
   setLogPanelOpen: (logPanelOpen) => set({ logPanelOpen }),
+  pendingConversationId: null,
+  setPendingConversationId: (pendingConversationId) => set({ pendingConversationId }),
 }))

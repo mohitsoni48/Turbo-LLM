@@ -124,12 +124,16 @@ export function StreamingBubble({
   reasoning,
   progress,
   liveGenTps,
+  genTokens,
 }: {
   content: string
   reasoning: string
   progress: { phase: string; pct: number; tps: number } | null
   liveGenTps: number
+  genTokens: number
 }) {
+  const isPrefill = !!progress && progress.phase === 'prompt'
+
   return (
     <div className="flex gap-3">
       <ModelAvatar />
@@ -138,24 +142,39 @@ export function StreamingBubble({
         <div className="prose-tllm text-[15px] leading-[1.7] text-ink">
           {content ? <Markdown>{content}</Markdown> : (
             <span className="text-muted">
-              {progress
-                ? progress.phase === 'prompt'
-                  ? `Processing prompt · ${progress.pct}%${progress.tps > 0 ? ` · ${progress.tps.toFixed(0)} tok/s` : ''}`
-                  : 'Generating…'
-                : reasoning ? 'Generating…' : 'Thinking…'}
+              {isPrefill ? 'Processing prompt…' : reasoning ? 'Generating…' : 'Thinking…'}
             </span>
           )}
         </div>
-        {/* Live progress indicator — shows prefill % during prompt phase, gen tok/s during generation */}
-        <div className="mt-1 text-[11px] text-faint">
-          {progress && progress.phase === 'prompt' ? (
-            <span>{progress.pct}%{progress.tps > 0 ? ` · ${progress.tps.toFixed(0)} tok/s` : ''}</span>
-          ) : content && liveGenTps > 0 ? (
-            <span>{liveGenTps.toFixed(1)} tok/s</span>
-          ) : content ? (
-            <span>…</span>
-          ) : null}
-        </div>
+
+        {/* Prefill progress bar */}
+        {isPrefill && (
+          <div className="mt-2 space-y-1">
+            <div className="flex items-center gap-1.5 text-[11px] text-faint">
+              <span>Processing prompt</span>
+              <span className="font-medium" style={{ color: 'var(--ink)' }}>{progress.pct}%</span>
+              {progress.tps > 0 && <span>· {progress.tps.toFixed(0)} tok/s prefill</span>}
+            </div>
+            <div className="h-[3px] w-full overflow-hidden rounded-full" style={{ background: 'var(--border)' }}>
+              <div
+                className="h-full rounded-full transition-all duration-200"
+                style={{ width: `${progress.pct}%`, background: 'var(--accent)' }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Live generation: running token count + tok/s */}
+        {!isPrefill && (content || reasoning) && (
+          <div className="mt-1 flex items-center gap-1.5 text-[11px] text-faint">
+            <span className="tllm-pulse">·</span>
+            {genTokens > 0 && <span className="font-medium" style={{ color: 'var(--ink)' }}>{genTokens} tok</span>}
+            {liveGenTps > 0
+              ? <span>· {liveGenTps.toFixed(1)} tok/s</span>
+              : genTokens === 0 && <span>…</span>
+            }
+          </div>
+        )}
       </div>
     </div>
   )

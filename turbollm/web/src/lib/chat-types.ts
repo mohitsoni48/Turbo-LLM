@@ -33,6 +33,9 @@ export interface Conversation {
   systemPrompt: string
   modelKey: string
   sampling: Record<string, number>
+  /** Built-in TurboLLM Expert thread — its system prompt is managed server-side
+   *  and hidden from the UI (spec 08 §2). */
+  expertMode: boolean
   createdAt: string
   updatedAt: string
   messages?: Message[]

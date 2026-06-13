@@ -24,6 +24,12 @@ export function createConversation(partial?: Partial<Pick<Conversation, 'title' 
   return req('/api/v1/conversations', { method: 'POST', json: partial ?? {} })
 }
 
+/** Launch the built-in TurboLLM Expert thread (spec 08 §2). The expert system
+ *  prompt lives server-side and is never sent from the client. */
+export function createExpertConversation(): Promise<Conversation> {
+  return req('/api/v1/conversations/expert', { method: 'POST', json: {} })
+}
+
 export function getConversation(id: string): Promise<Conversation> {
   return req(`/api/v1/conversations/${encodeURIComponent(id)}`)
 }
@@ -57,11 +63,13 @@ export async function* sendMessage(
   convId: string,
   content: string,
   signal: AbortSignal,
+  images?: string[],
+  docContext?: string,
 ): AsyncGenerator<ChatSseEvent> {
   const res = await fetch(`/api/v1/conversations/${encodeURIComponent(convId)}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, images: images?.length ? images : undefined, docContext: docContext || undefined }),
     signal,
   })
   if (!res.ok || !res.body) {
@@ -97,4 +105,46 @@ export async function* sendMessage(
   } finally {
     reader.releaseLock()
   }
+}
+
+/**
+ * Streaming continue — regenerates a fresh assistant response for the conversation's
+ * existing last user message, WITHOUT adding a new user message. Used by retry/edit.
+ */
+export async function* continueConversation(
+  convId: string,
+  signal: AbortSignal,
+): AsyncGenerator<ChatSseEvent> {
+  const res = await fetch(`/api/v1/conversations/${encodeURIComponent(convId)}/continue`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+    signal,
+  })
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => '')
+    const env = (() => { try { return JSON.parse(text) } catch { return undefined } })() as { error?: { code?: string; message?: string } } | undefined
+    throw new ApiError(env?.error?.code ?? 'http_error', env?.error?.message ?? `Request failed with status ${res.status}.`, res.status)
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() ?? ''
+      let event = ''
+      for (const line of lines) {
+        if (line.startsWith('event: ')) { event = line.slice(7).trim() }
+        else if (line.startsWith('data: ')) {
+          const raw = line.slice(6).trim()
+          try { const data = JSON.parse(raw); if (event) yield { event, data } as ChatSseEvent } catch { /* skip */ }
+          event = ''
+        }
+      }
+    }
+  } finally { reader.releaseLock() }
 }

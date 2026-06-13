@@ -32,7 +32,7 @@ export function createApp(d: Deps): Hono {
 
   registerApi(app, d)
   registerChatRoutes(app, d)
-  registerGateway(app, d.manager)
+  registerGateway(app, d)
 
   // Embedded SPA with client-side-routing fallback (spec 08 §1).
   app.get('/*', (c) => {

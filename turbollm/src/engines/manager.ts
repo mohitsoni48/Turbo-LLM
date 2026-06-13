@@ -38,6 +38,54 @@ export interface Status {
   loadElapsedMs: number
 }
 
+/** Per-completion numbers fed into the running-session accumulator (B4). All
+ *  fields are best-effort: a path that can't compute t/s simply omits it. */
+export interface CompletionRecord {
+  inputTokens?: number
+  outputTokens?: number
+  promptTps?: number
+  genTps?: number
+}
+
+/** Live summary of the current running session (B4). Resets on start/stop. */
+export interface SessionStats {
+  requests: number
+  inputTokens: number
+  outputTokens: number
+  avgPromptTps: number
+  avgGenTps: number
+  sinceMs: number
+}
+
+interface SessionAccumulator {
+  requests: number
+  inputTokens: number
+  outputTokens: number
+  sumPromptTps: number
+  sumGenTps: number
+  promptTpsCount: number
+  genTpsCount: number
+  startedAt: number
+}
+
+function freshSession(): SessionAccumulator {
+  return {
+    requests: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    sumPromptTps: 0,
+    sumGenTps: 0,
+    promptTpsCount: 0,
+    genTpsCount: 0,
+    startedAt: Date.now(),
+  }
+}
+
+function posNum(v: unknown): number {
+  const n = Number(v)
+  return Number.isFinite(n) && n > 0 ? n : 0
+}
+
 export class BusyError extends Error {
   constructor() {
     super('engine_already_running')
@@ -58,6 +106,7 @@ export class Manager {
   private exited: Promise<void> = Promise.resolve()
   private resolveExited: (() => void) | null = null
   private generation = 0
+  private session: SessionAccumulator = freshSession()
 
   constructor(private store: ConfigStore) {
     setInterval(() => this.watchdogTick(), 60_000).unref()
@@ -83,6 +132,7 @@ export class Manager {
     child.stderr?.pipe(logStream, { end: false })
 
     this.state = 'starting'
+    this.session = freshSession() // each running session starts with fresh stats (B4)
     this.opts = opts
     this.port = port
     this.pid = child.pid ?? 0
@@ -152,6 +202,39 @@ export class Manager {
   touch(): void {
     this.lastActivity = Date.now()
   }
+
+  /** Record a completed completion into the running-session accumulator (B4).
+   *  Fully fail-safe: callers wrap this in try/catch too, but every field is
+   *  individually guarded so a bad number can never corrupt the totals. */
+  recordCompletion(rec: CompletionRecord): void {
+    const s = this.session
+    s.requests += 1
+    s.inputTokens += posNum(rec.inputTokens)
+    s.outputTokens += posNum(rec.outputTokens)
+    const pt = posNum(rec.promptTps)
+    if (pt > 0) {
+      s.sumPromptTps += pt
+      s.promptTpsCount += 1
+    }
+    const gt = posNum(rec.genTps)
+    if (gt > 0) {
+      s.sumGenTps += gt
+      s.genTpsCount += 1
+    }
+  }
+
+  /** Computed snapshot of the current running session's stats (B4). */
+  sessionStats(): SessionStats {
+    const s = this.session
+    return {
+      requests: s.requests,
+      inputTokens: s.inputTokens,
+      outputTokens: s.outputTokens,
+      avgPromptTps: s.promptTpsCount > 0 ? s.sumPromptTps / s.promptTpsCount : 0,
+      avgGenTps: s.genTpsCount > 0 ? s.sumGenTps / s.genTpsCount : 0,
+      sinceMs: Date.now() - s.startedAt,
+    }
+  }
   logPath(): string {
     return this.logPathStr
   }
@@ -188,6 +271,7 @@ export class Manager {
     }
     this.child = null
     this.pid = 0
+    this.session = freshSession() // session ended — clear stats (B4)
     this.resolveExited?.()
   }
 

@@ -1,0 +1,383 @@
+// Anthropic ↔ OpenAI message translation (spec 06 §2).
+import { randomUUID } from 'node:crypto'
+
+// ─── Anthropic request types ───────────────────────────────────────────────
+
+type ASystem = string | Array<{ type: string; text?: string }>
+type ABlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
+  | { type: 'tool_use'; id: string; name: string; input: unknown }
+  | { type: 'tool_result'; tool_use_id: string; content: string | Array<{ type: string; text?: string }> }
+type AMessage = { role: 'user' | 'assistant'; content: string | ABlock[] }
+
+export interface AnthropicRequest {
+  model?: string
+  messages: AMessage[]
+  system?: ASystem
+  max_tokens?: number
+  temperature?: number
+  top_p?: number
+  top_k?: number
+  stop_sequences?: string[]
+  stream?: boolean
+  tools?: Array<{ name: string; description?: string; input_schema: Record<string, unknown> }>
+  tool_choice?: { type: 'auto' | 'any' | 'tool'; name?: string }
+  thinking?: { type: 'enabled'; budget_tokens?: number }
+  metadata?: unknown
+}
+
+// ─── Mapping: Anthropic → OpenAI ──────────────────────────────────────────
+
+export function mapToOpenAI(req: AnthropicRequest): Record<string, unknown> {
+  const messages: Record<string, unknown>[] = []
+
+  if (req.system) {
+    const text =
+      typeof req.system === 'string'
+        ? req.system
+        : req.system
+            .filter((b) => b.type === 'text')
+            .map((b) => (b as { text?: string }).text ?? '')
+            .join('\n')
+    if (text) messages.push({ role: 'system', content: text })
+  }
+
+  for (const msg of req.messages) {
+    const raw = msg.content
+    if (typeof raw === 'string') {
+      messages.push({ role: msg.role, content: raw })
+      continue
+    }
+
+    if (msg.role === 'user') {
+      const toolResults: Record<string, unknown>[] = []
+      const parts: unknown[] = []
+      for (const b of raw) {
+        if (b.type === 'tool_result') {
+          const text =
+            typeof b.content === 'string'
+              ? b.content
+              : ((b.content as Array<{ type: string; text?: string }>) ?? [])
+                  .filter((x) => x.type === 'text')
+                  .map((x) => x.text ?? '')
+                  .join('\n')
+          toolResults.push({ role: 'tool', tool_call_id: b.tool_use_id, content: text })
+        } else if (b.type === 'text') {
+          parts.push({ type: 'text', text: b.text })
+        } else if (b.type === 'image') {
+          parts.push({
+            type: 'image_url',
+            image_url: { url: `data:${b.source.media_type};base64,${b.source.data}` },
+          })
+        }
+      }
+      // tool results must precede text parts (spec)
+      messages.push(...toolResults)
+      if (parts.length > 0) {
+        const content =
+          parts.length === 1 && (parts[0] as { type: string }).type === 'text'
+            ? (parts[0] as { text: string }).text
+            : parts
+        messages.push({ role: 'user', content })
+      }
+    } else {
+      let text = ''
+      const toolCalls: unknown[] = []
+      for (const b of raw) {
+        if (b.type === 'text') text += b.text
+        else if (b.type === 'tool_use')
+          toolCalls.push({
+            id: b.id,
+            type: 'function',
+            function: { name: b.name, arguments: JSON.stringify(b.input) },
+          })
+      }
+      const m: Record<string, unknown> = { role: 'assistant' }
+      if (text) m.content = text
+      if (toolCalls.length) m.tool_calls = toolCalls
+      messages.push(m)
+    }
+  }
+
+  const oai: Record<string, unknown> = {
+    model: req.model ?? 'local',
+    messages,
+    stream: req.stream ?? false,
+    max_tokens: req.max_tokens,
+  }
+  if (req.stream) oai.stream_options = { include_usage: true }
+  if (req.temperature != null) oai.temperature = req.temperature
+  if (req.top_p != null) oai.top_p = req.top_p
+  if (req.top_k != null) oai.top_k = req.top_k
+  if (req.stop_sequences?.length) oai.stop = req.stop_sequences
+  if (req.tools?.length) {
+    oai.tools = req.tools.map((t) => ({
+      type: 'function',
+      function: { name: t.name, description: t.description, parameters: t.input_schema },
+    }))
+    const tc = req.tool_choice
+    if (tc)
+      oai.tool_choice =
+        tc.type === 'auto'
+          ? 'auto'
+          : tc.type === 'any'
+            ? 'required'
+            : { type: 'function', function: { name: tc.name } }
+  }
+  return oai
+}
+
+// ─── Reasoning extraction ──────────────────────────────────────────────────
+
+// Extract <think>…</think> from content leading edge (spec 06 §3).
+function extractThinkTag(content: string): { thinking: string; content: string } {
+  const m = content.match(/^\s*<think>([\s\S]*?)<\/think>\s*/i)
+  if (!m) return { thinking: '', content }
+  return { thinking: (m[1] ?? '').trim(), content: content.slice(m[0].length) }
+}
+
+// ─── Mapping: OpenAI response → Anthropic ─────────────────────────────────
+
+const FINISH: Record<string, string> = {
+  stop: 'end_turn',
+  length: 'max_tokens',
+  tool_calls: 'tool_use',
+  content_filter: 'end_turn',
+}
+
+export function mapFromOpenAI(oai: Record<string, unknown>, modelName: string): Record<string, unknown> {
+  const choices = (oai.choices as Array<{ message?: Record<string, unknown>; finish_reason?: string }>) ?? []
+  const choice = choices[0] ?? {}
+  const msg = (choice.message ?? {}) as Record<string, unknown>
+  const blocks: unknown[] = []
+
+  let reasoning = (msg.reasoning_content as string | null | undefined) ?? ''
+  let content = (msg.content as string | null | undefined) ?? ''
+
+  // Fall back to <think> tag extraction if no reasoning_content
+  if (!reasoning && content) {
+    const ex = extractThinkTag(content)
+    reasoning = ex.thinking
+    content = ex.content
+  }
+
+  if (reasoning) blocks.push({ type: 'thinking', thinking: reasoning })
+  if (content) blocks.push({ type: 'text', text: content })
+
+  for (const tc of (msg.tool_calls as Array<{ id: string; function: { name: string; arguments: string } }> ?? [])) {
+    let input: unknown
+    try {
+      input = JSON.parse(tc.function.arguments)
+    } catch {
+      input = { _raw: tc.function.arguments }
+    }
+    blocks.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input })
+  }
+
+  const usage = oai.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined
+  return {
+    id: `msg_${randomUUID().replace(/-/g, '')}`,
+    type: 'message',
+    role: 'assistant',
+    model: modelName,
+    content: blocks,
+    stop_reason: FINISH[choice.finish_reason ?? 'stop'] ?? 'end_turn',
+    stop_sequence: null,
+    usage: { input_tokens: usage?.prompt_tokens ?? 0, output_tokens: usage?.completion_tokens ?? 0 },
+  }
+}
+
+// ─── Streaming: OAI SSE → Anthropic SSE events ────────────────────────────
+
+export type SseEvent = { event: string; data: string }
+
+type OAIDelta = {
+  content?: string | null
+  reasoning_content?: string | null
+  tool_calls?: Array<{
+    index: number
+    id?: string
+    function?: { name?: string; arguments?: string }
+  }>
+}
+
+/** Final usage observed while translating a stream (B4 session stats). */
+export type StreamUsage = { inputTokens: number; outputTokens: number }
+
+export async function* streamToAnthropic(
+  oaiStream: ReadableStream<Uint8Array>,
+  modelName: string,
+  msgId: string,
+  onUsage?: (u: StreamUsage) => void,
+): AsyncGenerator<SseEvent> {
+  let blockIdx = 0
+  let inThinking = false
+  let inText = false
+  let activeToolIdx = -1
+  let stopReason = 'end_turn'
+  let outputTokens = 0
+  let inputTokens = 0
+
+  yield sse('message_start', {
+    message: {
+      id: msgId,
+      type: 'message',
+      role: 'assistant',
+      content: [],
+      model: modelName,
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { input_tokens: 0, output_tokens: 1 },
+    },
+  })
+
+  const reader = oaiStream.getReader()
+  const dec = new TextDecoder()
+  let buf = ''
+  let failed = false
+
+  try {
+    outer: while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += dec.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() ?? ''
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        const raw = line.slice(6).trim()
+        if (raw === '[DONE]') break outer
+
+        let chunk: Record<string, unknown>
+        try {
+          chunk = JSON.parse(raw) as Record<string, unknown>
+        } catch {
+          continue
+        }
+
+        const usage = chunk.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined
+        if (usage?.completion_tokens) outputTokens = usage.completion_tokens
+        if (usage?.prompt_tokens) inputTokens = usage.prompt_tokens
+
+        const choices = chunk.choices as Array<{ delta?: OAIDelta; finish_reason?: string | null }> | undefined
+        if (!choices?.length) continue
+        const choice = choices[0]
+        if (choice.finish_reason) stopReason = FINISH[choice.finish_reason] ?? 'end_turn'
+        const delta: OAIDelta = choice.delta ?? {}
+
+        // reasoning_content → thinking block
+        if (delta.reasoning_content) {
+          if (!inThinking) {
+            inThinking = true
+            yield cbStart(blockIdx, { type: 'thinking', thinking: '' })
+          }
+          yield cbDelta(blockIdx, { type: 'thinking_delta', thinking: delta.reasoning_content })
+        }
+
+        // content → text block
+        if (delta.content) {
+          if (inThinking) {
+            yield cbStop(blockIdx)
+            inThinking = false
+            blockIdx++
+          }
+          if (!inText) {
+            inText = true
+            yield cbStart(blockIdx, { type: 'text', text: '' })
+          }
+          yield cbDelta(blockIdx, { type: 'text_delta', text: delta.content })
+        }
+
+        // tool_calls → tool_use blocks
+        if (delta.tool_calls?.length) {
+          if (inThinking) {
+            yield cbStop(blockIdx)
+            inThinking = false
+            blockIdx++
+          }
+          if (inText) {
+            yield cbStop(blockIdx)
+            inText = false
+            blockIdx++
+          }
+          for (const tc of delta.tool_calls) {
+            if (tc.index !== activeToolIdx) {
+              if (activeToolIdx >= 0) {
+                yield cbStop(blockIdx)
+                blockIdx++
+              }
+              activeToolIdx = tc.index
+              yield cbStart(blockIdx, {
+                type: 'tool_use',
+                id: tc.id ?? '',
+                name: tc.function?.name ?? '',
+                input: {},
+              })
+            }
+            if (tc.function?.arguments) {
+              yield cbDelta(blockIdx, { type: 'input_json_delta', partial_json: tc.function.arguments })
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    failed = true
+    yield sse('error', { error: { type: 'api_error', message: 'engine stopped' } })
+  } finally {
+    reader.releaseLock()
+  }
+
+  if (!failed) {
+    if (inThinking) {
+      yield cbStop(blockIdx)
+      blockIdx++
+    }
+    if (inText) {
+      yield cbStop(blockIdx)
+      blockIdx++
+    }
+    if (activeToolIdx >= 0) {
+      yield cbStop(blockIdx)
+      blockIdx++
+    }
+    yield sse('message_delta', {
+      delta: { stop_reason: stopReason, stop_sequence: null },
+      usage: { output_tokens: outputTokens },
+    })
+    yield sse('message_stop', {})
+    // Best-effort session stats (B4): hand off the final usage. Never throws.
+    if (onUsage) {
+      try { onUsage({ inputTokens, outputTokens }) } catch { /* swallow */ }
+    }
+  }
+}
+
+// ─── SSE helpers ──────────────────────────────────────────────────────────
+
+function sse(event: string, data: Record<string, unknown>): SseEvent {
+  return { event, data: JSON.stringify({ type: event, ...data }) }
+}
+
+function cbStart(index: number, content_block: unknown): SseEvent {
+  return {
+    event: 'content_block_start',
+    data: JSON.stringify({ type: 'content_block_start', index, content_block }),
+  }
+}
+
+function cbDelta(index: number, delta: unknown): SseEvent {
+  return {
+    event: 'content_block_delta',
+    data: JSON.stringify({ type: 'content_block_delta', index, delta }),
+  }
+}
+
+function cbStop(index: number): SseEvent {
+  return {
+    event: 'content_block_stop',
+    data: JSON.stringify({ type: 'content_block_stop', index }),
+  }
+}

@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { Download, X } from 'lucide-react'
 import type { Status } from '../lib/types'
+import { useBackendInstall } from '../lib/queries'
+import { Button } from './ui/button'
 
 /**
  * Global banner shown while the default llama.cpp engine is being downloaded/
@@ -9,6 +11,7 @@ import type { Status } from '../lib/types'
  */
 export function EngineProvisionBanner({ status }: { status: Status | undefined }) {
   const [dismissedError, setDismissedError] = useState(false)
+  const { cancel } = useBackendInstall()
   const p = status?.engineProvision
   if (!p) return null
 
@@ -50,6 +53,15 @@ export function EngineProvisionBanner({ status }: { status: Status | undefined }
         <Download size={14} className="text-accent" />
         <span className="flex-1">{label}</span>
         {pct != null && <span className="tabular-nums text-muted">{pct}%</span>}
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-6 px-2 text-[12px]"
+          onClick={() => cancel.mutate()}
+          disabled={cancel.isPending}
+        >
+          <X size={13} /> Cancel
+        </Button>
       </div>
       <div
         className="mt-1.5 h-1 w-full overflow-hidden rounded-full"

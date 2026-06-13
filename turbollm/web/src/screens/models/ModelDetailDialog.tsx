@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+﻿import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { ChevronDown, RotateCcw, Save, Zap } from 'lucide-react'
 import { ApiError } from '../../lib/api'
 import { useEngines, useModelActions, useModelDetail } from '../../lib/queries'
@@ -28,13 +28,27 @@ export function ModelDetailDialog({ modelKey, onClose }: { modelKey: string | nu
   // with any model (separate small draft GGUF).
   const flags = activeEngine?.capabilities.flags ?? []
   const hasFlag = (f: string) => flags.length === 0 || flags.includes(f)
+  // Whether the engine accepts a given `--spec-type` value (probe captures these
+  // as `spec-type:<value>`). Official llama.cpp lacks `nextn`; forks may add it.
+  const specAccepts = (v: string) => flags.length === 0 || flags.includes(`spec-type:${v}`)
   const arch = (detail?.arch ?? '').toLowerCase()
   const modelName = (detail?.name ?? '').toLowerCase()
+  // MTP uses a SEPARATE Gemma-4 assistant head GGUF the user supplies, so it's gated
+  // on arch (an opt-in the user configures with --mtp-head). NextN uses the model's
+  // OWN built-in head, so it's gated on real GGUF metadata (`nextn_predict_layers`).
   const modelSupportsMtp = /gemma4/.test(arch) || /gemma[ _-]?4/.test(modelName)
-  const modelSupportsNextn = /qwen3/.test(arch) || /qwen[ _-]?3/.test(modelName)
+  const modelSupportsNextn = (detail?.nextnLayers ?? 0) > 0
   const specOptions: Array<LoadProfile['speculative']> = ['off']
   if (hasFlag('--spec-type') && hasFlag('--mtp-head') && modelSupportsMtp) specOptions.push('mtp')
-  if (hasFlag('--spec-type') && hasFlag('--model-draft') && modelSupportsNextn) specOptions.push('nextn')
+  // NextN = the model's built-in head as a self-draft. The fork's spec-type is
+  // `nextn`; mainline llama.cpp's equivalent is `draft-mtp` — accept either.
+  if (
+    hasFlag('--spec-type') &&
+    hasFlag('--model-draft') &&
+    modelSupportsNextn &&
+    (specAccepts('nextn') || specAccepts('draft-mtp'))
+  )
+    specOptions.push('nextn')
   if (hasFlag('--model-draft')) specOptions.push('draft')
 
   const fit = useMemo(() => {
@@ -85,6 +99,16 @@ export function ModelDetailDialog({ modelKey, onClose }: { modelKey: string | nu
               <Row label="Flash attention">
                 <Segmented value={draft.flashAttn} options={['auto', 'on', 'off']} onChange={(v) => set('flashAttn', v as LoadProfile['flashAttn'])} />
               </Row>
+              <Toggle label="Use Jinja chat template" value={draft.useJinja} onChange={(v) => set('useJinja', v)} />
+              {draft.useJinja && (
+                <PathField
+                  label="Template file path (optional)"
+                  hint="Leave empty to use model's built-in template."
+                  value={draft.chatTemplateFile}
+                  placeholder="Path to .jinja template file"
+                  onChange={(v) => set('chatTemplateFile', v)}
+                />
+              )}
             </Section>
 
             <SectionTitle>Sampling</SectionTitle>
@@ -95,50 +119,66 @@ export function ModelDetailDialog({ modelKey, onClose }: { modelKey: string | nu
               <Slider label="Min P" value={draft.sampling.minP} min={0} max={1} step={0.01} onChange={(v) => setS('minP', v)} fmt={(v) => v.toFixed(2)} />
             </Section>
 
+            {specOptions.length > 1 && (
+              <>
+                <SectionTitle>Speculative decoding</SectionTitle>
+                <Section>
+                  <Row label="Mode" hint="Predict extra tokens per step — faster generation.">
+                    <SpecSegmented value={draft.speculative} options={specOptions} onChange={(v) => set('speculative', v)} />
+                  </Row>
+                  {draft.speculative === 'mtp' && (
+                    <PathField
+                      label="MTP head GGUF"
+                      hint="Gemma-4 assistant model file."
+                      value={draft.mtpHeadPath}
+                      placeholder="Path to gemma-4-mtp-assistant.gguf"
+                      onChange={(v) => set('mtpHeadPath', v)}
+                    />
+                  )}
+                  {draft.speculative === 'nextn' && (
+                    <p className="text-[11px] text-faint">Uses this model's built-in NextN head — no extra file needed.</p>
+                  )}
+                  {draft.speculative === 'draft' && (
+                    <PathField
+                      label="Draft model GGUF"
+                      hint="A small same-family model."
+                      value={draft.draftModelPath}
+                      placeholder="Path to small draft model"
+                      onChange={(v) => set('draftModelPath', v)}
+                    />
+                  )}
+                </Section>
+              </>
+            )}
+
             <button type="button" onClick={() => setAdvanced((a) => !a)} className="flex items-center gap-1 text-[13px] font-medium text-muted hover:text-ink">
               <ChevronDown size={14} className={advanced ? 'rotate-180 transition-transform' : 'transition-transform'} />
               Advanced
             </button>
             {advanced && (
               <Section>
-                <Row label="Threads (0 = auto)">
-                  <NumberInput value={draft.threads} min={0} max={64} onChange={(v) => set('threads', v)} />
-                </Row>
-                <Row label="Cache reuse">
-                  <NumberInput value={draft.cacheReuse} min={0} max={4096} onChange={(v) => set('cacheReuse', v)} />
-                </Row>
-                <Toggle label="Apply chat template (--jinja)" value={draft.useJinja} onChange={(v) => set('useJinja', v)} />
+                <Slider
+                  label="CPU threads"
+                  hint={
+                    draft.threads === 0
+                      ? `Auto — half your cores (${autoThreads(detail.cores)} of ${detail.cores || '?'})`
+                      : `${draft.threads} of ${detail.cores || '?'} cores`
+                  }
+                  value={draft.threads}
+                  min={0}
+                  max={Math.max(1, detail.cores || 64)}
+                  step={1}
+                  onChange={(v) => set('threads', v)}
+                  fmt={(v) => (v === 0 ? 'Auto' : String(v))}
+                />
+                <Toggle
+                  label="Reuse cached prompt"
+                  hint="Skips re-processing the unchanged start of a prompt on repeated or continued requests — faster first token. Recommended on."
+                  value={draft.cacheReuse > 0}
+                  onChange={(on) => set('cacheReuse', on ? 256 : 0)}
+                />
                 {detail.vision && <Toggle label="Vision encoder on GPU" value={draft.mmprojGpu} onChange={(v) => set('mmprojGpu', v)} />}
                 {draft.parallel > 1 && <Toggle label="Unified KV across slots" value={draft.kvUnified} onChange={(v) => set('kvUnified', v)} />}
-
-                {specOptions.length > 1 && (
-                  <div className="flex flex-col gap-2 border-t border-border pt-3">
-                    <Row label="Speculative decoding" hint="Predict several tokens per step — faster generation.">
-                      <SpecSegmented value={draft.speculative} options={specOptions} onChange={(v) => set('speculative', v)} />
-                    </Row>
-                    {draft.speculative === 'mtp' && (
-                      <PathField
-                        label="MTP head GGUF"
-                        hint="Gemma-4 gemma4_assistant model."
-                        value={draft.mtpHeadPath}
-                        placeholder="e.g. D:\\models\\gemma-4-mtp-assistant.gguf"
-                        onChange={(v) => set('mtpHeadPath', v)}
-                      />
-                    )}
-                    {draft.speculative === 'nextn' && (
-                      <p className="text-[11px] text-faint">Uses this model’s built-in NextN head — no extra file needed.</p>
-                    )}
-                    {draft.speculative === 'draft' && (
-                      <PathField
-                        label="Draft model GGUF"
-                        hint="A small same-family model."
-                        value={draft.draftModelPath}
-                        placeholder="e.g. D:\\models\\qwen3-0.6b.gguf"
-                        onChange={(v) => set('draftModelPath', v)}
-                      />
-                    )}
-                  </div>
-                )}
               </Section>
             )}
 
@@ -153,7 +193,7 @@ export function ModelDetailDialog({ modelKey, onClose }: { modelKey: string | nu
               />
               Remember these settings
               <span className="text-[11px] text-faint">
-                {remember ? '· saved as this model’s default' : '· this load only'}
+                {remember ? "· saved as this model's default" : '· this load only'}
               </span>
             </label>
 
@@ -323,13 +363,21 @@ function PathField({ label, hint, value, placeholder, onChange }: {
   )
 }
 
-function Toggle({ label, value, onChange }: { label: string; value: boolean; onChange: (v: boolean) => void }) {
+function Toggle({ label, hint, value, onChange }: { label: string; hint?: string; value: boolean; onChange: (v: boolean) => void }) {
   return (
     <label className="flex cursor-pointer items-center justify-between gap-3">
-      <span className="text-[13px] text-ink">{label}</span>
-      <input type="checkbox" checked={value} onChange={(e) => onChange(e.target.checked)} className="h-4 w-4 accent-[var(--accent)]" />
+      <div className="min-w-0">
+        <span className="text-[13px] text-ink">{label}</span>
+        {hint && <p className="text-[11px] text-faint">{hint}</p>}
+      </div>
+      <input type="checkbox" checked={value} onChange={(e) => onChange(e.target.checked)} className="h-4 w-4 shrink-0 accent-[var(--accent)]" />
     </label>
   )
+}
+
+/** Effective threads when "Auto" (0) is chosen — half the logical cores. */
+function autoThreads(cores: number): number {
+  return Math.max(1, Math.floor((cores || 2) / 2))
 }
 
 function fmtSize(b: number): string {

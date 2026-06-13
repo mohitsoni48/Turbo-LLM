@@ -23,6 +23,9 @@ export interface GgufMeta {
   embedLen: number
   headCountKv: number
   expertCount: number
+  /** `<arch>.nextn_predict_layers` — >0 means the GGUF carries a built-in NextN /
+   *  multi-token-prediction head (self-speculative decoding). 0 = none. */
+  nextnLayers: number
   hasChatTemplate: boolean
 }
 
@@ -180,6 +183,7 @@ export function parseGguf(path: string): GgufMeta {
       else if (key.endsWith('.embedding_length')) m.embedLen = readNumberOrMax(r, t)
       else if (key.endsWith('.attention.head_count_kv')) m.headCountKv = readNumberOrMax(r, t)
       else if (key.endsWith('.expert_count')) m.expertCount = readNumberOrMax(r, t)
+      else if (key.endsWith('.nextn_predict_layers')) m.nextnLayers = readNumberOrMax(r, t)
       else if (key === 'tokenizer.chat_template') {
         m.hasChatTemplate = true
         skipValue(r, t)
@@ -198,6 +202,7 @@ export function parseGguf(path: string): GgufMeta {
       embedLen: m.embedLen ?? 0,
       headCountKv: m.headCountKv ?? 0,
       expertCount: m.expertCount ?? 0,
+      nextnLayers: m.nextnLayers ?? 0,
       hasChatTemplate: m.hasChatTemplate ?? false,
     }
   } finally {

@@ -11,27 +11,31 @@ import {
 /**
  * Model selector + eject control. Lists discovered models; selecting one loads it
  * (the engine auto-starts), and "Eject" stops the running engine. Shared by the
- * Chat and Models screens.
+ * Chat and Models screens. Alt+click a model row to open its config before loading.
  */
 export function ModelLoadMenu({
   models,
   loadedKey,
   loadedName,
   pending,
+  ejecting,
   onLoad,
   onEject,
+  onSettings,
   align = 'start',
 }: {
   models: ModelEntry[]
   loadedKey?: string | null
   loadedName?: string | null
   pending?: boolean
+  ejecting?: boolean
   onLoad: (key: string) => void
   onEject: () => void
+  onSettings?: (key: string) => void
   align?: 'start' | 'end'
 }) {
   const loadable = models.filter((m) => !m.incomplete && !m.parseError)
-  const label = loadedName || (loadedKey ? 'Loaded model' : 'Load a model')
+  const label = ejecting ? 'Ejecting…' : (loadedName || (loadedKey ? 'Loaded model' : 'Load a model'))
 
   return (
     <DropdownMenu>
@@ -39,7 +43,7 @@ export function ModelLoadMenu({
         className="flex h-8 max-w-[260px] items-center gap-1.5 rounded-md border border-border bg-panel px-2.5 text-[13px] text-ink transition-colors hover:border-[color:var(--accent)] disabled:opacity-60"
         disabled={pending}
       >
-        {pending ? (
+        {pending || ejecting ? (
           <Loader2 size={14} className="animate-spin text-muted" />
         ) : (
           <Cpu size={14} className={loadedKey ? 'text-accent' : 'text-muted'} />
@@ -54,10 +58,15 @@ export function ModelLoadMenu({
         {loadable.map((m) => {
           const active = m.key === loadedKey
           return (
-            <DropdownMenuItem
+            <div
               key={m.key}
-              onSelect={() => !active && onLoad(m.key)}
-              className="flex items-center gap-2"
+              role="menuitem"
+              tabIndex={-1}
+              className="flex cursor-pointer select-none items-center gap-2 rounded-sm px-2 py-1.5 text-[13px] outline-none hover:bg-panel-2 focus:bg-panel-2"
+              onClick={(e) => {
+                if (e.altKey && onSettings) { onSettings(m.key); return }
+                if (!active) onLoad(m.key)
+              }}
             >
               <span className="flex h-4 w-4 shrink-0 items-center justify-center">
                 {active && <Check size={14} className="text-accent" />}
@@ -66,9 +75,10 @@ export function ModelLoadMenu({
               <span className="shrink-0 text-[11px] uppercase text-faint">
                 {m.format === 'mlx' ? 'MLX' : m.quant}
               </span>
-            </DropdownMenuItem>
+            </div>
           )
         })}
+        {onSettings && <div className="px-2 py-1 text-[11px] text-faint">Alt+click to configure</div>}
         {loadedKey && (
           <>
             <DropdownMenuSeparator />
