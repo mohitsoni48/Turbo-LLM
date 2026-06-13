@@ -35,9 +35,19 @@ export class ApiError extends Error {
   }
 }
 
-function authHeader(): Record<string, string> {
+/** Auth header for every client request — shared with chat-api.ts so chat works over
+ *  LAN too (the daemon requires a key for non-loopback requests, spec 06 §5). */
+export function authHeaders(): Record<string, string> {
   const token = localStorage.getItem(AUTH_KEY)
   return token ? { 'X-TurboLLM-Auth': token } : {}
+}
+
+/** Persist (or clear) the API key this client sends as X-TurboLLM-Auth. Needed for
+ *  LAN access, where the daemon requires a key for non-loopback requests (spec 06 §5). */
+export function setAuthToken(token: string): void {
+  const t = token.trim()
+  if (t) localStorage.setItem(AUTH_KEY, t)
+  else localStorage.removeItem(AUTH_KEY)
 }
 
 async function request<T>(
@@ -46,7 +56,7 @@ async function request<T>(
 ): Promise<T> {
   const headers: Record<string, string> = {
     Accept: 'application/json',
-    ...authHeader(),
+    ...authHeaders(),
     ...((init?.headers as Record<string, string>) ?? {}),
   }
   let body = init?.body

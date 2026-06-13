@@ -4,10 +4,13 @@ import {
   Route,
   Routes,
 } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { TooltipProvider } from './components/ui/tooltip'
 import { Shell } from './components/Shell'
 import { UnreachableOverlay } from './components/UnreachableOverlay'
+import { AuthGate } from './components/AuthGate'
 import { useStatus } from './lib/queries'
+import { ApiError, setAuthToken } from './lib/api'
 import { ChatScreen } from './screens/ChatScreen'
 import { ModelsScreen } from './screens/ModelsScreen'
 import { EnginesScreen } from './screens/EnginesScreen'
@@ -16,6 +19,7 @@ import { SettingsScreen } from './screens/SettingsScreen'
 
 export function App() {
   const statusQ = useStatus()
+  const qc = useQueryClient()
 
   // Count consecutive failed polls; show the unreachable overlay after 3 (spec 08 §1).
   const [failCount, setFailCount] = useState(0)
@@ -30,7 +34,10 @@ export function App() {
   }, [statusQ.isSuccess, statusQ.isError, statusQ.dataUpdatedAt, statusQ.errorUpdatedAt])
 
   const online = statusQ.isSuccess
-  const unreachable = failCount >= 3
+  // A 401 isn't a lost connection — the daemon is up but (LAN-exposed) wants an API
+  // key. Show the key prompt instead of the misleading "lost connection" overlay.
+  const needsAuth = statusQ.isError && statusQ.error instanceof ApiError && statusQ.error.status === 401
+  const unreachable = !needsAuth && failCount >= 3
   const version = statusQ.data?.version ? `v${statusQ.data.version}` : 'v0.0.0-dev'
 
   return (
@@ -45,6 +52,14 @@ export function App() {
           <Route path="*" element={<Navigate to="/chat" replace />} />
         </Routes>
       </Shell>
+      {needsAuth && (
+        <AuthGate
+          onConnect={(key) => {
+            setAuthToken(key)
+            void qc.invalidateQueries()
+          }}
+        />
+      )}
       {unreachable && <UnreachableOverlay />}
     </TooltipProvider>
   )

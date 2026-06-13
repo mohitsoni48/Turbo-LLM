@@ -1,8 +1,8 @@
 import type { Conversation, Message, ChatSseEvent } from './chat-types'
-import { ApiError } from './api'
+import { ApiError, authHeaders } from './api'
 
 async function req<T>(path: string, init?: RequestInit & { json?: unknown }): Promise<T> {
-  const headers: Record<string, string> = { Accept: 'application/json', ...((init?.headers as Record<string, string>) ?? {}) }
+  const headers: Record<string, string> = { Accept: 'application/json', ...authHeaders(), ...((init?.headers as Record<string, string>) ?? {}) }
   let body = init?.body
   if (init && 'json' in init && init.json !== undefined) { headers['Content-Type'] = 'application/json'; body = JSON.stringify(init.json) }
   const res = await fetch(path, { ...init, headers, body })
@@ -69,7 +69,7 @@ export async function* sendMessage(
 ): AsyncGenerator<ChatSseEvent> {
   const res = await fetch(`/api/v1/conversations/${encodeURIComponent(convId)}/messages`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ content, images: images?.length ? images : undefined, docContext: docContext || undefined, textAttachments: textAttachments?.length ? textAttachments : undefined }),
     signal,
   })
@@ -118,7 +118,7 @@ export async function* continueConversation(
 ): AsyncGenerator<ChatSseEvent> {
   const res = await fetch(`/api/v1/conversations/${encodeURIComponent(convId)}/continue`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({}),
     signal,
   })
