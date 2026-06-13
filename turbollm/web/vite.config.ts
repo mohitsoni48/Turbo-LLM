@@ -15,6 +15,9 @@ export default defineConfig({
   },
   build: {
     outDir: '../src/webdist',
-    emptyOutDir: false,
+    // Wipe the output dir on each build. webdist is purely generated (served by
+    // the daemon and copied into dist/ at package build) — without this, vite
+    // leaves stale hashed chunks behind every build, bloating the npm package.
+    emptyOutDir: true,
   },
 })

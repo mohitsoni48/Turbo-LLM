@@ -1,7 +1,8 @@
 // TurboLLM brand mark. The lightning bolt is rendered as inline SVG so it stays
 // crisp at every size and inherits color via `currentColor` (white inside the
-// accent tile, themeable elsewhere). Raster source art lives in
-// web/public/brand/ (turbollm-icon-512.jpeg, turbollm-wordmark.jpeg).
+// accent tile, themeable elsewhere). High-res master art lives in
+// web/brand-assets/ (not shipped); the shipped 512px app icon is
+// web/public/brand/turbollm-icon-512.jpeg.
 
 interface MarkProps {
   className?: string

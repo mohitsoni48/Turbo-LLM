@@ -40,20 +40,22 @@ export function ChatScreen() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [attachments, setAttachments] = useState<{ file: File; dataUrl: string }[]>([])
 
-  // Thinking toggle — per-conversation, persisted in localStorage (spec 07 §7).
-  // Reads per-conv key first; falls back to global default; defaults to ON.
-  const readShowThinking = (convId: string | null): boolean => {
+  // Thinking toggle — per-conversation, persisted in localStorage. When OFF the
+  // model is told to skip reasoning entirely (answers directly), not merely to
+  // hide the reasoning. Reads per-conv key first; falls back to global default;
+  // defaults to ON (reasoning models think).
+  const readThinkingEnabled = (convId: string | null): boolean => {
     if (convId) {
-      const perConv = localStorage.getItem(`tllm.showThinking.${convId}`)
+      const perConv = localStorage.getItem(`tllm.thinkingEnabled.${convId}`)
       if (perConv !== null) return perConv !== 'false'
     }
-    const global = localStorage.getItem('tllm.showThinking.default')
+    const global = localStorage.getItem('tllm.thinkingEnabled.default')
     return global !== 'false'
   }
-  const [showThinking, setShowThinkingState] = useState<boolean>(() => readShowThinking(null))
-  const setShowThinking = (val: boolean) => {
-    if (activeId) localStorage.setItem(`tllm.showThinking.${activeId}`, String(val))
-    setShowThinkingState(val)
+  const [thinkingEnabled, setThinkingEnabledState] = useState<boolean>(() => readThinkingEnabled(null))
+  const setThinkingEnabled = (val: boolean) => {
+    if (activeId) localStorage.setItem(`tllm.thinkingEnabled.${activeId}`, String(val))
+    setThinkingEnabledState(val)
   }
   const abortRef = useRef<AbortController | null>(null)
   const deltaTimestamps = useRef<number[]>([])
@@ -147,7 +149,7 @@ export function ChatScreen() {
 
   // Sync thinking toggle when conversation changes.
   useEffect(() => {
-    setShowThinkingState(readShowThinking(activeId))
+    setThinkingEnabledState(readThinkingEnabled(activeId))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId])
 
@@ -263,7 +265,7 @@ export function ChatScreen() {
       abortRef.current = ac
 
       const textAttachmentNames = textAttachments.map((a) => a.file.name)
-      await streamFrom(convId, sendMessage(convId, text, ac.signal, images, docContext, textAttachmentNames))
+      await streamFrom(convId, sendMessage(convId, text, ac.signal, images, docContext, textAttachmentNames, !thinkingEnabled))
     } catch (e) {
       setLive(null)
       if ((e as Error)?.name !== 'AbortError') {
@@ -282,7 +284,7 @@ export function ChatScreen() {
         if (engineState === 'running' && model) {
           const ac = new AbortController()
           abortRef.current = ac
-          void streamFrom(activeId, continueConversation(activeId, ac.signal))
+          void streamFrom(activeId, continueConversation(activeId, ac.signal, !thinkingEnabled))
         }
       },
       onError: () => toast.error('Could not edit message.'),
@@ -295,7 +297,7 @@ export function ChatScreen() {
     await mut.regenerate.mutateAsync(activeId).catch(() => {})
     const ac = new AbortController()
     abortRef.current = ac
-    void streamFrom(activeId, continueConversation(activeId, ac.signal))
+    void streamFrom(activeId, continueConversation(activeId, ac.signal, !thinkingEnabled))
   }
 
   const handleCopy = (m: Message) => {
@@ -361,22 +363,24 @@ export function ChatScreen() {
             size="icon"
             variant="ghost"
             className="h-8 w-8"
-            onClick={() => setShowThinking(!showThinking)}
-            title={showThinking ? 'Hide thinking blocks' : 'Show thinking blocks'}
-            style={{ color: showThinking ? 'var(--accent)' : 'var(--faint)' }}
+            onClick={() => setThinkingEnabled(!thinkingEnabled)}
+            title={thinkingEnabled
+              ? 'Thinking on — model reasons before answering. Click to disable.'
+              : 'Thinking off — model answers directly. Click to enable reasoning.'}
+            style={{ color: thinkingEnabled ? 'var(--accent)' : 'var(--faint)' }}
           >
             <Brain size={15} />
           </Button>
           {engineState === 'starting' && <span className="text-[12px] text-muted">Loading model…</span>}
           {engineState === 'stopping' && <span className="text-[12px] text-muted">Ejecting…</span>}
-          {ready && conv && (
+          {ready && (
             <ContextMeter ctxUsed={ctxUsed} ctxMax={ctxMax} />
           )}
         </div>
 
         {/* Message list — always visible; empty state shown only when no messages */}
         <div ref={scrollerRef} className="min-h-0 flex-1 overflow-y-auto">
-          <div className="mx-auto flex w-full max-w-[768px] flex-col gap-6 px-6 py-6">
+          <div className="flex w-full flex-col gap-6 px-8 py-6">
             {/* Empty state */}
             {messages.length === 0 && !live && (
               <div className="flex flex-col items-center gap-3 py-16">
@@ -415,7 +419,6 @@ export function ChatScreen() {
                 editingId={editingId}
                 onEditSave={(content) => handleEditSave(m.id, content)}
                 onEditCancel={() => setEditingId(null)}
-                showThinking={showThinking}
               />
             ))}
 
@@ -440,8 +443,8 @@ export function ChatScreen() {
         )}
 
         {/* Composer area (always visible; disabled when no model) */}
-        <div className="px-6 pb-5">
-          <div className="mx-auto w-full max-w-[768px]">
+        <div className="px-8 pb-5">
+          <div className="w-full">
             <div className="rounded-[var(--radius-lg)] border border-border bg-panel shadow-[var(--shadow-2)] focus-within:border-[color:var(--accent)]">
               {/* Attachment previews */}
               {attachments.length > 0 && (

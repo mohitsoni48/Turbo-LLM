@@ -1,16 +1,40 @@
 {
   "name": "turbollm",
-  "version": "0.0.0",
-  "description": "TurboLLM daemon — local LLM platform (engine manager + OpenAI/Anthropic gateway + web UI)",
-  "private": true,
+  "version": "0.1.0",
+  "description": "TurboLLM — local LLM platform: run any inference engine auto-tuned to your GPU, with a web UI and OpenAI/Anthropic-compatible API. Point Claude Code at your own machine in one command.",
+  "license": "FSL-1.1-ALv2",
+  "author": "bramha.dev",
+  "homepage": "https://github.com/mohitsoni48/Turbo-LLM#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mohitsoni48/Turbo-LLM.git",
+    "directory": "turbollm"
+  },
+  "bugs": {
+    "url": "https://github.com/mohitsoni48/Turbo-LLM/issues"
+  },
+  "keywords": [
+    "llm",
+    "local-llm",
+    "llama.cpp",
+    "llama-server",
+    "inference",
+    "gguf",
+    "openai-api",
+    "anthropic-api",
+    "claude-code",
+    "gpu",
+    "self-hosted",
+    "ai",
+    "chat"
+  ],
   "type": "module",
   "bin": {
     "turbollm": "bin/turbollm.mjs"
   },
   "files": [
     "bin",
-    "dist",
-    "src/webdist"
+    "dist"
   ],
   "scripts": {
     "dev": "tsx watch src/cli.ts",
@@ -18,7 +42,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-strip-types",
     "build:web": "cd web && npm ci && npm run build",
-    "build": "npm run typecheck && tsup && node -e \"const fs=require('fs'),p='dist/cli.js',c=fs.readFileSync(p,'utf8');fs.writeFileSync(p,c.replaceAll('from \\\"sqlite\\\"','from \\\"node:sqlite\\\"'))\" && node -e \"require('fs').cpSync('src/webdist','dist/webdist',{recursive:true,force:true})\""
+    "build": "npm run typecheck && tsup && node -e \"const fs=require('fs'),p='dist/cli.js',c=fs.readFileSync(p,'utf8');fs.writeFileSync(p,c.replaceAll('from \\\"sqlite\\\"','from \\\"node:sqlite\\\"'))\" && node -e \"require('fs').cpSync('src/webdist','dist/webdist',{recursive:true,force:true})\"",
+    "prepublishOnly": "npm run build:web && npm run build"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",

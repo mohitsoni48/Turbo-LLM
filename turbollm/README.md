@@ -1,20 +1,58 @@
 <p align="center">
-  <img src="web/public/brand/turbollm-icon-512.jpeg" width="96" height="96" alt="TurboLLM" />
+  <img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/turbollm/web/public/brand/turbollm-icon-512.jpeg" width="96" height="96" alt="TurboLLM" />
 </p>
 
-<h1 align="center">TurboLLM <sub>(product code)</sub></h1>
+<h1 align="center">TurboLLM</h1>
 
-<!-- Brand assets: web/public/brand/ (icon + wordmark) · in-app mark: web/src/components/Logo.tsx · favicon: web/public/favicon.svg -->
+<p align="center">
+  <strong>Run any local LLM, auto-tuned to your GPU — with a polished web UI and an
+  OpenAI/Anthropic-compatible API.</strong><br/>
+  Point Claude Code at your own machine in one command. Fully offline, no cloud key.
+</p>
 
-The TurboLLM daemon — a **Node.js + TypeScript** app, shipped as an npm package
-(`npx turbollm`), that serves a browser web UI and an OpenAI/Anthropic-compatible API
-gateway, and manages any bring-your-own inference engine. Stack decision: ADR-023
-(supersedes the earlier Go prototype). Behavior is specified in [`../docs/specs/`](../docs/specs/).
+<!-- Brand: shipped app icon web/public/brand/turbollm-icon-512.jpeg · high-res masters web/brand-assets/ (unshipped) · in-app mark web/src/components/Logo.tsx · favicon web/public/favicon.svg -->
+
+---
+
+TurboLLM is a single command — `npx turbollm` — that starts a local daemon, opens a
+browser UI, and serves your models over an API any tool can talk to. It manages **any
+bring-your-own inference engine** (stock `llama.cpp`, community forks, or a default it
+provisions for you), **auto-tunes the launch flags to your exact hardware**, and shows you
+**real measured tokens/sec**.
+
+It's built for the prosumer/indie-dev who today hand-compiles forks and hunts forums for
+the right flags — not as "another easy chat app," but as the **performance & bleeding-edge
+layer for local LLMs**.
+
+## Why TurboLLM
+
+- **Any engine, including forks.** Most tools lock you to one blessed runtime. TurboLLM
+  makes any `llama-server`-compatible binary a first-class choice — point it at a build you
+  compiled, or let it auto-provision the right prebuilt for your GPU (CUDA / ROCm / Metal /
+  SYCL / Vulkan, picked by detected vendor).
+- **Auto-tuned to your hardware.** It benchmarks on load and derives fast defaults (flash
+  attention, speculative decoding / NextN, context, offload, KV-cache type, threads) with a
+  VRAM-fit verdict *before* you load — no more guessing flags.
+- **Real tokens/sec, never fake.** Speed shown in the model list is measured on your
+  machine from actual generation, not a synthetic estimate.
+- **A real chat UI.** Streaming with live t/s, prefill %, TTFT and full stats; markdown +
+  code highlighting; collapsible thinking blocks; edit / regenerate / delete / copy;
+  persistent searchable conversations; image input for vision models; per-chat system
+  prompt and sampling.
+- **Drop-in APIs.** OpenAI **and** Anthropic-compatible endpoints, so existing tools and
+  agentic CLIs work unchanged.
+- **Usable from any device.** The web UI runs in the browser and can be shared across your
+  LAN (with optional API-key auth), not locked to the machine it runs on.
+- **Bring your own models.** Point it at folders you already have (no re-download), or
+  browse and download GGUFs from Hugging Face — or any direct URL — inside the app.
+- **Offline-first & private.** Core local use needs no account, no backend, no internet.
+  No analytics are collected.
 
 ## Requirements
 
 - **Node.js 22 or newer** — the daemon enforces this at startup and exits with a clear
-  message if the version is too old. Download: https://nodejs.org
+  message if the version is too old. Download: <https://nodejs.org>
+- A GPU is recommended but not required (a CPU build is provisioned as a fallback).
 
 ## Quick start
 
@@ -27,10 +65,37 @@ npm install -g turbollm
 turbollm
 ```
 
-The daemon starts, prints the local URL, and opens your browser automatically.
-Stop it with **Ctrl+C**.
+The daemon starts, prints the local URL (default <http://127.0.0.1:6996>), and opens your
+browser. On first run with no engine configured, it downloads a suitable prebuilt
+`llama-server` for your hardware automatically. Stop the daemon with **Ctrl+C**.
 
-## Flags
+Then, in the UI: open **Models**, download or pick a GGUF, and load it.
+
+## Use your local model with Claude Code
+
+TurboLLM serves an Anthropic-compatible API, so coding CLIs like
+[Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code) can run against
+whatever model you have loaded — no cloud key, fully offline. One command wires it up:
+
+```bash
+turbollm launch claude          # opens Claude Code on your loaded model
+```
+
+This requires the daemon running with a model loaded. It points Claude Code's
+`ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` at TurboLLM and execs `claude`; extra args are
+forwarded (`turbollm launch claude --help`). If `claude` isn't installed, the command tells
+you how (`npm install -g @anthropic-ai/claude-code`). The in-app **Developer** screen also
+shows manual env-var snippets for any OpenAI- or Anthropic-compatible tool.
+
+## Command-line usage
+
+```bash
+turbollm                        # start on :6996, open browser
+turbollm --port 9000            # listen on a specific port
+turbollm --no-open              # start without opening a browser
+turbollm --addr 0.0.0.0:6996    # bind all interfaces (LAN sharing)
+turbollm launch claude          # start Claude Code against the loaded model
+```
 
 | Flag | Description |
 |------|-------------|
@@ -40,84 +105,59 @@ Stop it with **Ctrl+C**.
 | `--config <file>` | Path to a custom config file |
 | `--help`, `-h` | Show usage and exit |
 
-Examples:
+State (config, database, downloaded engines and models) lives under **`~/.turbollm/`**.
+
+## API
+
+With a model loaded, TurboLLM serves two compatible APIs on the same port:
 
 ```bash
-turbollm                        # start on :6996, open browser
-turbollm --port 9000            # listen on port 9000
-turbollm --no-open              # start without opening a browser
-turbollm --addr 0.0.0.0:6996   # bind to all interfaces (LAN sharing)
+# OpenAI-compatible
+curl http://127.0.0.1:6996/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"local","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-## Use your local model with Claude Code
+The Anthropic-compatible endpoint (`/v1/messages`, including tool use and streaming) powers
+the Claude Code integration above. When sharing over a LAN you can require an API key —
+enable it in **Settings → Network**.
 
-TurboLLM serves an Anthropic-compatible API, so coding CLIs like
-[Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code) can run
-against whatever model you have loaded — no cloud key, fully offline. One command
-ships with TurboLLM to wire it up:
+## Develop & run from source
 
 ```bash
-turbollm launch claude          # opens Claude Code on your loaded model
+npm install                  # daemon deps
+cd web && npm install && cd ..
+
+npm run build:web            # build the React UI -> src/webdist
+npm run start                # run the daemon in dev (hot TS via tsx)
+#   open http://127.0.0.1:6996   ·   curl http://127.0.0.1:6996/api/v1/status
+
+npm run build                # production bundle -> dist/cli.js (web assets included)
+node dist/cli.js --port 6996
 ```
 
-This requires the daemon to be running with a model loaded (start `turbollm`, then
-load a model on the Models screen). It points Claude Code's `ANTHROPIC_BASE_URL` /
-`ANTHROPIC_MODEL` at TurboLLM and execs `claude`; any extra args are forwarded
-(`turbollm launch claude --help`). If `claude` isn't installed, the command tells
-you how (`npm install -g @anthropic-ai/claude-code`). The Developer screen also
-shows manual env-var snippets if you prefer to set them yourself.
+Frontend hot-reload: `cd web && npm run dev` (proxies `/api` and `/v1` to the daemon on
+:6996). Behavior is specified in [`../docs/specs/`](../docs/specs/).
 
-## Layout
+### Layout
 
 ```
 turbollm/
-  package.json          npm package; bin "turbollm" -> dist/cli.js
+  package.json          npm package; bin "turbollm" -> bin/turbollm.mjs -> dist/cli.js
   src/
     cli.ts              entrypoint: wiring + graceful shutdown
     server.ts           Hono app: CORS, API, gateway, embedded SPA
-    config/             v2 schema + load/save/migrate (spec 01)
-    engines/            probe, registry (A1), lifecycle state machine (A2) (spec 03)
-    api/routes.ts       /api/v1/* handlers (spec 02)
-    gateway/gateway.ts  /v1/* OpenAI pass-through (spec 06)
-    deps.ts             shared dependency bundle
+    config/             config schema + load/save/migrate
+    engines/            provisioning, probe, registry, lifecycle state machine
+    api/routes.ts       /api/v1/* handlers
+    gateway/            /v1/* OpenAI + Anthropic gateway
     webdist/            built web UI (generated; served by the daemon)
   web/                  React 19 + TS + Tailwind v4 + shadcn frontend (own package.json)
 ```
 
-## Milestone status
+## License
 
-**A1 (engine registry) + A2 (lifecycle state machine) — ✅ ported to TS & verified.**
-- [x] config v2 + M0→v2 migration
-- [x] engine registry: add/probe (turbo-KV detection), rename, remove, activate, reprobe
-- [x] lifecycle state machine: starting→running (health readiness) / stopping / error + logTail
-- [x] graceful stop (taskkill→force), port allocation, idle watchdog, engine logs
-- [x] `/api/v1/*` (status, engines, lifecycle, logs+SSE) + `/v1` OpenAI gateway
-- [x] daemon serves the React UI (shell + Engines screen), SPA deep-links
-
-Build order & specs: [`../docs/specs/README.md`](../docs/specs/README.md)
-(A1→A2→A3→A4→B1→A5→B2→B3→C). Next: **A3** (model directories + GGUF discovery, spec 04).
-
-## Develop & run
-
-```bash
-# install (once)
-npm install               # daemon deps (hono, tsx, tsup)
-cd web && npm install && cd ..
-
-# build the web UI (-> src/webdist) then run the daemon in dev (hot TS via tsx)
-npm run build:web
-npm run start             # or: npm run dev   (watch mode, --no-open recommended)
-#   open http://127.0.0.1:6996   ·   curl http://127.0.0.1:6996/api/v1/status
-
-# production bundle (single dist/cli.js with deps bundled)
-npm run build             # tsc --noEmit + tsup
-node dist/cli.js --port 6996
-```
-
-Frontend hot-reload: `cd web && npm run dev` (proxies /api, /v1 to the daemon on :6996).
-
-## Toolchain
-
-Node 25 / npm 11. (Go 1.26.4 is still installed but no longer used — ADR-023.)
-Unsigned local runs may be flagged by Windows Defender; production releases must be
-code-signed. Do not create dummy `.exe` files.
+Source-available under the **Functional Source License 1.1 (Apache 2.0 future grant)** —
+SPDX `FSL-1.1-ALv2`. Free for personal use, internal business use, education, and research;
+the only restriction is shipping a competing product. Each release converts to Apache-2.0
+two years after it's published. Full text in [LICENSE.md](LICENSE.md).

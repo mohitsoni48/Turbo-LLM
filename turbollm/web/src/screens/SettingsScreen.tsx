@@ -15,11 +15,13 @@ import {
 } from '../lib/queries'
 import { useConversationMutations } from '../lib/chat-queries'
 import { ApiError, type TelemetryLevel } from '../lib/api'
+import { TELEMETRY_UI_ENABLED } from '../lib/flags'
 import { toast } from '../components/ui/sonner'
 
-/** localStorage key for the client-only "show thinking by default" preference
- *  (ADR-038). Default ON when unset. */
-const SHOW_THINKING_KEY = 'tllm.showThinking.default'
+/** localStorage key for the client-only "enable thinking by default" preference
+ *  (ADR-042). When ON, reasoning models think before answering in new chats;
+ *  when OFF, the model is told to answer directly. Default ON when unset. */
+const THINKING_DEFAULT_KEY = 'tllm.thinkingEnabled.default'
 
 /** A controlled numeric input that doesn't fight the user mid-edit. A raw
  *  `value={number}` with `Number(e.target.value) || min` snaps an emptied field
@@ -101,8 +103,8 @@ export function SettingsScreen() {
   const [telemetry, setTelemetry] = useState<TelemetryLevel>('off')
   const [lanBind, setLanBind] = useState(false)
   const [requireApiKey, setRequireApiKey] = useState(true)
-  // Client-only "show thinking by default" preference (ADR-038); default ON.
-  const [showThinking, setShowThinking] = useState(() => localStorage.getItem(SHOW_THINKING_KEY) !== 'false')
+  // Client-only "enable thinking by default" preference (ADR-042); default ON.
+  const [thinkingEnabled, setThinkingEnabled] = useState(() => localStorage.getItem(THINKING_DEFAULT_KEY) !== 'false')
 
   // Full-screen overlay while the daemon re-execs (spec 08 §2).
   const [restartOverlay, setRestartOverlay] = useState(false)
@@ -125,8 +127,8 @@ export function SettingsScreen() {
 
   // Persist the thinking preference immediately (no Save round-trip; it's client-only).
   useEffect(() => {
-    localStorage.setItem(SHOW_THINKING_KEY, showThinking ? 'true' : 'false')
-  }, [showThinking])
+    localStorage.setItem(THINKING_DEFAULT_KEY, thinkingEnabled ? 'true' : 'false')
+  }, [thinkingEnabled])
 
   const settingsPayload = () => ({
     // Clamp defensively: NumberField commits unclamped while editing and only
@@ -220,16 +222,16 @@ export function SettingsScreen() {
             </div>
           </div>
 
-          {/* Show thinking by default (ADR-038): client-only, default ON. */}
+          {/* Enable thinking by default (ADR-042): client-only, default ON. */}
           <label className="mt-2 flex cursor-pointer items-center justify-between border-t border-border py-2 pt-3">
             <div>
-              <div className="text-[14px] font-medium text-ink">Show thinking by default</div>
-              <div className="text-[12px] text-muted">Expand a model's reasoning in new chats (you can still toggle it per message)</div>
+              <div className="text-[14px] font-medium text-ink">Enable thinking by default</div>
+              <div className="text-[12px] text-muted">Let reasoning models think before answering in new chats (you can toggle it per chat). Off = answer directly, faster.</div>
             </div>
             <input
               type="checkbox"
-              checked={showThinking}
-              onChange={(e) => setShowThinking(e.target.checked)}
+              checked={thinkingEnabled}
+              onChange={(e) => setThinkingEnabled(e.target.checked)}
               className="h-4 w-4 accent-[var(--accent)]"
             />
           </label>
@@ -375,8 +377,9 @@ export function SettingsScreen() {
         {/* Models — Hugging Face token (spec 10 §4) */}
         <HfTokenSection tokenSet={settings?.hfTokenSet ?? false} onSaved={() => void settingsQ.refetch()} />
 
-        {/* Privacy & telemetry (spec 09 §5) */}
-        <PrivacySection level={telemetry} setLevel={setTelemetry} />
+        {/* Privacy & telemetry (spec 09 §5) — hidden for MVP launch (ADR-041);
+            no telemetry uploader ships yet. Re-enable via flags.ts when it does. */}
+        {TELEMETRY_UI_ENABLED && <PrivacySection level={telemetry} setLevel={setTelemetry} />}
 
         {/* Hardware */}
         <HardwarePanel />

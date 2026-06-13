@@ -95,7 +95,7 @@ export function registerChatRoutes(app: Hono, d: Deps): void {
 
   app.post('/api/v1/conversations/:id/messages', async (c) => {
     const convId = c.req.param('id')
-    const b = await body<{ content?: string; images?: string[]; docContext?: string; textAttachments?: string[] }>(c)
+    const b = await body<{ content?: string; images?: string[]; docContext?: string; textAttachments?: string[]; disableThinking?: boolean }>(c)
     const content = (b.content ?? '').trim()
     if (!content) return err(c, 400, 'invalid_input', 'content is required.')
 
@@ -143,7 +143,7 @@ export function registerChatRoutes(app: Hono, d: Deps): void {
         : fullContent
       engineMessages.push({ role: 'user', content: userContent })
 
-      await runGeneration(d, stream, { convId, conv, engineMessages, assistantMsg, ms, target, ac })
+      await runGeneration(d, stream, { convId, conv, engineMessages, assistantMsg, ms, target, ac, disableThinking: b.disableThinking ?? false })
     })
   })
 
@@ -152,6 +152,7 @@ export function registerChatRoutes(app: Hono, d: Deps): void {
 
   app.post('/api/v1/conversations/:id/continue', async (c) => {
     const convId = c.req.param('id')
+    const b = await body<{ disableThinking?: boolean }>(c)
 
     const conv = db.getConversation(convId, true)
     if (!conv) return err(c, 404, 'not_found', 'Conversation not found.')
@@ -187,7 +188,7 @@ export function registerChatRoutes(app: Hono, d: Deps): void {
         engineMessages.push({ role: m.role, content: m.content })
       }
 
-      await runGeneration(d, stream, { convId, conv, engineMessages, assistantMsg, ms, target, ac })
+      await runGeneration(d, stream, { convId, conv, engineMessages, assistantMsg, ms, target, ac, disableThinking: b.disableThinking ?? false })
     })
   })
 
@@ -247,6 +248,9 @@ interface GenerationCtx {
   ms: ManagerStatus
   target: string
   ac: AbortController
+  /** When true, instruct the engine to skip reasoning entirely (model answers
+   *  directly). Mirrors the params autoTitle uses. */
+  disableThinking: boolean
 }
 
 /**
@@ -256,7 +260,7 @@ interface GenerationCtx {
  */
 async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx): Promise<void> {
   const { db } = d
-  const { convId, conv, engineMessages, assistantMsg, ms, target, ac } = ctx
+  const { convId, conv, engineMessages, assistantMsg, ms, target, ac, disableThinking } = ctx
 
       // Merge sampling: model profile sampling ⊕ conversation overrides
       const modelSampling: Record<string, number> = {}
@@ -270,6 +274,15 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
         stream_options: { include_usage: true },
         return_progress: true,
         ...merged,
+      }
+      // Disable thinking at the engine level when requested: the model answers
+      // directly with no reasoning pass. `reasoning_budget: 0` covers llama-server's
+      // native reasoning control; `enable_thinking: false` covers Qwen-style chat
+      // templates. Both are no-ops on engines/models that don't reason (same pair
+      // autoTitle relies on).
+      if (disableThinking) {
+        reqBody.reasoning_budget = 0
+        reqBody.chat_template_kwargs = { enable_thinking: false }
       }
 
       const requestStart = Date.now()

@@ -66,11 +66,12 @@ export async function* sendMessage(
   images?: string[],
   docContext?: string,
   textAttachments?: string[],
+  disableThinking?: boolean,
 ): AsyncGenerator<ChatSseEvent> {
   const res = await fetch(`/api/v1/conversations/${encodeURIComponent(convId)}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ content, images: images?.length ? images : undefined, docContext: docContext || undefined, textAttachments: textAttachments?.length ? textAttachments : undefined }),
+    body: JSON.stringify({ content, images: images?.length ? images : undefined, docContext: docContext || undefined, textAttachments: textAttachments?.length ? textAttachments : undefined, disableThinking: disableThinking || undefined }),
     signal,
   })
   if (!res.ok || !res.body) {
@@ -115,11 +116,12 @@ export async function* sendMessage(
 export async function* continueConversation(
   convId: string,
   signal: AbortSignal,
+  disableThinking?: boolean,
 ): AsyncGenerator<ChatSseEvent> {
   const res = await fetch(`/api/v1/conversations/${encodeURIComponent(convId)}/continue`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ disableThinking: disableThinking || undefined }),
     signal,
   })
   if (!res.ok || !res.body) {

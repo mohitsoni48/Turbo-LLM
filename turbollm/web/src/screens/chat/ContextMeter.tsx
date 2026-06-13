@@ -62,9 +62,7 @@ export function ContextMeter({ ctxUsed, ctxMax }: ContextMeterProps) {
         className="text-[11px] text-faint whitespace-nowrap tabular-nums shrink-0"
         style={labelStyle}
       >
-        {ctxUsed > 0
-          ? `${fmtK(ctxUsed)} / ${fmtK(ctxMax)} · ${pctDisplay}%`
-          : fmtK(ctxMax)}
+        {`${fmtK(ctxUsed)} / ${fmtK(ctxMax)} · ${pctDisplay}%`}
       </span>
     </div>
   )

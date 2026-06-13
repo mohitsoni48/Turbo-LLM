@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process'
-import { openSync } from 'node:fs'
+import { openSync, readFileSync } from 'node:fs'
 import { serve } from '@hono/node-server'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { ConfigStore, defaultConfigPath, migrateLegacyDataDir } from './config/config'
 import { Manager, type StartOpts } from './engines/manager'
 import { Registry } from './engines/registry'
@@ -20,7 +21,16 @@ import type { Deps } from './deps'
 
 // Entrypoint for the TurboLLM daemon (npm bin "turbollm"): wiring + graceful
 // shutdown. ADR-023 (Node/TS stack).
-const version = '0.0.0-dev'
+//
+// Version is read from package.json — the single source of truth — so the daemon
+// always reports the published version with no manual bump. Works in dev (this
+// file is src/cli.ts) and in the built package (dist/cli.js); both sit one level
+// below package.json. Falls back if the file can't be read.
+let version = '0.1.0'
+try {
+  const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json')
+  version = (JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: string }).version ?? version
+} catch { /* keep fallback */ }
 
 // ── Node version guard ────────────────────────────────────────────────────────
 const nodeMajor = Number(process.versions.node.split('.')[0])
