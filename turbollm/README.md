@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/turbollm/web/public/brand/turbollm-icon-512.jpeg" width="92" height="92" alt="TurboLLM" />
+  <img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/turbollm/web/public/brand/turbollm-icon-512.jpeg?v=2" width="92" height="92" alt="TurboLLM" />
 </p>
 
 <h1 align="center">TurboLLM</h1>
@@ -30,7 +30,7 @@ API any tool can talk to. TurboLLM is the **performance & bleeding-edge layer fo
 LLMs** — built for people who today hand-compile forks and hunt forums for the right flags.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/how-it-works.svg" width="860" alt="How TurboLLM works: clients -> one lightweight daemon -> any engine on your GPU" />
+  <img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/how-it-works.svg?v=2" width="860" alt="How TurboLLM works: clients -> one lightweight daemon -> any engine on your GPU" />
 </p>
 
 ---
