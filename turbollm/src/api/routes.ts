@@ -24,6 +24,7 @@ import { estimateVram, type LoadProfile, profileToArgs, resolveProfile } from '.
 import { getSysInfo, primaryVendor } from '../sysinfo/sysinfo'
 import { HfError } from '../hf/hf'
 import { DownloadError } from '../downloads/downloads'
+import { BenchError } from '../bench/bench'
 
 type Status = 200 | 201 | 202 | 400 | 401 | 403 | 404 | 409 | 500 | 501 | 503
 
@@ -62,7 +63,9 @@ export function registerApi(app: Hono, d: Deps): void {
       engine,
       model,
       engineStats,
-      bench: { running: false },
+      // Auto-tune runner state (spec 09 §1): real progress while a sweep runs, then
+      // a lingering done/error snapshot the detail dialog reads to show the result.
+      bench: d.bench.status(),
       downloads: { active: d.downloads.activeCount() },
       engineProvision: d.provision.get(),
       telemetryLevel: d.store.snapshot().telemetry.level,
@@ -428,6 +431,28 @@ export function registerApi(app: Hono, d: Deps): void {
     }),
   )
 
+  // ---- auto-benchmark + auto-tune (M3, spec 09 §1) ----
+  // Start a sweep for a model. 202 + poll /status `bench`. 409 when a run is already
+  // active or the engine is busy (the UI offers "Stop & benchmark" to free it first).
+  app.post('/api/v1/bench', async (c) => {
+    const b = await body<{ modelKey?: string }>(c)
+    const key = (b.modelKey ?? '').trim()
+    if (!key) return err(c, 400, 'invalid_config_value', 'modelKey is required.')
+    try {
+      d.bench.start(key)
+      return c.json({ accepted: true }, 202)
+    } catch (e) {
+      return benchError(c, e)
+    }
+  })
+
+  // Cancel the active run: stops after the current step, leaves the engine stopped,
+  // keeps the partial results (spec 09 AC#3). Always 200 (no-op when none running).
+  app.post('/api/v1/bench/cancel', (c) => {
+    d.bench.cancel()
+    return c.json({ ok: true })
+  })
+
   // ---- models (A3, spec 04) ----
   app.get('/api/v1/models', (c) => {
     const { models, scanning, lastScanAt } = d.scanner.list()
@@ -789,12 +814,16 @@ export function registerApi(app: Hono, d: Deps): void {
 function overlayModel(e: ModelEntry, d: Deps, lastTpsMap?: Map<string, number>) {
   const ms = d.manager.status()
   const loadedKey = ms.state === 'running' ? ms.model?.key : undefined
-  const profiles = d.store.snapshot().modelProfiles
+  const snap = d.store.snapshot()
+  const profiles = snap.modelProfiles
   const loaded = loadedKey === e.path || loadedKey === e.key
   const lastTps = (lastTpsMap ?? d.db.lastGenTpsByModel()).get(e.key) ?? null
   // Best-effort live: only when this model is loaded AND a recent gen t/s exists.
   const liveTps = loaded && lastTps !== null ? lastTps : null
-  return { ...e, loaded, hasProfile: e.key in profiles, lastTps, liveTps }
+  // Best local benchmark result (spec 09 §2): "N tok/s on your machine". Overlaid
+  // from the persisted benchResults so it survives restart (the scanner seeds null).
+  const benchTps = snap.benchResults[e.key]?.tps ?? null
+  return { ...e, loaded, hasProfile: e.key in profiles, lastTps, liveTps, benchTps }
 }
 
 // ---- helpers ----
@@ -919,6 +948,17 @@ function dlErr(c: Context, e: unknown) {
   if (e instanceof DownloadError) {
     const status: Status =
       e.code === 'no_model_dir' ? 409 : e.code === 'hf_unauthorized' ? 401 : e.code === 'hf_gated' ? 403 : 400
+    return err(c, status, e.code, e.message)
+  }
+  return err(c, 500, 'internal', (e as Error).message)
+}
+
+function benchError(c: Context, e: unknown) {
+  if (e instanceof BenchError) {
+    const status: Status =
+      e.code === 'bench_running' || e.code === 'engine_in_use' || e.code === 'no_active_engine' ? 409
+        : e.code === 'no_such_model' ? 404
+        : 400
     return err(c, status, e.code, e.message)
   }
   return err(c, 500, 'internal', (e as Error).message)

@@ -36,7 +36,9 @@ export interface LoadProfile {
   draftModelPath: string
   sampling: Sampling
   extraArgs: string[]
-  tunedBy?: string
+  /** Provenance of a saved profile (spec 05 §3, 09 §1): 'bench' = written by the
+   *  auto-tune runner, 'user' = hand-saved. Absent on heuristic/global defaults. */
+  tunedBy?: 'bench' | 'user'
 }
 
 export type FitVerdict = 'fits' | 'tight' | 'overflow' | 'cpu' | 'unknown'

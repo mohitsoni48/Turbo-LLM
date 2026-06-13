@@ -251,6 +251,19 @@ export function loadModel(modelKey: string, profileOverrides?: Partial<LoadProfi
   })
 }
 
+// ── Auto-benchmark + auto-tune (spec 09 §1) ──────────────────────────────────
+/** Start an auto-tune sweep for a model. 202; progress polls /status `bench`. Throws
+ *  ApiError 409 when a run or the engine is busy (caller stops the engine first). */
+export function startBench(modelKey: string): Promise<{ accepted: true }> {
+  return request<{ accepted: true }>('/api/v1/bench', { method: 'POST', json: { modelKey } })
+}
+
+/** Cancel the active sweep: stops after the current step, leaves the engine stopped,
+ *  keeps partial results (spec 09 AC#3). No-op when nothing is running. */
+export function cancelBench(): Promise<{ ok: true }> {
+  return request<{ ok: true }>('/api/v1/bench/cancel', { method: 'POST', json: {} })
+}
+
 // ── Settings (daemon config UI subset) ───────────────────────────────────────
 /** Global model defaults (spec 05 §3): base load values applied to never-seen
  *  models that have no saved per-model profile. */

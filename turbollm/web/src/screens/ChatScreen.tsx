@@ -9,6 +9,7 @@ import { Button } from '../components/ui/button'
 import { toast } from '../components/ui/sonner'
 import { useQueryClient } from '@tanstack/react-query'
 import { MessageBubble, StreamingBubble } from './chat/MessageBubble'
+import { ContextMeter } from './chat/ContextMeter'
 import { ConversationSidebar } from './chat/ConversationSidebar'
 import { ModelLoadMenu } from '../components/ModelLoadMenu'
 import { ModelDetailDialog } from './models/ModelDetailDialog'
@@ -314,7 +315,6 @@ export function ChatScreen() {
   // Prefer the currently-loaded model's ctx (fresh after a reload) over the last
   // message's reported max, which goes stale when settings change.
   const ctxMax   = model?.ctx || lastStats?.ctxMax || 0
-  const ctxPct   = ctxMax > 0 ? ctxUsed / ctxMax : 0
 
   const ready = engineState === 'running' && !!model
 
@@ -369,6 +369,9 @@ export function ChatScreen() {
           </Button>
           {engineState === 'starting' && <span className="text-[12px] text-muted">Loading model…</span>}
           {engineState === 'stopping' && <span className="text-[12px] text-muted">Ejecting…</span>}
+          {ready && conv && (
+            <ContextMeter ctxUsed={ctxUsed} ctxMax={ctxMax} />
+          )}
         </div>
 
         {/* Message list — always visible; empty state shown only when no messages */}
@@ -439,28 +442,6 @@ export function ChatScreen() {
         {/* Composer area (always visible; disabled when no model) */}
         <div className="px-6 pb-5">
           <div className="mx-auto w-full max-w-[768px]">
-            {/* Context meter */}
-            {ctxMax > 0 && ctxUsed > 0 && (
-              <div className="mb-2 flex items-center gap-2">
-                <div className="h-1 flex-1 overflow-hidden rounded-full" style={{ background: 'var(--border)' }}>
-                  <div
-                    className="h-full rounded-full transition-all"
-                    style={{
-                      width: `${Math.min(100, ctxPct * 100).toFixed(1)}%`,
-                      background: ctxPct > 0.9 ? 'var(--err)' : ctxPct > 0.7 ? 'var(--warn)' : 'var(--accent)',
-                    }}
-                  />
-                </div>
-                <span
-                  className="shrink-0 text-[11px] text-faint"
-                  title={ctxPct > 0.9 ? 'Context almost full — older messages may be truncated' : undefined}
-                  style={{ color: ctxPct > 0.9 ? 'var(--err)' : ctxPct > 0.7 ? 'var(--warn)' : undefined }}
-                >
-                  {ctxUsed.toLocaleString()} / {ctxMax.toLocaleString()}
-                </span>
-              </div>
-            )}
-
             <div className="rounded-[var(--radius-lg)] border border-border bg-panel shadow-[var(--shadow-2)] focus-within:border-[color:var(--accent)]">
               {/* Attachment previews */}
               {attachments.length > 0 && (

@@ -36,6 +36,17 @@ export interface Telemetry {
   level: string
   machineId: string
 }
+/** One persisted auto-tune result (spec 09 §1, 01 §4), keyed by modelKey in
+ *  {@link Config.benchResults}. Survives restart so the model list/detail can show
+ *  "N tok/s on your machine". Additive: absent in pre-bench configs (normalize seeds {}). */
+export interface BenchResult {
+  modelKey: string
+  tps: number
+  ttftMs: number
+  vramMb: number | null
+  params: { ctx: number; ngl: number; nCpuMoe: number; parallel: number; kvTypeK: string; flashAttn: string }
+  ts: string
+}
 export interface ApiKey {
   id: string
   name: string
@@ -79,6 +90,9 @@ export interface Config {
    *  modelDirs, the FIRST entry in modelDirs is the effective default. */
   primaryModelDir: string
   modelProfiles: Record<string, unknown>
+  /** Persisted auto-tune results keyed by modelKey (spec 09 §1, 01 §4). Additive;
+   *  absent in old configs → normalize seeds {}. Never throws on load. */
+  benchResults: Record<string, BenchResult>
   lastLoaded: LastLoaded
   autoLoadOnStart: boolean
   hf: HF
@@ -182,6 +196,7 @@ export function defaultConfig(): Config {
     modelDirs: [],
     primaryModelDir: '',
     modelProfiles: {},
+    benchResults: {},
     lastLoaded: { modelKey: '', engineId: '' },
     autoLoadOnStart: false,
     hf: { token: '' },
@@ -328,6 +343,8 @@ function normalize(c: Config): void {
   // default falls back to the first modelDir). Never throw on an old config.
   c.primaryModelDir ??= ''
   c.modelProfiles ??= {}
+  // Persisted auto-tune results (spec 09 §1): absent in pre-bench configs → {}.
+  c.benchResults ??= {}
   c.autoLoadOnStart ??= false
   c.featuredOverrideUrl ??= ''
   // Telemetry level (spec 09 §3): the UI exposes 'off' | 'anon' | 'full'. Migrate

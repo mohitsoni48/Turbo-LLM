@@ -1,7 +1,7 @@
 ﻿import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { ChevronDown, RotateCcw, Save, Zap } from 'lucide-react'
+import { ChevronDown, Gauge, RotateCcw, Save, X, Zap } from 'lucide-react'
 import { ApiError } from '../../lib/api'
-import { useEngines, useModelActions, useModelDetail } from '../../lib/queries'
+import { useBenchActions, useBenchState, useEngines, useModelActions, useModelDetail, useStatus } from '../../lib/queries'
 import type { LoadProfile } from '../../lib/types'
 import { estimateVram } from '../../lib/vram'
 import { Button } from '../../components/ui/button'
@@ -11,14 +11,28 @@ export function ModelDetailDialog({ modelKey, onClose }: { modelKey: string | nu
   const detailQ = useModelDetail(modelKey)
   const enginesQ = useEngines()
   const actions = useModelActions()
+  const bench = useBenchActions()
+  const benchState = useBenchState()
+  const [pendingBenchKey, setPendingBenchKey] = useState<string | null>(null)
   const [draft, setDraft] = useState<LoadProfile | null>(null)
   const [advanced, setAdvanced] = useState(false)
   const [remember, setRemember] = useState(true)
 
   const detail = detailQ.data
+  const statusQ = useStatus()
+  const engineState = statusQ.data?.engine.state
   useEffect(() => {
     if (detail) setDraft(structuredClone(detail.profile))
   }, [detail])
+
+  // After "Stop & benchmark", the eject takes a moment to drain the engine. Once the
+  // status poll reports it stopped, fire the deferred sweep (the runner 409s while busy).
+  useEffect(() => {
+    if (pendingBenchKey && (engineState === 'stopped' || engineState === 'error')) {
+      bench.start.mutate(pendingBenchKey)
+      setPendingBenchKey(null)
+    }
+  }, [pendingBenchKey, engineState, bench.start])
 
   const activeEngine = enginesQ.data?.engines.find((e) => e.id === enginesQ.data?.activeEngineId)
   const kvTypes = activeEngine?.capabilities.kvTypes ?? ['f16']
@@ -63,6 +77,28 @@ export function ModelDetailDialog({ modelKey, onClose }: { modelKey: string | nu
 
   const loadError = actions.load.error instanceof ApiError ? actions.load.error.message : null
 
+  // Auto-tune (spec 09 §1). A run owns the engine exclusively, so a loaded model must
+  // be stopped first — the button offers "Stop & benchmark" when this model is loaded.
+  // `benchHere` is true only when the active run targets THIS dialog's model, so the
+  // inline progress / result never bleeds across models.
+  const benchHere = !!benchState && benchState.modelKey === detail?.key
+  const benchRunning = !!benchState?.running && benchHere
+  const benchDone = !!benchState?.done && benchHere && !benchState.running
+  const benchErr = bench.start.error instanceof ApiError ? bench.start.error.message : null
+  const isMlx = detail?.format === 'mlx'
+  // The runner requires a free engine (409 otherwise). When this model is loaded,
+  // stop it first, then start the sweep once the engine has settled.
+  const startBenchRun = () => {
+    if (!detail) return
+    if (detail.loaded) {
+      // Stop the engine; the effect above starts the sweep once it reports stopped.
+      setPendingBenchKey(detail.key)
+      actions.eject.mutate()
+    } else {
+      bench.start.mutate(detail.key)
+    }
+  }
+
   return (
     <Dialog open={!!modelKey} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-[560px]">
@@ -78,6 +114,23 @@ export function ModelDetailDialog({ modelKey, onClose }: { modelKey: string | nu
         ) : (
           <div className="flex flex-col gap-4">
             {fit && <VramBar estMb={fit.estMb} totalMb={fit.totalVramMb} verdict={fit.verdict} />}
+
+            {!isMlx && detail.gpu && (
+              <AutoTune
+                running={benchRunning}
+                done={benchDone}
+                step={benchHere ? benchState?.step : undefined}
+                bestTps={benchHere ? benchState?.bestTps : undefined}
+                resultError={benchDone ? benchState?.error : undefined}
+                benchTps={detail.benchTps}
+                tuned={draft.tunedBy === 'bench'}
+                loaded={detail.loaded}
+                startError={benchErr}
+                pending={bench.start.isPending || pendingBenchKey !== null}
+                onStart={startBenchRun}
+                onCancel={() => bench.cancel.mutate()}
+              />
+            )}
 
             <Section>
               <Slider label="Context length" hint="Tokens of history the model can use." value={draft.ctx} min={512} max={Math.max(512, detail.nativeCtx || 8192)} step={512} onChange={(v) => set('ctx', v)} fmt={(v) => v.toLocaleString()} />
@@ -244,6 +297,73 @@ function VramBar({ estMb, totalMb, verdict }: { estMb: number; totalMb: number; 
       <div className="h-2 overflow-hidden rounded-full" style={{ background: 'var(--border)' }}>
         <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
       </div>
+    </div>
+  )
+}
+
+// ── Auto-tune card (spec 09 §1): one button → inline mini-log + cancel → result ──
+function AutoTune({
+  running, done, step, bestTps, resultError, benchTps, tuned, loaded, startError, pending, onStart, onCancel,
+}: {
+  running: boolean
+  done: boolean
+  step?: string
+  bestTps?: number
+  resultError?: string
+  benchTps: number | null
+  tuned: boolean
+  loaded: boolean
+  startError: string | null
+  pending: boolean
+  onStart: () => void
+  onCancel: () => void
+}) {
+  return (
+    <div className="rounded-lg border border-border bg-panel p-3">
+      {running ? (
+        // Live mini-log: current step + best-so-far, with a Cancel button.
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-[13px] text-ink">
+              <Gauge size={14} className="animate-pulse" style={{ color: 'var(--accent)' }} />
+              Auto-tuning…
+            </div>
+            <Button variant="outline" onClick={onCancel}>
+              <X size={14} />
+              Cancel
+            </Button>
+          </div>
+          <p className="font-mono text-[12px] text-muted">{step ?? 'Preparing…'}</p>
+          {bestTps !== undefined && (
+            <p className="text-[12px] text-ink">Best so far: <span className="font-mono" style={{ color: 'var(--ok)' }}>{bestTps.toFixed(1)} tok/s</span></p>
+          )}
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 text-[13px] font-medium text-ink">
+                <Gauge size={14} style={{ color: 'var(--accent)' }} />
+                Auto-tune
+              </div>
+              <p className="text-[11px] text-faint">
+                {benchTps !== null
+                  ? `Tuned: ${benchTps.toFixed(1)} tok/s on your machine${tuned ? ' · settings applied below' : ''}`
+                  : 'Measures real speed on your hardware and saves the fastest settings (~3 min).'}
+              </p>
+            </div>
+            <Button variant="outline" onClick={onStart} disabled={pending}>
+              <Zap size={14} />
+              {loaded ? 'Stop & benchmark' : 'Auto-tune'}
+            </Button>
+          </div>
+          {done && bestTps !== undefined && !resultError && (
+            <p className="text-[12px] text-ink">Done — <span className="font-mono" style={{ color: 'var(--ok)' }}>{bestTps.toFixed(1)} tok/s</span>. Saved as this model's default.</p>
+          )}
+          {done && resultError && <p className="text-[12px]" style={{ color: 'var(--warn)' }}>{resultError}</p>}
+          {startError && <p className="text-[12px]" style={{ color: 'var(--err)' }}>{startError}</p>}
+        </div>
+      )}
     </div>
   )
 }

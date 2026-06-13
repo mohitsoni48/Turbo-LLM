@@ -57,12 +57,35 @@ export type EngineStats = {
   sinceMs: number
 }
 
+/** One candidate the auto-tune sweep evaluated (spec 09 §1). `outcome` is 'ok' on a
+ *  measured run, else the failure mode — the sweep records it and continues. */
+export type BenchCandidate = {
+  label: string
+  params: { ctx: number; ngl: number; nCpuMoe: number; parallel: number; kvTypeK: string; flashAttn: string }
+  outcome: 'ok' | 'timeout' | 'crash' | 'oom'
+  tps: number | null
+  ttftMs: number | null
+  vramMb: number | null
+}
+
+/** Live auto-tune state from GET /status `bench` (spec 09 §1). `done`/`error` linger
+ *  after a finished run so the detail dialog can show the result. */
+export type BenchState = {
+  running: boolean
+  modelKey?: string
+  step?: string
+  bestTps?: number
+  candidates?: BenchCandidate[]
+  done?: boolean
+  error?: string
+}
+
 export type Status = {
   version: string
   engine: EngineRuntime
   model: LoadedModel | null
   engineStats?: EngineStats | null
-  bench: { running: boolean; step?: number; total?: number; label?: string }
+  bench: BenchState
   downloads: { active: number }
   engineProvision?: EngineProvision
   telemetryLevel: string

@@ -24,10 +24,12 @@ import {
   getSysInfo,
   getTelemetryPreview,
   cancelBackendDownload,
+  cancelBench,
   createApiKey,
   deleteApiKey,
   deleteEngineBackend,
   getStatus,
+  startBench,
   getSettings,
   hfRepo,
   hfSearch,
@@ -56,6 +58,7 @@ import {
   type TelemetryLevel,
 } from './api'
 import type {
+  BenchState,
   DownloadsList,
   EngineBackends,
   EngineStats,
@@ -80,17 +83,45 @@ export const queryKeys = {
   downloads: ['downloads'] as const,
 }
 
-/** Status poll every 2s, paused when the tab is hidden (spec 00 §4). */
+/** Status poll every 2s, paused when the tab is hidden (spec 00 §4). Polls at 1s
+ *  while an auto-tune sweep runs so the inline progress stays live (spec 09 §1). */
 export function useStatus(): UseQueryResult<Status> {
   return useQuery({
     queryKey: queryKeys.status,
     queryFn: getStatus,
-    refetchInterval: 2000,
+    refetchInterval: (q) => (q.state.data?.bench.running ? 1000 : 2000),
     refetchIntervalInBackground: false,
     // Keep the prior value visible while a poll is in flight to avoid flicker.
     placeholderData: (prev) => prev,
     retry: false,
   })
+}
+
+/** Auto-tune state (spec 09 §1), selected off the status poll (no extra request).
+ *  Carries live progress while running and the lingering done/error result after. */
+export function useBenchState(): BenchState | null {
+  const { data } = useStatus()
+  return data?.bench ?? null
+}
+
+/** Start / cancel an auto-tune sweep (spec 09 §1). Invalidates models + status so the
+ *  saved profile + benchTps refresh once the run lands. */
+export function useBenchActions() {
+  const qc = useQueryClient()
+  const invalidate = () => {
+    void qc.invalidateQueries({ queryKey: queryKeys.status })
+    void qc.invalidateQueries({ queryKey: queryKeys.models })
+  }
+  return {
+    start: useMutation({
+      mutationFn: (modelKey: string) => startBench(modelKey),
+      onSuccess: (_d, modelKey) => {
+        invalidate()
+        void qc.invalidateQueries({ queryKey: ['model', modelKey] })
+      },
+    }),
+    cancel: useMutation({ mutationFn: () => cancelBench(), onSuccess: invalidate }),
+  }
 }
 
 /** Live running-session stats (B4), selected off the status poll (no extra

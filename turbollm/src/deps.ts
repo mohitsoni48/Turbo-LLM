@@ -6,6 +6,7 @@ import type { Scanner } from './models/scanner'
 import type { ConversationStore } from './chat/db'
 import type { HfClient } from './hf/hf'
 import type { DownloadManager } from './downloads/downloads'
+import type { BenchRunner } from './bench/bench'
 
 export interface Deps {
   store: ConfigStore
@@ -16,6 +17,7 @@ export interface Deps {
   provision: ProvisionState
   hf: HfClient
   downloads: DownloadManager
+  bench: BenchRunner
   version: string
   startedAt: number
   /** Re-exec the daemon so config changes (port, LAN bind) take effect (spec 08 §2).

@@ -12,6 +12,7 @@ import { getSysInfo } from './sysinfo/sysinfo'
 import { ConversationStore } from './chat/db'
 import { HfClient } from './hf/hf'
 import { DownloadManager } from './downloads/downloads'
+import { BenchRunner } from './bench/bench'
 import { launchCli } from './cli-launch'
 import { createApp } from './server'
 import type { Deps } from './deps'
@@ -104,9 +105,12 @@ const db = new ConversationStore(store.dir())
 const hf = new HfClient(() => store.snapshot().hf.token, version)
 // A completed download triggers a rescan so the new model shows up in the library.
 const downloads = new DownloadManager(store, () => void scanner.rescan(), () => hf.authHeaders())
+// Auto-benchmark + auto-tune runner (Differentiator #2, spec 09). Owns the engine
+// exclusively for a run; reuses manager/profile control rather than reimplementing it.
+const bench = new BenchRunner(manager, store, scanner, registry, version)
 const startedAt = Date.now()
 // `requestRestart` is attached after the server is created (it must close over it).
-const deps: Deps = { store, registry, manager, scanner, db, provision, hf, downloads, version, startedAt }
+const deps: Deps = { store, registry, manager, scanner, db, provision, hf, downloads, bench, version, startedAt }
 const app = createApp(deps)
 
 // ── Resolve listen address ────────────────────────────────────────────────────

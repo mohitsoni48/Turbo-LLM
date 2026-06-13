@@ -7,6 +7,7 @@ import { registerApi } from './api/routes'
 import { registerChatRoutes } from './chat/chat-routes'
 import type { Deps } from './deps'
 import { registerGateway } from './gateway/gateway'
+import { lanAuth } from './auth'
 
 const WEB_ROOT = join(dirname(fileURLToPath(import.meta.url)), 'webdist')
 
@@ -27,6 +28,10 @@ export function createApp(d: Deps): Hono {
     c.header('Server', `TurboLLM/${d.version}`)
     await next()
   })
+
+  // LAN auth gate (spec 06 §5): no-op while loopback-only (lanBind=false); once
+  // LAN-exposed, requires a valid API key for non-loopback /api/* and /v1/* calls.
+  app.use('*', lanAuth(d))
 
   app.get('/healthz', (c) => c.json({ status: 'ok', version: d.version }))
 
