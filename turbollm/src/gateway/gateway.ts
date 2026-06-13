@@ -1,6 +1,7 @@
 // Gateway: /v1/* OpenAI-compatible pass-through + Anthropic translation (spec 06).
 import { randomUUID } from 'node:crypto'
 import type { Hono } from 'hono'
+import { streamSSE } from 'hono/streaming'
 import type { Deps } from '../deps'
 import { mapToOpenAI, mapFromOpenAI, streamToAnthropic, type AnthropicRequest } from './anthropic'
 
@@ -53,7 +54,6 @@ export function registerGateway(app: Hono, d: Deps): void {
 
     if (req.stream) {
       const msgId = `msg_${randomUUID().replace(/-/g, '')}`
-      const enc = new TextEncoder()
       // Record session stats (B4) from the final usage the generator observes.
       // Fail-safe: the callback is only invoked best-effort and swallows nothing
       // that affects the client stream.
@@ -62,27 +62,14 @@ export function registerGateway(app: Hono, d: Deps): void {
           d.manager.recordCompletion({ inputTokens: u.inputTokens, outputTokens: u.outputTokens })
         } catch { /* swallow — stats are best-effort */ }
       })
-      return new Response(
-        new ReadableStream({
-          async start(ctrl) {
-            try {
-              for await (const evt of gen) {
-                ctrl.enqueue(enc.encode(`event: ${evt.event}\ndata: ${evt.data}\n\n`))
-              }
-            } finally {
-              ctrl.close()
-            }
-          },
-        }),
-        {
-          status: 200,
-          headers: {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            Connection: 'keep-alive',
-          },
-        },
-      )
+      // streamSSE flushes each chunk immediately through Node.js's HTTP layer.
+      // Raw ReadableStream does not — chunks buffer until the response completes,
+      // which makes Claude CLI (and any Anthropic-protocol client) appear "slow".
+      return streamSSE(c, async (stream) => {
+        for await (const evt of gen) {
+          await stream.writeSSE({ event: evt.event, data: evt.data })
+        }
+      })
     }
 
     const oaiRes = (await res.json()) as Record<string, unknown>

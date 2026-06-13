@@ -594,6 +594,7 @@ export function registerApi(app: Hono, d: Deps): void {
       }
     }
 
+    const before = d.store.snapshot().daemon
     d.store.update((cfg) => {
       Object.assign(cfg.daemon, updates)
       Object.assign(cfg.modelDefaults, mdUpdates)
@@ -602,7 +603,22 @@ export function registerApi(app: Hono, d: Deps): void {
       // HF token (spec 10 §4): write-only. An explicit '' clears it. Never logged.
       if (b.hfToken !== undefined) cfg.hf.token = String(b.hfToken).trim()
     })
-    return c.json(settingsPayload(d))
+    const after = d.store.snapshot().daemon
+
+    // A LAN-bind or port change re-points the HTTP listener. Rather than a full daemon
+    // restart (which unloads the model), do an in-place rebind that keeps everything
+    // loaded (spec 08 §2). Schedule it AFTER this response flushes — the rebind drops
+    // in-flight connections. A LAN-only change (same port) is seamless for the browser;
+    // a port change needs the client to hop to the new port (it reads `rebind` below).
+    const lanChanged = after.lanBind !== before.lanBind
+    const portChanged = after.port !== before.port
+    let rebind: { portChanged: boolean; port: number; lanBind: boolean } | undefined
+    if ((lanChanged || portChanged) && d.rebind) {
+      const doRebind = d.rebind
+      setTimeout(() => doRebind(), 250)
+      rebind = { portChanged, port: after.port, lanBind: after.lanBind }
+    }
+    return c.json({ ...settingsPayload(d), rebind })
   })
 
   // ── telemetry preview (spec 09 §4): a representative example of exactly what

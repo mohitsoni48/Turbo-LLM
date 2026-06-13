@@ -127,8 +127,9 @@ if (portFlag) {
   addr = argValue('--addr', `${defaultHost}:${cfg.daemon.port}`)
 }
 const lastColon = addr.lastIndexOf(':')
-const host = addr.slice(0, lastColon) || '127.0.0.1'
-const port = Number(addr.slice(lastColon + 1)) || 6996
+// Mutable so an in-place LAN/port rebind can re-point the listener without a full restart.
+let host = addr.slice(0, lastColon) || '127.0.0.1'
+let port = Number(addr.slice(lastColon + 1)) || 6996
 
 // ── Cross-platform browser open ───────────────────────────────────────────────
 function openBrowser(url: string): void {
@@ -164,25 +165,32 @@ const noOpen = hasFlag('--no-open')
 // crashing — otherwise a restart leaves the user with NO daemon. `server` is mutable
 // so the restart handler below always closes the live instance.
 let server: ReturnType<typeof serve>
+let rebinding = false // suppress the full banner + browser-open during an in-place rebind
+let prevHost = host // remembered before a rebind so we can revert if the new bind fails
+let prevPort = port
 function listen(attempt = 0): void {
   const s = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
     const displayHost = host === '0.0.0.0' ? '0.0.0.0 (LAN)' : host
     const uiUrl = `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${info.port}`
 
-    console.log(``)
-    console.log(`  TurboLLM ${version} is ready!`)
-    console.log(``)
-    console.log(`  Local:   ${uiUrl}`)
-    if (host === '0.0.0.0') {
-      console.log(`  Network: http://<your-ip>:${info.port}  (LAN)`)
-    }
-    console.log(``)
-    console.log(`  API:     ${uiUrl}/api/v1/status`)
-    console.log(`  Stop:    Ctrl+C`)
-    console.log(``)
-
-    if (!noOpen) {
-      openBrowser(uiUrl)
+    if (rebinding) {
+      rebinding = false
+      console.log(`  Re-bound to ${displayHost}:${info.port} (no restart — model stays loaded)`)
+    } else {
+      console.log(``)
+      console.log(`  TurboLLM ${version} is ready!`)
+      console.log(``)
+      console.log(`  Local:   ${uiUrl}`)
+      if (host === '0.0.0.0') {
+        console.log(`  Network: http://<your-ip>:${info.port}  (LAN)`)
+      }
+      console.log(``)
+      console.log(`  API:     ${uiUrl}/api/v1/status`)
+      console.log(`  Stop:    Ctrl+C`)
+      console.log(``)
+      if (!noOpen) {
+        openBrowser(uiUrl)
+      }
     }
 
     // Keep the legacy one-liner for log parsers that key on it.
@@ -192,8 +200,15 @@ function listen(attempt = 0): void {
     'error',
     (e) => {
       if (e?.code === 'EADDRINUSE' && attempt < 20) {
-        if (attempt === 0) console.log(`  Port ${port} busy (previous instance releasing) — retrying…`)
+        if (attempt === 0) console.log(`  Port ${port} busy (previous listener releasing) — retrying…`)
         setTimeout(() => listen(attempt + 1), 500)
+      } else if (rebinding) {
+        // A rebind couldn't bind the new address — revert so the daemon stays reachable.
+        console.error(`Could not bind ${host}:${port} (${e?.message ?? e}); reverting to ${prevHost}:${prevPort}.`)
+        rebinding = false
+        host = prevHost
+        port = prevPort
+        listen()
       } else {
         console.error(`Could not bind ${host}:${port}: ${e?.message ?? e}`)
         process.exit(1)
@@ -203,6 +218,37 @@ function listen(attempt = 0): void {
   server = s
 }
 listen()
+
+// In-place rebind (no full restart): re-point the HTTP listener at the host/port the
+// config now wants, keeping the engine, model, DB, and chat state alive. A LAN toggle
+// (same port) is seamless — the browser on 127.0.0.1 keeps working because 0.0.0.0
+// includes loopback; it just reconnects after the brief close. The settings route
+// schedules this AFTER its response flushes (closing the socket drops in-flight reqs).
+deps.rebind = () => {
+  const c = store.snapshot()
+  const want = c.daemon.lanBind ? '0.0.0.0' : (c.daemon.host || '127.0.0.1')
+  const wantPort = c.daemon.port
+  if (want === host && wantPort === port) return // nothing changed
+  prevHost = host
+  prevPort = port
+  host = want
+  port = wantPort
+  rebinding = true
+  const old = server
+  try {
+    ;(old as unknown as { closeAllConnections?: () => void }).closeAllConnections?.()
+  } catch {
+    /* best-effort */
+  }
+  let reopened = false
+  const reopen = () => {
+    if (reopened) return
+    reopened = true
+    listen() // bind-retry covers the brief window the old socket takes to release
+  }
+  old.close(reopen)
+  setTimeout(reopen, 3_000).unref() // don't wait forever on a stuck stream
+}
 
 // ── Self-restart (spec 08 §2) ──────────────────────────────────────────────────
 // POST /api/v1/daemon/restart re-execs the daemon so port / LAN-bind changes take

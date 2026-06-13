@@ -76,7 +76,23 @@ export function SettingsScreen() {
 
   const handleSave = () => {
     save.mutate(settingsPayload(), {
-      onSuccess: () => toast.success('Settings saved'),
+      onSuccess: (res) => {
+        const rb = res.rebind
+        if (rb?.portChanged) {
+          // The listener moved to a new port — hop the browser over once it's up.
+          toast.success(`Port changed to ${rb.port} — reconnecting…`)
+          setTimeout(() => {
+            const u = new URL(window.location.href)
+            u.port = String(rb.port)
+            window.location.href = u.toString()
+          }, 1300)
+        } else if (rb) {
+          // LAN-only change: applied in place, no restart, model stays loaded.
+          toast.success(rb.lanBind ? 'LAN access enabled — applied (no restart needed)' : 'LAN access disabled — applied')
+        } else {
+          toast.success('Settings saved')
+        }
+      },
       onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not save settings.'),
     })
   }
@@ -282,7 +298,7 @@ export function SettingsScreen() {
         </section>
 
         {/* Network (spec 08 §2) */}
-        <NetworkSection lanBind={lanBind} setLanBind={setLanBind} port={port} setPort={setPort} onRestart={requestRestart} />
+        <NetworkSection lanBind={lanBind} setLanBind={setLanBind} port={port} setPort={setPort} />
 
         {/* Models — Hugging Face token (spec 10 §4) */}
         <HfTokenSection tokenSet={settings?.hfTokenSet ?? false} onSaved={() => void settingsQ.refetch()} />
@@ -378,13 +394,11 @@ function NetworkSection({
   setLanBind,
   port,
   setPort,
-  onRestart,
 }: {
   lanBind: boolean
   setLanBind: (v: boolean) => void
   port: number
   setPort: (v: number) => void
-  onRestart: () => void
 }) {
   // hasApiKey + the reachable LAN URL come from the daemon (server-derived IP/port).
   const { data: net } = useNetworkInfo()
@@ -451,15 +465,12 @@ function NetworkSection({
         </div>
       )}
 
-      {/* Port + LAN binding only take effect on a daemon restart (spec 08 §2). */}
-      <div className="mt-2 flex flex-col gap-2 border-t border-border pt-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="text-[12px] text-faint">
-          Changes to the port or LAN binding require a daemon restart to take effect.
-        </div>
-        <Button variant="outline" size="sm" onClick={onRestart}>
-          <RefreshCw size={13} />
-          Restart now
-        </Button>
+      {/* Port + LAN binding apply in place on Save — the listener re-binds without a
+          full restart, so the model stays loaded (spec 08 §2). */}
+      <div className="mt-2 border-t border-border pt-3 text-[12px] text-faint">
+        Click <span className="font-medium text-ink">Save settings</span> to apply. The
+        listener re-binds in place (no restart, model stays loaded); a port change
+        reconnects this page automatically.
       </div>
     </section>
   )

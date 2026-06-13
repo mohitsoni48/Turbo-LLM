@@ -302,8 +302,13 @@ export function getSettings(): Promise<DaemonSettings> {
   return request<DaemonSettings>('/api/v1/settings')
 }
 
-export function saveSettings(patch: DaemonSettingsPatch): Promise<DaemonSettings> {
-  return request<DaemonSettings>('/api/v1/settings', { method: 'PATCH', json: patch })
+/** A LAN/port change re-points the listener in place (no full restart). Present on a
+ *  save that changed `lanBind`/`port`; `portChanged` means the client must hop to the
+ *  new port (a LAN-only change is seamless on 127.0.0.1). */
+export type RebindInfo = { portChanged: boolean; port: number; lanBind: boolean }
+
+export function saveSettings(patch: DaemonSettingsPatch): Promise<DaemonSettings & { rebind?: RebindInfo }> {
+  return request<DaemonSettings & { rebind?: RebindInfo }>('/api/v1/settings', { method: 'PATCH', json: patch })
 }
 
 /** Re-exec the daemon so port / LAN-bind changes take effect (spec 08 §2). Returns

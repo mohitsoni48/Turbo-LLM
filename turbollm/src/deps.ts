@@ -25,4 +25,8 @@ export interface Deps {
    *  replacement and exits. Optional: only wired in the real `serve()` entrypoint
    *  (cli.ts); absent under tests, where the restart route returns 501. */
   requestRestart?: () => void
+  /** Re-point the HTTP listener at the host/port the config now wants, WITHOUT a full
+   *  restart — keeps the engine + model loaded. Used for LAN/port changes. Wired only
+   *  in the real `serve()` entrypoint (cli.ts); absent under tests. */
+  rebind?: () => void
 }
