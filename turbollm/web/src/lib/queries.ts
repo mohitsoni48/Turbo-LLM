@@ -114,10 +114,12 @@ export function useBenchActions() {
   }
   return {
     start: useMutation({
-      mutationFn: (modelKey: string) => startBench(modelKey),
-      onSuccess: (_d, modelKey) => {
+      // `base` carries the user's current config (dialog draft) so auto-tune fixes
+      // its ctx + KV quant and sweeps only offload (spec 09 §1).
+      mutationFn: (v: { key: string; base?: Parameters<typeof startBench>[1] }) => startBench(v.key, v.base),
+      onSuccess: (_d, v) => {
         invalidate()
-        void qc.invalidateQueries({ queryKey: ['model', modelKey] })
+        void qc.invalidateQueries({ queryKey: ['model', v.key] })
       },
     }),
     cancel: useMutation({ mutationFn: () => cancelBench(), onSuccess: invalidate }),

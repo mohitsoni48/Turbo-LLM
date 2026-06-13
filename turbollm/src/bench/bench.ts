@@ -42,7 +42,6 @@ export interface BenchState {
 // Hard limits (spec 09 §1).
 const READY_TIMEOUT_MS = 120_000
 const TOTAL_BUDGET_MS = 10 * 60_000
-const BENCH_CTX = 8192 // ctx clamp for the measurement run (VRAM verdict uses real ctx)
 const OOM_RE = /out of memory|cudaMalloc/i
 const MAX_DENSE = 3
 const MAX_MOE = 8
@@ -89,7 +88,7 @@ export class BenchRunner {
   /** Start a run for `modelKey`. Rejects (throws BenchError) when a run is already
    *  active, the engine is busy, or the model isn't a benchmarkable GGUF. The run
    *  itself proceeds in the background; callers get 202 + poll /status. */
-  start(modelKey: string): void {
+  start(modelKey: string, base?: Partial<LoadProfile>): void {
     if (this.state.running) throw new BenchError('bench_running', 'A benchmark is already running.')
     const engineState = this.manager.status().state
     if (engineState === 'running' || engineState === 'starting' || engineState === 'stopping') {
@@ -106,7 +105,7 @@ export class BenchRunner {
     this.cancelled = false
     this.deadline = Date.now() + TOTAL_BUDGET_MS
     this.state = { running: true, modelKey, step: 'Preparing…', candidates: [] }
-    void this.run(modelKey, entry).catch((e) => {
+    void this.run(modelKey, entry, base).catch((e) => {
       // The run is fully guarded internally; this is a last-resort net so a thrown
       // error never leaves `running` stuck true.
       this.state = { running: false, modelKey, done: true, error: e instanceof Error ? e.message : String(e), candidates: this.state.candidates }
@@ -116,15 +115,17 @@ export class BenchRunner {
 
   // ---- the run ------------------------------------------------------------
 
-  private async run(modelKey: string, entry: ModelEntry): Promise<void> {
+  private async run(modelKey: string, entry: ModelEntry, base?: Partial<LoadProfile>): Promise<void> {
     const sys = getSysInfo()
     const active = this.registry.active()
     const caps = active?.capabilities ?? { flags: [], kvTypes: [] }
     const saved = this.store.snapshot().modelProfiles[modelKey] as Partial<LoadProfile> | undefined
     const defaults = this.store.snapshot().modelDefaults
-    // The real, full-ctx profile is the basis for every candidate (we only clamp ctx
-    // for the measurement run). Saved settings + global defaults feed in as usual.
-    const baseProfile = resolveProfile(entry, sys, saved, undefined, defaults)
+    // Honor the user's CURRENT config (the dialog draft, passed as `base`) as the fixed
+    // basis for every candidate — ctx, KV quant, flash-attn, etc. Auto-tune only sweeps
+    // offload (ngl / nCpuMoe) on top, so the result reflects the settings they'll load
+    // with. `base` overrides the saved profile + global defaults.
+    const baseProfile = resolveProfile(entry, sys, saved, base, defaults)
 
     const candidates = this.buildCandidates(entry, sys, baseProfile)
     const results: BenchCandidate[] = []
@@ -147,24 +148,8 @@ export class BenchRunner {
       if (entry.moe && (cand.outcome === 'oom' || overVram(cand.vramMb, sys))) break
     }
 
-    // KV-type refinement (spec 09 §1): if turbo types are available, re-run the best
-    // candidate with turbo4 and keep it when within 5% (VRAM savings break the tie).
-    if (best && !this.cancelled && Date.now() <= this.deadline && hasTurboKv(caps.kvTypes)) {
-      const turboProfile: LoadProfile = { ...best.profile, kvTypeK: 'turbo4', kvTypeV: 'turbo4' }
-      const label = `${best.cand.label} + turbo4 KV`
-      this.state = { ...this.state, step: `${label}…` }
-      const turbo = await this.measure(entry, sys, turboProfile, caps, label)
-      results.push(turbo)
-      this.state = { ...this.state, candidates: results }
-      if (turbo.outcome === 'ok' && turbo.tps !== null && best.cand.tps !== null) {
-        const within5 = turbo.tps >= best.cand.tps * 0.95
-        const savesVram = (turbo.vramMb ?? Infinity) < (best.cand.vramMb ?? Infinity)
-        if (turbo.tps > best.cand.tps || (within5 && savesVram)) {
-          best = { cand: turbo, profile: turboProfile }
-          this.state = { ...this.state, bestTps: turbo.tps }
-        }
-      }
-    }
+    // (KV cache type is NOT swept — auto-tune respects the user's chosen KV quant
+    // from their config, same as ctx. It tunes offload only.)
 
     // Engine is always left stopped at the end of a run (AC#3 for cancel; also tidy
     // for a normal finish — the user explicitly loads afterward).
@@ -238,14 +223,14 @@ export class BenchRunner {
     const active = this.registry.active()
     if (!active) return fail('crash')
 
-    // Clamp ctx to 8192 for the measured run (tok/s is ~ctx-independent; VRAM is what
-    // matters and the fit verdict already used the real ctx upstream).
-    const runProfile: LoadProfile = { ...profile, ctx: Math.min(profile.ctx, BENCH_CTX) }
+    // Run at the user's REAL ctx (no clamp): VRAM use + OOM behavior then reflect the
+    // actual config they'll load with, so the winning offload is one that genuinely
+    // fits. The measured request itself is small and tok/s is ~ctx-independent.
     const opts: StartOpts = {
       engine: active,
-      model: { key: entry.key, name: entry.name, quant: entry.quant, ctx: runProfile.ctx, vision: entry.vision },
+      model: { key: entry.key, name: entry.name, quant: entry.quant, ctx: profile.ctx, vision: entry.vision },
       modelPath: entry.path,
-      extraArgs: profileToArgs(runProfile, entry, caps, sys.cores),
+      extraArgs: profileToArgs(profile, entry, caps, sys.cores),
     }
 
     const vramBefore = await readNvidiaVramMb()
@@ -397,11 +382,6 @@ const BENCH_PROMPT = ('Lorem ipsum dolor sit amet, consectetur adipiscing elit, 
   'dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. ' +
   'Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt ' +
   'mollit anim id est laborum. ').repeat(6) + 'Summarize the passage above in one sentence.'
-
-/** True when turbo KV cache types are available on the active engine (spec 09 §1). */
-function hasTurboKv(kvTypes: string[]): boolean {
-  return kvTypes.some((t) => /^turbo/.test(t))
-}
 
 /** True when a measured VRAM figure exceeds 95% of the primary GPU's VRAM. */
 function overVram(vramMb: number | null, sys: SysInfo): boolean {

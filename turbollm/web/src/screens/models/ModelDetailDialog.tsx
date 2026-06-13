@@ -1,4 +1,5 @@
 ﻿import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { ChevronDown, Gauge, RotateCcw, Save, X, Zap } from 'lucide-react'
 import { ApiError } from '../../lib/api'
 import { useBenchActions, useBenchState, useEngines, useModelActions, useModelDetail, useStatus } from '../../lib/queries'
@@ -18,6 +19,7 @@ export function ModelDetailDialog({ modelKey, onClose }: { modelKey: string | nu
   const [draft, setDraft] = useState<LoadProfile | null>(null)
   const [advanced, setAdvanced] = useState(false)
   const [remember, setRemember] = useState(true)
+  const qc = useQueryClient()
 
   const detail = detailQ.data
   const statusQ = useStatus()
@@ -30,7 +32,7 @@ export function ModelDetailDialog({ modelKey, onClose }: { modelKey: string | nu
   // status poll reports it stopped, fire the deferred sweep (the runner 409s while busy).
   useEffect(() => {
     if (pendingBenchKey && (engineState === 'stopped' || engineState === 'error')) {
-      bench.start.mutate(pendingBenchKey)
+      bench.start.mutate({ key: pendingBenchKey, base: draft ?? undefined })
       setPendingBenchKey(null)
     }
   }, [pendingBenchKey, engineState, bench.start])
@@ -96,9 +98,18 @@ export function ModelDetailDialog({ modelKey, onClose }: { modelKey: string | nu
       setPendingBenchKey(detail.key)
       actions.eject.mutate()
     } else {
-      bench.start.mutate(detail.key)
+      bench.start.mutate({ key: detail.key, base: draft ?? undefined })
     }
   }
+
+  // When a sweep finishes it saves the tuned profile server-side — refetch the detail
+  // so the form reflects the new settings immediately (no close/reopen needed).
+  useEffect(() => {
+    if (benchDone && detail?.key) {
+      void qc.invalidateQueries({ queryKey: ['model', detail.key] })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [benchDone, detail?.key])
 
   return (
     <Dialog open={!!modelKey} onOpenChange={(o) => !o && onClose()}>

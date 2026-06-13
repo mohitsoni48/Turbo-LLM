@@ -435,11 +435,13 @@ export function registerApi(app: Hono, d: Deps): void {
   // Start a sweep for a model. 202 + poll /status `bench`. 409 when a run is already
   // active or the engine is busy (the UI offers "Stop & benchmark" to free it first).
   app.post('/api/v1/bench', async (c) => {
-    const b = await body<{ modelKey?: string }>(c)
+    const b = await body<{ modelKey?: string; base?: Partial<LoadProfile> }>(c)
     const key = (b.modelKey ?? '').trim()
     if (!key) return err(c, 400, 'invalid_config_value', 'modelKey is required.')
     try {
-      d.bench.start(key)
+      // `base` is the user's current config (dialog draft): auto-tune fixes its ctx +
+      // KV quant and sweeps only offload on top (spec 09 §1, honoring the user's config).
+      d.bench.start(key, b.base && typeof b.base === 'object' ? b.base : undefined)
       return c.json({ accepted: true }, 202)
     } catch (e) {
       return benchError(c, e)
