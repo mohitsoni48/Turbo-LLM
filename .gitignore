@@ -47,6 +47,9 @@ node_modules/
 .vite/
 *.local
 
+# Generated artifacts
+/turbollm-todos.html
+
 # Editor / OS cruft
 .DS_Store
 Thumbs.db
