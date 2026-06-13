@@ -56,7 +56,9 @@ Thumbs.db
 .vscode/
 *.swp
 
-# Internal product/business/strategy docs — kept LOCAL ONLY, never published.
-# The repo is/will be public; this folder is not for distribution.
-# NOTE: ignoring it here does NOT scrub it from existing git history.
+# Internal product/business/strategy material — kept LOCAL ONLY, never published.
+# The repo is/will be public; these are not for distribution. (Purged from history
+# 2026-06-13.) CLAUDE.md / RESOURCES.md hold internal strategy + dev-box setup.
 /docs/
+/CLAUDE.md
+/RESOURCES.md
