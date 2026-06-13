@@ -6,6 +6,7 @@ import type { LoadProfile } from '../../lib/types'
 import { estimateVram } from '../../lib/vram'
 import { Button } from '../../components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../components/ui/dialog'
+import { toast } from '../../components/ui/sonner'
 
 export function ModelDetailDialog({ modelKey, onClose }: { modelKey: string | null; onClose: () => void }) {
   const detailQ = useModelDetail(modelKey)
@@ -254,10 +255,27 @@ export function ModelDetailDialog({ modelKey, onClose }: { modelKey: string | nu
               <Button
                 className="flex-1"
                 onClick={() => {
-                  // Persist first when remembering, then (re)load, then close
-                  // immediately — the engine reloads in the background.
-                  if (remember) actions.save.mutate({ key: detail.key, profile: draft })
-                  actions.load.mutate({ key: detail.key, overrides: draft })
+                  // Sequence: persist (when remembering) → then (re)load. Firing both
+                  // at once raced the profile write against the reload. The reload
+                  // surfaces failures via toast — otherwise a bad param silently stops
+                  // the engine and the model "never loads again" with no feedback.
+                  const fireLoad = () =>
+                    actions.load.mutate(
+                      { key: detail.key, overrides: draft },
+                      {
+                        onError: (e) =>
+                          toast.error(
+                            e instanceof ApiError
+                              ? `Could not load model: ${e.message}`
+                              : 'Could not load model — check the engine logs on the Engines screen.',
+                          ),
+                      },
+                    )
+                  if (remember) {
+                    actions.save.mutate({ key: detail.key, profile: draft }, { onSuccess: fireLoad, onError: fireLoad })
+                  } else {
+                    fireLoad()
+                  }
                   onClose()
                 }}
                 disabled={actions.load.isPending}

@@ -105,6 +105,10 @@ export function mapToOpenAI(req: AnthropicRequest): Record<string, unknown> {
     messages,
     stream: req.stream ?? false,
     max_tokens: req.max_tokens,
+    // Reuse the cached KV prefix across turns. Agentic clients (Claude Code) resend a
+    // large, stable system+tools prefix every turn; without prefix reuse the engine
+    // reprocesses all of it each time, which is the dominant cost on a local model.
+    cache_prompt: true,
   }
   if (req.stream) oai.stream_options = { include_usage: true }
   if (req.temperature != null) oai.temperature = req.temperature
