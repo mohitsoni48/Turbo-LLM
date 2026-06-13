@@ -1,7 +1,7 @@
 # llama-turbo repo .gitignore
-# Tracks: docs/ (product strategy), CLAUDE.md, RESOURCES.md, small control
-# scripts, and (going forward) the TurboLLM product code under turbollm/.
-# Does NOT track the heavy local-inference stack, secrets, or runtime state.
+# Tracks: CLAUDE.md, RESOURCES.md, small control scripts, and the TurboLLM
+# product code under turbollm/. Does NOT track the heavy local-inference stack,
+# secrets, runtime state, or the internal docs/ strategy folder (see bottom).
 # NOTE: .gitignore does not support inline comments — keep patterns on their own lines.
 
 # Heavy local-inference stack (multi-GB; not product source)
@@ -30,7 +30,6 @@
 # TurboLLM daemon (Node/TS) build outputs
 /turbollm/dist/
 /turbollm/src/webdist/
-/turbollm/bin/
 
 # Local dev/preview config (machine-specific engine/model paths) + runtime
 /turbollm/dev-config.json
@@ -56,3 +55,8 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Internal product/business/strategy docs — kept LOCAL ONLY, never published.
+# The repo is/will be public; this folder is not for distribution.
+# NOTE: ignoring it here does NOT scrub it from existing git history.
+/docs/

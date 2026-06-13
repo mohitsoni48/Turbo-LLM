@@ -6,7 +6,7 @@ FSL-1.1-ALv2
 
 ## Notice
 
-Copyright 2026 bramha.dev
+Copyright 2026 Mohit Soni
 
 ## Terms and Conditions
 

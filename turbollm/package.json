@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "TurboLLM — local LLM platform: run any inference engine auto-tuned to your GPU, with a web UI and OpenAI/Anthropic-compatible API. Point Claude Code at your own machine in one command.",
   "license": "FSL-1.1-ALv2",
-  "author": "bramha.dev",
+  "author": "Mohit Soni",
   "homepage": "https://github.com/mohitsoni48/Turbo-LLM#readme",
   "repository": {
     "type": "git",

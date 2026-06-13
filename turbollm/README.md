@@ -137,7 +137,7 @@ node dist/cli.js --port 6996
 ```
 
 Frontend hot-reload: `cd web && npm run dev` (proxies `/api` and `/v1` to the daemon on
-:6996). Behavior is specified in [`../docs/specs/`](../docs/specs/).
+:6996).
 
 ### Layout
 
