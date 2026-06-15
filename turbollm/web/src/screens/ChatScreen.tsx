@@ -83,7 +83,10 @@ export function ChatScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingConversationId])
 
-  const allModels = modelsQ.data?.models ?? []
+  // Only offer models the active engine can actually load (ADR-044) — GGUFs under
+  // llama.cpp, safetensors under MLX/vLLM. Keeps the chat model menu from listing
+  // models that would 409 on load.
+  const allModels = (modelsQ.data?.models ?? []).filter((m) => m.compatibleWithActiveEngine)
   const modelBusy =
     modelActions.load.isPending ||
     modelActions.eject.isPending ||

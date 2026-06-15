@@ -27,7 +27,7 @@ const CLI_LIST = [
 
 export function DeveloperScreen() {
   return (
-    <div className="mx-auto max-w-2xl px-6 py-6">
+    <div className="w-full px-6 py-6">
       <ScreenHeader title="Developer" description="Server URLs, API endpoints, keys, and CLI setup." />
       <div className="flex flex-col gap-6">
         <ServerSection />

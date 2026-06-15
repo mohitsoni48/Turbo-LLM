@@ -106,8 +106,30 @@ export class HfClient {
       license: typeof license === 'string' ? license : '',
       downloads: info.downloads ?? 0,
       likes: info.likes ?? 0,
-      card: '', // README fetch deferred (see notes); keep the field for the contract
+      card: await this.getCard(repo),
       files,
+    }
+  }
+
+  /** Fetch the repo README (the model card), strip its YAML frontmatter, and cap the
+   *  length for display. Best-effort — a missing/unreachable README yields '' rather
+   *  than failing the whole repo-detail request. Cached like other HF reads. */
+  private async getCard(repo: string): Promise<string> {
+    const url = `${BASE}/${repo}/raw/main/README.md`
+    const now = Date.now()
+    const hit = this.cache.get(url)
+    if (hit && now - hit.at < CACHE_TTL_MS) return hit.value as string
+    try {
+      const res = await fetch(url, { headers: this.authHeaders(), redirect: 'follow' })
+      if (!res.ok) return ''
+      const raw = await res.text()
+      // Strip a leading `---\n…\n---` YAML frontmatter block, then cap the size.
+      const body = raw.replace(/^﻿?---\r?\n[\s\S]*?\r?\n---\r?\n/, '').trim()
+      const card = body.slice(0, 12000)
+      this.cache.set(url, { at: now, value: card })
+      return card
+    } catch {
+      return ''
     }
   }
 
@@ -157,11 +179,22 @@ export class HfClient {
       if (hit) return hit.value as T
       throw new HfError('hf_unreachable', 'Hugging Face is unreachable — check your connection.')
     }
-    if (res.status === 401) throw new HfError('hf_unauthorized', 'Your Hugging Face token was rejected.')
     if (res.status === 403) {
       throw new HfError('hf_gated', 'This repository is gated — accept its license on huggingface.co and add your token.')
     }
+    if (res.status === 401) {
+      // HF returns 401 for a private OR non-existent repo when no token is sent.
+      // Only a configured-but-rejected token is a real auth failure; otherwise this
+      // is effectively "not found" (commonly a model folder name that doesn't match
+      // its actual HF repo id).
+      if (this.tokenFn().trim()) throw new HfError('hf_unauthorized', 'Your Hugging Face token was rejected.')
+      throw new HfError('hf_not_found', 'Not found on Hugging Face — it may be private, or the name may not match its repo.')
+    }
+    if (res.status === 404) {
+      throw new HfError('hf_not_found', 'This model was not found on Hugging Face.')
+    }
     if (!res.ok) {
+      // 5xx / 429 / anything else: a transient server-side problem, not "your repo".
       if (hit) return hit.value as T
       throw new HfError('hf_unreachable', `Hugging Face request failed (HTTP ${res.status}).`)
     }

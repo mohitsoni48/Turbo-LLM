@@ -8,8 +8,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Download, ExternalLink, Lock, Zap } from 'lucide-react'
 import { ApiError } from '../../lib/api'
-import { useDownloadMutations, useHfRepo, useModelActions, useModels, useSysInfo } from '../../lib/queries'
-import type { FitVerdict, HfRepoFile, ModelEntry } from '../../lib/types'
+import { useDownloadMutations, useHfRepo, useModelActions, useSysInfo } from '../../lib/queries'
+import type { FitVerdict } from '../../lib/types'
 import { Button } from '../../components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../components/ui/dialog'
 import { toast } from '../../components/ui/sonner'
@@ -44,29 +44,23 @@ const FIT_LABEL: Record<FitVerdict, string> = {
   unknown: 'Fit unknown — GPU VRAM not detected.',
 }
 
-/** Match a remote repo file to a local model by filename (spec 10 §3: "matched by
- *  filename"). `localQuants` from the detail payload is the primary signal; we also
- *  fall back to a filename match against the library so "Load" can target a key. */
-function findLocalModel(file: HfRepoFile, models: ModelEntry[]): ModelEntry | null {
-  const base = file.name.toLowerCase()
-  for (const m of models) {
-    const mfile = m.path.toLowerCase().split(/[\\/]/).pop() ?? ''
-    if (mfile === base) return m
-    // Split parts: the logical file name may be the first shard's base.
-    if (file.parts > 1 && mfile.startsWith(base.replace(/\.gguf$/, ''))) return m
-  }
-  return null
-}
-
-export function HfRepoDialog({ repo, onClose }: { repo: string | null; onClose: () => void }) {
+export function HfRepoDialog({
+  repo,
+  onClose,
+  onSearch,
+}: {
+  repo: string | null
+  onClose: () => void
+  /** Fallback when the repo isn't found (e.g. an inferred id that doesn't match HF):
+   *  switch to a Hugging Face search for the given term. */
+  onSearch?: (term: string) => void
+}) {
   const detailQ = useHfRepo(repo)
-  const modelsQ = useModels()
   const sysQ = useSysInfo()
   const dlMut = useDownloadMutations()
   const actions = useModelActions()
 
   const detail = detailQ.data
-  const models = modelsQ.data?.models ?? []
   const vramMb = sysQ.data?.gpus?.[0]?.vramMb
   const [selected, setSelected] = useState<string>('')
 
@@ -87,13 +81,14 @@ export function HfRepoDialog({ repo, onClose }: { repo: string | null; onClose: 
     setSelected(best.name)
   }, [detail, vramMb])
 
-  const ggufFiles = useMemo(() => (detail ? detail.files.filter((f) => !f.mmproj) : []), [detail])
+  // Quant options sorted by size (smallest → largest) so the listing reads in a
+  // sensible progression instead of alphabetically by filename.
+  const ggufFiles = useMemo(
+    () => (detail ? detail.files.filter((f) => !f.mmproj).sort((a, b) => a.sizeBytes - b.sizeBytes) : []),
+    [detail],
+  )
   const selectedFile = ggufFiles.find((f) => f.name === selected) ?? null
-  const localQuants = (detail?.localQuants ?? []).map((q) => q.toLowerCase())
-
-  const localModel = selectedFile ? findLocalModel(selectedFile, models) : null
-  const selectedIsLocal =
-    !!localModel || (selectedFile ? localQuants.includes(selectedFile.quant.toLowerCase()) : false)
+  const selectedIsLocal = !!selectedFile?.downloaded
 
   const fit = selectedFile ? fileFit(selectedFile.sizeBytes, vramMb) : 'unknown'
   const gated = detail?.gated ?? false
@@ -119,12 +114,13 @@ export function HfRepoDialog({ repo, onClose }: { repo: string | null; onClose: 
   }
 
   const onLoad = () => {
-    if (!localModel) return
+    const key = selectedFile?.localKey
+    if (!key) return
     actions.load.mutate(
-      { key: localModel.key },
+      { key },
       {
         onSuccess: () => {
-          toast.success(`Loading ${localModel.name}`)
+          toast.success(`Loading ${selectedFile?.quant ?? 'model'}`)
           onClose()
         },
         onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not load model.'),
@@ -152,14 +148,23 @@ export function HfRepoDialog({ repo, onClose }: { repo: string | null; onClose: 
         {detailQ.isLoading ? (
           <div className="py-10 text-center text-[13px] text-muted">Loading repo…</div>
         ) : detailQ.isError ? (
-          <UnreachableOrError error={detailQ.error} onRetry={() => detailQ.refetch()} />
+          <UnreachableOrError
+            error={detailQ.error}
+            onRetry={() => detailQ.refetch()}
+            onSearch={onSearch ? () => onSearch(repoSearchTerm(repo)) : undefined}
+          />
         ) : !detail || ggufFiles.length === 0 ? (
           <div className="py-10 text-center text-[13px] text-muted">No GGUF files found in this repo.</div>
         ) : (
           <div className="flex flex-col gap-4">
             {/* Quant selector */}
             <div className="flex flex-col gap-1.5">
-              <label className="text-[12px] font-medium text-ink">Quant</label>
+              <label className="flex items-center gap-1.5 text-[12px] font-medium text-ink">
+                Quant
+                {detail.verifying && (
+                  <span className="text-[11px] font-normal text-faint">· checking your library…</span>
+                )}
+              </label>
               <select
                 value={selected}
                 onChange={(e) => setSelected(e.target.value)}
@@ -167,8 +172,7 @@ export function HfRepoDialog({ repo, onClose }: { repo: string | null; onClose: 
               >
                 {ggufFiles.map((f) => {
                   const fFit = fileFit(f.sizeBytes, vramMb)
-                  const isLocal =
-                    localQuants.includes(f.quant.toLowerCase()) || !!findLocalModel(f, models)
+                  const isLocal = !!f.downloaded
                   const fitMark = fFit === 'fits' ? '●' : fFit === 'tight' ? '◐' : fFit === 'overflow' ? '○' : '·'
                   return (
                     <option key={f.name} value={f.name}>
@@ -210,7 +214,7 @@ export function HfRepoDialog({ repo, onClose }: { repo: string | null; onClose: 
 
             {/* Primary action */}
             <div className="flex items-center gap-2">
-              {selectedIsLocal && localModel ? (
+              {selectedIsLocal && selectedFile?.localKey ? (
                 <Button className="flex-1" onClick={onLoad} disabled={actions.load.isPending}>
                   <Zap size={14} />
                   Load
@@ -241,21 +245,40 @@ export function HfRepoDialog({ repo, onClose }: { repo: string | null; onClose: 
   )
 }
 
-/** HF-unreachable gets the friendly offline copy; anything else shows its message. */
-function UnreachableOrError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
-  const isUnreachable = error instanceof ApiError && error.code === 'hf_unreachable'
+/** Distinct copy per failure mode: a genuinely unreachable HF gets the offline line;
+ *  a not-found repo (commonly an inferred id whose folder name doesn't match HF)
+ *  explains that and offers a search instead of a dead-end Retry. */
+function UnreachableOrError({ error, onRetry, onSearch }: { error: unknown; onRetry: () => void; onSearch?: () => void }) {
+  const code = error instanceof ApiError ? error.code : ''
+  const notFound = code === 'hf_not_found'
+  const unreachable = code === 'hf_unreachable'
   return (
     <div className="flex flex-col items-center gap-3 py-10 text-center">
       <p className="max-w-sm text-[13px] text-muted">
-        {isUnreachable
-          ? 'Hugging Face is unreachable — check your connection.'
-          : error instanceof ApiError
-            ? error.message
-            : 'Could not load this repo.'}
+        {notFound
+          ? "We couldn't find this exact model on Hugging Face — the local folder name may not match its repo. Try searching for it instead."
+          : unreachable
+            ? 'Hugging Face is unreachable — check your connection.'
+            : error instanceof ApiError
+              ? error.message
+              : 'Could not load this repo.'}
       </p>
-      <Button size="sm" variant="outline" onClick={onRetry}>Retry</Button>
+      <div className="flex items-center gap-2">
+        {notFound && onSearch && (
+          <Button size="sm" onClick={onSearch}>Search Hugging Face</Button>
+        )}
+        <Button size="sm" variant="outline" onClick={onRetry}>Retry</Button>
+      </div>
     </div>
   )
+}
+
+/** Derive a search term from a repo id: drop the owner, strip a -GGUF suffix, and
+ *  turn separators into spaces (e.g. "unsloth/Gemma-4-E4B-GGUF" → "Gemma 4 E4B"). */
+function repoSearchTerm(repo: string | null): string {
+  if (!repo) return ''
+  const name = repo.split('/').pop() ?? repo
+  return name.replace(/[-_]?gguf$/i, '').replace(/[-_]+/g, ' ').trim()
 }
 
 function fmtSize(b: number): string {

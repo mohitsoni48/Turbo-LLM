@@ -30,11 +30,18 @@ function repoInLibrary(repo: string, models: ModelEntry[]): boolean {
   })
 }
 
-export function DiscoverTab() {
+export function DiscoverTab({ presetQuery = '' }: { presetQuery?: string }) {
   const [query, setQuery] = useState('')
   const [debounced, setDebounced] = useState('')
   const [openRepo, setOpenRepo] = useState<string | null>(null)
   const [importOpen, setImportOpen] = useState(false)
+
+  // Seed the search when arriving from a library model's "Find other quants" with
+  // no known source repo (imported file). Keyed on presetQuery so re-clicking the
+  // same model re-applies it.
+  useEffect(() => {
+    if (presetQuery) setQuery(presetQuery)
+  }, [presetQuery])
 
   // Debounce the search input 400ms before it hits the network (spec 10 §2).
   useEffect(() => {
@@ -112,7 +119,14 @@ export function DiscoverTab() {
         </div>
       )}
 
-      <HfRepoDialog repo={openRepo} onClose={() => setOpenRepo(null)} />
+      <HfRepoDialog
+        repo={openRepo}
+        onClose={() => setOpenRepo(null)}
+        onSearch={(term) => {
+          setOpenRepo(null)
+          setQuery(term)
+        }}
+      />
       <ImportUrlDialog open={importOpen} onClose={() => setImportOpen(false)} />
     </div>
   )

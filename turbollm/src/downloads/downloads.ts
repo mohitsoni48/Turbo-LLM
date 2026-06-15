@@ -54,6 +54,20 @@ interface ManifestEntry {
   createdAt: string
 }
 
+/** Download provenance: a record of which HF repo + file a local model came from,
+ *  kept permanently (the manifest drops completed jobs). Lets the Discover UI mark a
+ *  quant "Downloaded" only for the SPECIFIC repo it was pulled from — the identical
+ *  model+quant from a different repo (a different requant, different sha256) is
+ *  correctly shown as not-downloaded. Keyed primarily by sha256 (exact file
+ *  identity), with (repo, filename) as the fallback when no hash is known. */
+export interface ProvenanceEntry {
+  repo: string
+  filename: string
+  sha256?: string
+  dest: string
+  at: string
+}
+
 const MAX_CONCURRENT = 2
 const HF_BLOB_RE = /^https?:\/\/huggingface\.co\/.+\/resolve\/.+\.gguf$/i
 
@@ -79,6 +93,8 @@ export class DownloadManager {
   private records = new Map<string, DownloadRecord>()
   private controllers = new Map<string, AbortController>()
   private manifestPath: string
+  private provenancePath: string
+  private provenanceList: ProvenanceEntry[] = []
   private nextSeq = 0
 
   constructor(
@@ -90,7 +106,16 @@ export class DownloadManager {
     const dir = join(store.dir(), 'downloads')
     mkdirSync(dir, { recursive: true })
     this.manifestPath = join(dir, 'manifest.json')
+    this.provenancePath = join(dir, 'provenance.json')
     this.restore()
+    this.loadProvenance()
+  }
+
+  /** Permanent record of which repo+file each downloaded model came from (spec 10 §3).
+   *  Consumed by the repo-detail route to mark a quant "Downloaded" for the exact repo
+   *  it was pulled from. */
+  provenance(): ProvenanceEntry[] {
+    return [...this.provenanceList]
   }
 
   /** Active (downloading) job count — surfaced on GET /status. */
@@ -305,6 +330,7 @@ export class DownloadManager {
       rec.status = 'done'
       rec.bytesPerSec = 0
       this.controllers.delete(rec.id)
+      this.recordProvenance(rec)
       this.persist()
       try {
         this.onComplete()
@@ -326,6 +352,39 @@ export class DownloadManager {
       this.persist()
     } finally {
       this.pump()
+    }
+  }
+
+  /** Append a completed download to the permanent provenance list, keyed by dest
+   *  (re-downloading the same target replaces the old entry). Raw-URL imports carry
+   *  an empty repo and so only ever match by sha256. */
+  private recordProvenance(rec: DownloadRecord): void {
+    const entry: ProvenanceEntry = {
+      repo: rec.repo,
+      filename: rec.name,
+      sha256: rec.sha256,
+      dest: rec.dest,
+      at: new Date().toISOString(),
+    }
+    this.provenanceList = this.provenanceList.filter((p) => p.dest !== rec.dest)
+    this.provenanceList.push(entry)
+    this.saveProvenance()
+  }
+
+  private loadProvenance(): void {
+    try {
+      const parsed = JSON.parse(readFileSync(this.provenancePath, 'utf8')) as { entries?: ProvenanceEntry[] }
+      this.provenanceList = parsed.entries ?? []
+    } catch {
+      /* no provenance yet */
+    }
+  }
+
+  private saveProvenance(): void {
+    try {
+      writeFileSync(this.provenancePath, JSON.stringify({ version: 1, entries: this.provenanceList }, null, 2))
+    } catch {
+      /* provenance is a convenience — never fatal */
     }
   }
 

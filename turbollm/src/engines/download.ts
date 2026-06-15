@@ -233,3 +233,109 @@ export function deleteBackend(enginesRoot: string, id: BackendId, tag = LLAMA_BU
   rmSync(dir, { recursive: true, force: true })
   return true
 }
+
+// ─── Generic fork provisioning from a GitHub release (ADR-044) ──────────────
+// Catalog forks (e.g. TurboQuant) ship prebuilt `llama-server` binaries on their
+// own GitHub Releases. We resolve the latest release at install time, pick the
+// asset matching this OS/arch, then download + extract + locate the server — the
+// same pipeline as the official backends, but pointed at an arbitrary repo with
+// arbitrary asset names (so it survives the fork renaming its archives).
+
+export interface ReleaseAsset {
+  name: string
+  browser_download_url: string
+}
+
+/** Score how well an asset name matches this OS/arch; -1 = no match (wrong OS/arch
+ *  or not an archive). Higher is better — used to pick the best of several assets. */
+export function scoreAsset(name: string, platform = process.platform, archStr = process.arch): number {
+  const n = name.toLowerCase()
+  const isArchive = n.endsWith('.tar.gz') || n.endsWith('.tgz') || n.endsWith('.zip')
+  if (!isArchive) return -1 // skip .dmg / .sha256 / source tarballs
+
+  const osOk =
+    platform === 'darwin'
+      ? n.includes('macos') || n.includes('darwin') || n.includes('osx')
+      : platform === 'win32'
+        ? n.includes('win') || n.includes('windows')
+        : n.includes('linux') || n.includes('ubuntu')
+  if (!osOk) return -1
+
+  // arm64 vs x64: if the name names an arch, it must be ours; unnamed = acceptable.
+  const wantArm = archStr === 'arm64'
+  const namesArm = n.includes('arm64') || n.includes('aarch64')
+  const namesX64 = n.includes('x64') || n.includes('x86_64') || n.includes('amd64')
+  if (wantArm && namesX64) return -1
+  if (!wantArm && namesArm) return -1
+
+  let score = 1
+  if ((wantArm && namesArm) || (!wantArm && namesX64)) score += 2 // exact arch named
+  if (n.endsWith('.tar.gz') || n.endsWith('.tgz')) score += 1 // prefer tarball over zip
+  return score
+}
+
+/** Pick the best-matching asset for this OS/arch, or null if the release has none. */
+export function pickReleaseAsset(
+  assets: ReleaseAsset[],
+  platform = process.platform,
+  archStr = process.arch,
+): ReleaseAsset | null {
+  let best: ReleaseAsset | null = null
+  let bestScore = 0
+  for (const a of assets) {
+    const s = scoreAsset(a.name, platform, archStr)
+    if (s > bestScore) {
+      best = a
+      bestScore = s
+    }
+  }
+  return best
+}
+
+/** Resolve the latest release of `repo` and provision its platform-matching
+ *  `llama-server` into `<enginesRoot>/<destName>/`. Returns the server binary path.
+ *  Throws `no_release_asset` (Error.message) when the latest release has no asset
+ *  for this OS/arch — the catalog's OS prefilter should prevent reaching here, but
+ *  this is the honest failure if a platform's build is missing. */
+export async function provisionForkRelease(
+  enginesRoot: string,
+  repo: string,
+  destName: string,
+  onProgress?: (p: ProvisionProgress) => void,
+  signal?: AbortSignal,
+): Promise<string> {
+  const destDir = join(enginesRoot, destName)
+  if (existsSync(destDir)) {
+    const found = findServer(destDir)
+    if (found) return found
+  }
+
+  // Resolve the latest release + its assets via the GitHub API.
+  const apiUrl = `https://api.github.com/repos/${repo}/releases/latest`
+  const res = await fetch(apiUrl, {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'turbollm' },
+    signal,
+  })
+  if (!res.ok) throw new Error(`could not query ${repo} releases: HTTP ${res.status}`)
+  const rel = (await res.json()) as { tag_name?: string; assets?: ReleaseAsset[] }
+  const asset = pickReleaseAsset(rel.assets ?? [])
+  if (!asset) throw new Error('no_release_asset')
+
+  mkdirSync(destDir, { recursive: true })
+  const tmp = join(enginesRoot, asset.name)
+  try {
+    onProgress?.({ phase: 'downloading', pct: 0 })
+    await downloadFile(asset.browser_download_url, tmp, onProgress, signal)
+    onProgress?.({ phase: 'extracting', pct: -1 })
+    await extractArchive(tmp, destDir)
+    rmSync(tmp, { force: true })
+  } catch (e) {
+    rmSync(tmp, { force: true })
+    rmSync(destDir, { recursive: true, force: true })
+    throw e
+  }
+
+  const bin = findServer(destDir)
+  if (!bin) throw new Error('llama-server not found in extracted release archive')
+  return bin
+}

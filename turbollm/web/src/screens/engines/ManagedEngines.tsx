@@ -1,6 +1,7 @@
-import { Check, Download, Loader2, Sparkles, Trash2 } from 'lucide-react'
-import { useBackendInstall, useEngineBackends, useStatus } from '../../lib/queries'
+import { Check, Download, ExternalLink, Loader2, Sparkles, Trash2 } from 'lucide-react'
+import { useBackendInstall, useEngineBackends, useEngineCatalog, useStatus } from '../../lib/queries'
 import { ApiError } from '../../lib/api'
+import type { CatalogEngine } from '../../lib/types'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
 import { toast } from '../../components/ui/sonner'
@@ -86,6 +87,113 @@ export function LlamaCppBackendRows() {
         </div>
       ))}
     </>
+  )
+}
+
+/**
+ * Discover engines (ADR-044): the browsable catalog of installable engine kinds
+ * beyond the default llama.cpp builds — vLLM, MLX, TurboQuant. The llama.cpp
+ * default + its GPU backends are managed by the Active Engine selector above;
+ * this card is where new engine *kinds* are installed. Once installed, an engine
+ * becomes selectable as the active engine from the dropdown at the top.
+ */
+export function DiscoverEngines() {
+  const { data: status } = useStatus()
+  const provisioning = !!status?.engineProvision?.active
+  const { data, isLoading } = useEngineCatalog(provisioning)
+  const install = useBackendInstall()
+
+  if (isLoading || !data) return null
+
+  // Prefilter by OS (ADR-044): only engines that can run on this platform are
+  // offered. llama.cpp (the default) is managed via the Active Engine selector +
+  // its backend builds, so the catalog card lists the additional engine kinds only.
+  const engines = data.engines.filter((e) => e.id !== 'llama.cpp' && e.supportedHere)
+  if (engines.length === 0) return null
+
+  const busy =
+    provisioning || install.vllm.isPending || install.mlx.isPending || install.turboquant.isPending
+
+  // Map a catalog entry to its install mutation by install endpoint.
+  const installFor = (e: CatalogEngine) => {
+    if (e.installEndpoint === '/api/v1/engines/vllm') return install.vllm
+    if (e.installEndpoint === '/api/v1/engines/mlx') return install.mlx
+    if (e.installEndpoint === '/api/v1/engines/turboquant') return install.turboquant
+    return null
+  }
+
+  const doInstall = (e: CatalogEngine) => {
+    const m = installFor(e)
+    if (!m) return
+    m.mutate(undefined, {
+      onError: (err) =>
+        toast.error(err instanceof ApiError ? err.message : `Could not install ${e.name}.`),
+    })
+  }
+
+  return (
+    <section className="flex flex-col gap-2">
+      <p className="text-[11px] font-medium uppercase tracking-wide text-faint">Discover engines</p>
+      {engines.map((e) => {
+        const m = installFor(e)
+        const canInstall = e.supportedHere && !e.comingSoon && !e.installed && !!m
+        const thisPending = !!m?.isPending
+        return (
+          <div
+            key={e.id}
+            className="flex items-start gap-3 rounded-[var(--radius)] border border-border bg-panel p-4"
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-sm font-semibold text-ink">{e.name}</span>
+                {e.support === 'experimental' && !e.comingSoon && (
+                  <Badge variant="mono">experimental</Badge>
+                )}
+                {e.comingSoon && <Badge variant="mono">coming soon</Badge>}
+                {!e.supportedHere && !e.comingSoon && (
+                  <span className="text-[11px] text-faint">not available on this OS</span>
+                )}
+                <a
+                  href={e.homepage}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-0.5 text-[11px] text-muted hover:text-ink"
+                  title={e.homepage}
+                >
+                  <ExternalLink size={10} /> docs
+                </a>
+              </div>
+              <div className="mt-0.5 text-[12px] text-muted">{e.description}</div>
+              {e.note && <div className="mt-1 text-[11px] text-faint">{e.note}</div>}
+            </div>
+            <div className="flex shrink-0 items-center gap-2 pt-0.5">
+              {e.installed ? (
+                <span className="flex items-center gap-1 text-[12px] font-medium text-accent">
+                  <Check size={13} /> Installed
+                </span>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!canInstall || busy}
+                  onClick={() => doInstall(e)}
+                  title={
+                    e.comingSoon
+                      ? 'Not yet available'
+                      : !e.supportedHere
+                        ? 'Not supported on this operating system'
+                        : `Install ${e.name}`
+                  }
+                >
+                  {thisPending ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+                  {e.comingSoon ? 'Coming soon' : 'Install'}
+                </Button>
+              )}
+            </div>
+          </div>
+        )
+      })}
+    </section>
   )
 }
 

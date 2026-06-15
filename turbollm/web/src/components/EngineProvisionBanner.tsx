@@ -4,9 +4,24 @@ import type { Status } from '../lib/types'
 import { useBackendInstall } from '../lib/queries'
 import { Button } from './ui/button'
 
+// llama.cpp GPU-backend ids (ADR-024/025). Anything else in `provision.backend`
+// is a distinct engine kind (vLLM, MLX, TurboQuant — ADR-044) installed through
+// the same ProvisionState, so the banner must name it correctly.
+const LLAMA_BACKENDS = new Set(['cuda', 'rocm', 'sycl', 'vulkan', 'metal', 'cpu'])
+
+/** Friendly engine name for the provision banner, from the `backend` id. */
+function engineLabel(backend: string): string {
+  if (backend === 'vllm') return 'vLLM engine'
+  if (backend === 'mlx') return 'MLX engine'
+  if (backend === 'turboquant') return 'TurboQuant engine'
+  if (LLAMA_BACKENDS.has(backend)) return `llama.cpp engine (${backend})`
+  return backend ? `${backend} engine` : 'engine'
+}
+
 /**
- * Global banner shown while the default llama.cpp engine is being downloaded/
- * installed on first run (ADR-024), or if that provisioning failed. Reads live
+ * Global banner shown while an engine is being downloaded/installed — the default
+ * llama.cpp engine on first run (ADR-024), or any catalog engine the user installs
+ * (vLLM / MLX / TurboQuant, ADR-044) — or if that provisioning failed. Reads live
  * progress from GET /api/v1/status (polled every 2s).
  */
 export function EngineProvisionBanner({ status }: { status: Status | undefined }) {
@@ -39,10 +54,9 @@ export function EngineProvisionBanner({ status }: { status: Status | undefined }
 
   const pct = p.pct >= 0 ? Math.round(p.pct * 100) : null
   const partTag = p.parts && p.parts > 1 ? ` · part ${p.part}/${p.parts}` : ''
+  const name = engineLabel(p.backend)
   const label =
-    (p.phase === 'extracting'
-      ? `Installing llama.cpp engine${p.backend ? ` (${p.backend})` : ''}…`
-      : `Downloading llama.cpp engine${p.backend ? ` (${p.backend})` : ''}…`) + partTag
+    (p.phase === 'extracting' ? `Installing ${name}…` : `Downloading ${name}…`) + partTag
 
   return (
     <div

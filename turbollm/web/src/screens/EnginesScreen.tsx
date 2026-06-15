@@ -10,7 +10,7 @@ import { EngineSelector } from './engines/EngineSelector'
 import { EngineHelp } from './engines/EngineHelp'
 import { EngineStatusHeader } from './engines/EngineStatusHeader'
 import { EngineLogPanel } from './engines/EngineLogPanel'
-import { LlamaCppBackendRows, MlxEngineRow } from './engines/ManagedEngines'
+import { DiscoverEngines, LlamaCppBackendRows, MlxEngineRow } from './engines/ManagedEngines'
 
 /** Auto-downloaded official llama.cpp builds live in `<config>/engines/llama.cpp-<tag>-<backend>/`;
  *  everything else in the registry is a user-supplied (BYO) fork — its own engine. */
@@ -54,7 +54,7 @@ export function EnginesScreen() {
     : null
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-6 py-6">
+    <div className="w-full px-6 py-6">
       <ScreenHeader
         title="Engines"
         description="Pick an engine and its build above. The list below is for downloading and managing them."
@@ -118,6 +118,10 @@ export function EnginesScreen() {
             )}
           </div>
         )}
+
+        {/* Discover engines (ADR-044): install additional engine kinds (vLLM, MLX,
+            TurboQuant) beyond the default llama.cpp builds. */}
+        <DiscoverEngines />
 
         {/* Live engine log */}
         {activeEngine && <EngineLogPanel open={logPanelOpen} onOpenChange={setLogPanelOpen} />}

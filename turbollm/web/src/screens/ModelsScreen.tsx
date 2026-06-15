@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
-import { Boxes, ChevronRight, CircleSlash, FolderPlus, Loader2, MoreHorizontal, RefreshCw, SlidersHorizontal, Star, Trash2, X, Zap } from 'lucide-react'
+import { Boxes, ChevronRight, CircleSlash, FolderPlus, Loader2, MoreHorizontal, PackageSearch, RefreshCw, SlidersHorizontal, Star, Trash2, X, Zap } from 'lucide-react'
 import { ApiError, deleteModel } from '../lib/api'
 import { queryKeys, useModelActions, useModelDirs, useModelMutations, useModels, useStatus } from '../lib/queries'
 import type { ModelEntry } from '../lib/types'
@@ -28,6 +28,7 @@ import {
 import { toast } from '../components/ui/sonner'
 import { ModelDetailDialog } from './models/ModelDetailDialog'
 import { DiscoverTab } from './models/DiscoverTab'
+import { HfRepoDialog } from './models/HfRepoDialog'
 
 type Filter = 'all' | 'vision' | 'moe' | 'nextn'
 type Tab = 'library' | 'discover'
@@ -78,14 +79,32 @@ export function ModelsScreen() {
       : undefined
   const [tab, setTab] = useState<Tab>('library')
   const [filter, setFilter] = useState<Filter>('all')
+  const [showIncompatible, setShowIncompatible] = useState(false)
   const [openKey, setOpenKey] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<ModelEntry | null>(null)
+  // "Find other quants" for a library model (re-download / pick a different quant):
+  // jump straight to its source repo when known (provenance), else open Discover
+  // pre-searched by model name (imported files have no recorded repo).
+  const [discoverRepo, setDiscoverRepo] = useState<string | null>(null)
+  const [presetSearch, setPresetSearch] = useState('')
+  const onDiscover = (m: ModelEntry) => {
+    if (m.sourceRepo) {
+      setDiscoverRepo(m.sourceRepo)
+    } else {
+      setPresetSearch(m.name)
+      setTab('discover')
+    }
+  }
 
   const scanning = modelsQ.data?.scanning ?? false
   const models = modelsQ.data?.models ?? []
   const dirs = dirsQ.data?.dirs ?? []
   const primaryDir = dirsQ.data?.primaryDir ?? ''
+  // Models the active engine can't load (ADR-044): GGUFs under MLX/vLLM, or
+  // safetensors under llama.cpp. Hidden by default; "Show all" reveals them.
+  const incompatibleCount = models.filter((m) => !m.compatibleWithActiveEngine).length
   const filtered = models.filter((m) => {
+    if (!showIncompatible && !m.compatibleWithActiveEngine) return false
     if (filter === 'all') return true
     if (filter === 'vision') return m.vision
     if (filter === 'moe') return m.moe
@@ -110,7 +129,7 @@ export function ModelsScreen() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl px-6 py-6">
+    <div className="w-full px-6 py-6">
       <ScreenHeader
         title="Models"
         description={
@@ -145,8 +164,25 @@ export function ModelsScreen() {
         ))}
       </div>
 
+      {tab === 'library' && incompatibleCount > 0 && (
+        <div className="mb-4 flex items-center justify-between gap-3 rounded-[var(--radius)] border border-border bg-panel px-4 py-2.5 text-[12px]">
+          <span className="text-muted">
+            {showIncompatible
+              ? `Showing all models. ${incompatibleCount} can't load on the active engine.`
+              : `${incompatibleCount} ${incompatibleCount === 1 ? 'model is' : 'models are'} hidden — the active engine can't load ${incompatibleCount === 1 ? 'it' : 'them'}.`}
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowIncompatible((v) => !v)}
+            className="shrink-0 font-medium text-accent hover:underline"
+          >
+            {showIncompatible ? 'Show compatible only' : 'Show all'}
+          </button>
+        </div>
+      )}
+
       {tab === 'discover' ? (
-        <DiscoverTab />
+        <DiscoverTab presetQuery={presetSearch} />
       ) : (
         <LibraryTab
           modelsQ={modelsQ}
@@ -163,10 +199,27 @@ export function ModelsScreen() {
           groups={groups}
           setOpenKey={setOpenKey}
           setConfirmDelete={setConfirmDelete}
+          onDiscover={onDiscover}
         />
       )}
 
-      <ModelDetailDialog modelKey={openKey} onClose={() => setOpenKey(null)} />
+      <ModelDetailDialog
+        modelKey={openKey}
+        onClose={() => setOpenKey(null)}
+        onViewRepo={(repo) => {
+          setOpenKey(null)
+          setDiscoverRepo(repo)
+        }}
+      />
+      <HfRepoDialog
+        repo={discoverRepo}
+        onClose={() => setDiscoverRepo(null)}
+        onSearch={(term) => {
+          setDiscoverRepo(null)
+          setPresetSearch(term)
+          setTab('discover')
+        }}
+      />
       <DeleteModelDialog
         model={confirmDelete}
         onCancel={() => setConfirmDelete(null)}
@@ -194,6 +247,7 @@ function LibraryTab({
   groups,
   setOpenKey,
   setConfirmDelete,
+  onDiscover,
 }: {
   modelsQ: ReturnType<typeof useModels>
   mut: ReturnType<typeof useModelMutations>
@@ -209,6 +263,7 @@ function LibraryTab({
   groups: Group[]
   setOpenKey: (k: string | null) => void
   setConfirmDelete: (m: ModelEntry | null) => void
+  onDiscover: (m: ModelEntry) => void
 }) {
   return (
     <>
@@ -254,6 +309,7 @@ function LibraryTab({
                 onEject={() => actions.eject.mutate()}
                 onTune={() => setOpenKey(g.variants[0].key)}
                 onDelete={() => setConfirmDelete(g.variants[0])}
+                onDiscover={() => onDiscover(g.variants[0])}
                 busy={loadBusy}
                 loadingThis={loadingKey === g.variants[0].key}
                 ejecting={actions.eject.isPending}
@@ -266,6 +322,7 @@ function LibraryTab({
                 onEject={() => actions.eject.mutate()}
                 onTune={(key) => setOpenKey(key)}
                 onDelete={(m) => setConfirmDelete(m)}
+                onDiscover={onDiscover}
                 busy={loadBusy}
                 loadingKey={loadingKey}
                 ejecting={actions.eject.isPending}
@@ -298,6 +355,7 @@ function ModelGroupRow({
   onEject,
   onTune,
   onDelete,
+  onDiscover,
   busy,
   loadingKey,
   ejecting,
@@ -307,6 +365,7 @@ function ModelGroupRow({
   onEject: () => void
   onTune: (key: string) => void
   onDelete: (m: ModelEntry) => void
+  onDiscover: (m: ModelEntry) => void
   busy: boolean
   loadingKey: string | undefined
   ejecting: boolean
@@ -348,6 +407,7 @@ function ModelGroupRow({
               onEject={onEject}
               onTune={() => onTune(m.key)}
               onDelete={() => onDelete(m)}
+              onDiscover={() => onDiscover(m)}
               busy={busy}
               loadingThis={loadingKey === m.key}
               ejecting={ejecting}
@@ -366,6 +426,7 @@ function ModelRow({
   onEject,
   onTune,
   onDelete,
+  onDiscover,
   busy,
   loadingThis,
   ejecting,
@@ -376,6 +437,7 @@ function ModelRow({
   onEject: () => void
   onTune: () => void
   onDelete: () => void
+  onDiscover: () => void
   /** Any load/engine transition is in progress — disable the Load buttons. */
   busy: boolean
   /** This specific model is the one currently coming up — show the spinner here. */
@@ -391,13 +453,13 @@ function ModelRow({
     <div
       className={
         child
-          ? 'group flex items-center gap-3 rounded-md border border-border bg-panel-2 px-3 py-2.5'
-          : 'group flex items-center gap-3 rounded-lg border border-border bg-panel px-4 py-3'
+          ? 'group flex flex-col gap-2 rounded-md border border-border bg-panel-2 px-3 py-2.5 sm:flex-row sm:items-center sm:gap-3'
+          : 'group flex flex-col gap-2 rounded-lg border border-border bg-panel px-4 py-3 sm:flex-row sm:items-center sm:gap-3'
       }
     >
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="truncate font-medium text-ink">{child ? m.quant : m.name}</span>
+          <span className="min-w-0 break-words font-medium text-ink sm:truncate">{child ? m.quant : m.name}</span>
           {m.loaded && <Tag tone="ok">loaded</Tag>}
           {m.vision && <Tag>vision</Tag>}
           {m.moe && <Tag>MoE</Tag>}
@@ -411,42 +473,49 @@ function ModelRow({
           {m.dir ? ` · ${m.dir}` : ''}
         </div>
       </div>
-      {!child && <Badge variant="mono">{m.quant}</Badge>}
-      <Stat>{fmtSize(m.sizeBytes)}</Stat>
-      <Stat>{m.nativeCtx ? `${fmtCtx(m.nativeCtx)} ctx` : '—'}</Stat>
-      <TpsStat m={m} />
-      <div className="flex items-center gap-1">
-        <Button size="sm" onClick={onLoad} disabled={!loadable || busy} title={loadable ? '' : 'Model is incomplete or unreadable'}>
-          {loadingThis ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />}
-          {loadingThis ? 'Loading…' : m.loaded ? 'Reload' : 'Load'}
-        </Button>
-        {m.loaded && (
-          <Button size="sm" variant="outline" onClick={onEject} disabled={ejecting} title="Eject model (stop the engine)">
-            <CircleSlash size={14} />
-            Eject
+      {/* Stats + actions wrap to a second row on mobile so the name above keeps the
+          full width and no longer gets crushed; inline on >= sm. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 sm:flex-nowrap sm:gap-3">
+        {!child && <Badge variant="mono">{m.quant}</Badge>}
+        <Stat>{fmtSize(m.sizeBytes)}</Stat>
+        <Stat>{m.nativeCtx ? `${fmtCtx(m.nativeCtx)} ctx` : '—'}</Stat>
+        <TpsStat m={m} />
+        <div className="ml-auto flex items-center gap-1 sm:ml-0">
+          <Button size="sm" onClick={onLoad} disabled={!loadable || busy} title={loadable ? '' : 'Model is incomplete or unreadable'}>
+            {loadingThis ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />}
+            {loadingThis ? 'Loading…' : m.loaded ? 'Reload' : 'Load'}
           </Button>
-        )}
-        <Button size="sm" variant="ghost" onClick={onTune} disabled={!loadable} title="Load settings">
-          <SlidersHorizontal size={14} />
-        </Button>
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            aria-label="Model actions"
-            className="grid h-8 w-8 place-items-center rounded-md text-muted opacity-0 transition-opacity hover:bg-panel-2 hover:text-ink focus:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100"
-          >
-            <MoreHorizontal size={16} />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem
-              destructive
-              disabled={m.loaded}
-              onSelect={onDelete}
-              title={m.loaded ? 'Eject the model before deleting' : undefined}
+          {m.loaded && (
+            <Button size="sm" variant="outline" onClick={onEject} disabled={ejecting} title="Eject model (stop the engine)">
+              <CircleSlash size={14} />
+              Eject
+            </Button>
+          )}
+          <Button size="sm" variant="ghost" onClick={onTune} disabled={!loadable} title="Load settings">
+            <SlidersHorizontal size={14} />
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              aria-label="Model actions"
+              className="grid h-8 w-8 place-items-center rounded-md text-muted opacity-100 transition-opacity hover:bg-panel-2 hover:text-ink focus:opacity-100 data-[state=open]:opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
             >
-              <Trash2 size={14} /> Delete file…
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+              <MoreHorizontal size={16} />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={onDiscover}>
+                <PackageSearch size={14} /> Find other quants…
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                destructive
+                disabled={m.loaded}
+                onSelect={onDelete}
+                title={m.loaded ? 'Eject the model before deleting' : undefined}
+              >
+                <Trash2 size={14} /> Delete file…
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
     </div>
   )

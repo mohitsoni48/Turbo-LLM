@@ -1,6 +1,6 @@
 ﻿import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { ChevronDown, Gauge, RotateCcw, Save, X, Zap } from 'lucide-react'
+import { ChevronDown, ExternalLink, Gauge, RotateCcw, Save, X, Zap } from 'lucide-react'
 import { ApiError } from '../../lib/api'
 import { useBenchActions, useBenchState, useEngines, useModelActions, useModelDetail, useStatus } from '../../lib/queries'
 import type { LoadProfile } from '../../lib/types'
@@ -9,7 +9,16 @@ import { Button } from '../../components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../components/ui/dialog'
 import { toast } from '../../components/ui/sonner'
 
-export function ModelDetailDialog({ modelKey, onClose }: { modelKey: string | null; onClose: () => void }) {
+export function ModelDetailDialog({
+  modelKey,
+  onClose,
+  onViewRepo,
+}: {
+  modelKey: string | null
+  onClose: () => void
+  /** Open the model's Hugging Face page (card + quants) for the given repo. */
+  onViewRepo?: (repo: string) => void
+}) {
   const detailQ = useModelDetail(modelKey)
   const enginesQ = useEngines()
   const actions = useModelActions()
@@ -119,6 +128,16 @@ export function ModelDetailDialog({ modelKey, onClose }: { modelKey: string | nu
           <DialogDescription>
             {detail ? `${detail.arch} · ${detail.quant} · ${fmtSize(detail.sizeBytes)}` : 'Load settings'}
           </DialogDescription>
+          {detail?.sourceRepo && onViewRepo && (
+            <button
+              type="button"
+              onClick={() => onViewRepo(detail.sourceRepo!)}
+              className="mt-1 inline-flex w-fit items-center gap-1 text-[12px] font-medium text-accent hover:underline"
+              title={`View ${detail.sourceRepo} on Hugging Face`}
+            >
+              <ExternalLink size={12} /> Model card &amp; quants on Hugging Face
+            </button>
+          )}
         </DialogHeader>
 
         {!detail || !draft ? (
