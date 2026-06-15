@@ -38,6 +38,7 @@ LLMs** — built for people who today hand-compile forks and hunt forums for the
 ## Contents
 
 - [Why TurboLLM](#why-turbollm)
+- [Features](#features)
 - [Quick start](#quick-start)
 - [⭐ Bring any engine — the headline feature](#-bring-any-engine--the-headline-feature)
 - [Models — bring your own, or browse Hugging Face](#models)
@@ -46,6 +47,7 @@ LLMs** — built for people who today hand-compile forks and hunt forums for the
 - [APIs & integrations](#apis--integrations)
 - [Run Claude Code on your own GPU](#run-claude-code-on-your-own-gpu)
 - [Use it from any device on your network](#use-it-from-any-device-on-your-network)
+- [Share the GPU with ComfyUI](#share-the-gpu-with-comfyui)
 - [Command-line reference](#command-line-reference)
 - [Configuration & data](#configuration--data)
 - [Requirements](#requirements)
@@ -82,6 +84,37 @@ TurboLLM does the opposite:
 - **🔌 Drop-in APIs.** OpenAI **and** Anthropic-compatible — so Claude Code and every existing
   tool work unchanged.
 - **🔒 Offline-first & private.** No account, no backend, no internet, **no telemetry.**
+
+---
+
+## Features
+
+The current capability list (kept in sync with [CHANGELOG.md](CHANGELOG.md)):
+
+**Engines**
+- Bring any `llama-server`-compatible engine — stock builds or community forks — with real capability probing
+- Auto-provision a GPU-matched `llama-server` build on first run (CUDA / ROCm / Metal / SYCL / Vulkan, CPU fallback)
+- **vLLM** and **MLX** backends in addition to llama.cpp
+- One-click backend install + switch from the Engines screen
+
+**Models**
+- Use your own local GGUF / safetensors, or browse & download from Hugging Face in-app
+- Per-model load profiles (context, GPU offload, KV-cache quant, flash-attn, draft models)
+- Auto-tune on load with a **VRAM-fit verdict before you load**
+- Measured tokens/sec per model — never faked — live while you chat and remembered
+
+**Chat**
+- Streaming chat with live t/s, TTFT, context meter, and reasoning/thinking support
+- Image and document attachments — including **send an image or file with no text**
+
+**Integrations**
+- OpenAI- **and** Anthropic-compatible APIs — run Claude Code on your own GPU
+- LAN sharing with optional API-key auth
+- **Share the GPU with ComfyUI** — auto-unload the model while ComfyUI renders, reload when it's done
+
+**Platform**
+- ~0.3 MB npm package on Node — no Electron, no Chromium, no Python
+- Offline-first, no account, no telemetry
 
 ---
 
@@ -248,6 +281,29 @@ turbollm --addr 0.0.0.0:6996    # bind all interfaces, then open http://<your-ip
 ```
 
 Turn on **Require API key** in Settings → Network when you expose it.
+
+---
+
+## Share the GPU with ComfyUI
+
+If you run **ComfyUI** on the same GPU, an LLM holding VRAM while ComfyUI renders means both
+fight for memory (and one usually OOMs). TurboLLM can hand the GPU over automatically:
+
+- The instant ComfyUI starts a render, TurboLLM **unloads its model and pauses new loads**.
+- When ComfyUI's queue drains, TurboLLM **reloads the exact model it unloaded**.
+
+It's **push-based, not polling** — ComfyUI signals TurboLLM the moment a job starts/ends, so
+the handoff is immediate and deterministic (the model is gone *before* ComfyUI executes).
+
+**One-time setup** (Settings → ComfyUI):
+
+1. Turn on **Pause for ComfyUI** and **Save**.
+2. Enter your ComfyUI folder (the one containing `custom_nodes`) and click **Install gate**.
+   TurboLLM writes a small custom node into ComfyUI, wired to this daemon.
+3. **Restart ComfyUI** once so it loads the node.
+
+The Settings panel shows a live indicator (rendering / idle / connected). To undo it, click
+**Remove** in the same panel.
 
 ---
 
