@@ -97,7 +97,12 @@ export function registerChatRoutes(app: Hono, d: Deps): void {
     const convId = c.req.param('id')
     const b = await body<{ content?: string; images?: string[]; docContext?: string; textAttachments?: string[]; disableThinking?: boolean }>(c)
     const content = (b.content ?? '').trim()
-    if (!content) return err(c, 400, 'invalid_input', 'content is required.')
+    const images = b.images ?? []
+    const textAttachments = b.textAttachments ?? []
+    // A message is valid if it has typed text OR carries an image or file
+    // attachment — image-only / file-only sends are allowed.
+    if (!content && images.length === 0 && textAttachments.length === 0)
+      return err(c, 400, 'invalid_input', 'Type a message or attach an image or file.')
 
     const conv = db.getConversation(convId, true)
     if (!conv) return err(c, 404, 'not_found', 'Conversation not found.')
@@ -108,9 +113,6 @@ export function registerChatRoutes(app: Hono, d: Deps): void {
     if (!target) return err(c, 409, 'model_not_loaded', 'Engine not running.')
 
     if (inflight.has(convId)) return err(c, 409, 'generation_in_flight', 'A generation is already running for this conversation.')
-
-    const images = b.images ?? []
-    const textAttachments = b.textAttachments ?? []
 
     // Persist user message — only the typed text is stored as content; images are
     // kept in attachments (the full doc context is folded into the engine prompt below).
@@ -137,9 +139,14 @@ export function registerChatRoutes(app: Hono, d: Deps): void {
         engineMessages.push({ role: m.role, content: m.content })
       }
       // Fold any attached document text into the prompt; attach images as multimodal parts.
-      const fullContent = b.docContext ? `${b.docContext}\n\n${content}` : content
+      const fullContent = b.docContext
+        ? (content ? `${b.docContext}\n\n${content}` : b.docContext)
+        : content
       const userContent: unknown = images.length
-        ? [{ type: 'text', text: fullContent }, ...images.map((url) => ({ type: 'image_url', image_url: { url } }))]
+        ? [
+            ...(fullContent ? [{ type: 'text', text: fullContent }] : []),
+            ...images.map((url) => ({ type: 'image_url', image_url: { url } })),
+          ]
         : fullContent
       engineMessages.push({ role: 'user', content: userContent })
 
