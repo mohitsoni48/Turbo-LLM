@@ -83,6 +83,10 @@ export interface ModelDefaults {
   ctx: number
   ngl: number
   imageMaxTokens?: number
+  /** Hard cap on tokens generated per response (0 = unlimited). Applied to in-app
+   *  chat and clamped onto external gateway requests so nothing on this machine can
+   *  exceed it. */
+  maxTokens?: number
 }
 /** TRANSITIONAL (A1/A2): carries the model path + extra args until the
  *  model/profile system (spec 05, A4) replaces it. */
@@ -215,7 +219,7 @@ export function defaultConfig(): Config {
     lastLoaded: { modelKey: '', engineId: '' },
     autoLoadOnStart: false,
     hf: { token: '' },
-    modelDefaults: { ctx: 8192, ngl: 99, imageMaxTokens: 0 },
+    modelDefaults: { ctx: 8192, ngl: 99, imageMaxTokens: 0, maxTokens: 0 },
     featuredOverrideUrl: '',
     comfyui: { enabled: false, gatePath: '' },
   }
@@ -416,4 +420,13 @@ function isAbsolutePath(p: string): boolean {
 
 export function findEngine(engines: Engine[], id: string): Engine | undefined {
   return engines.find((e) => e.id === id)
+}
+
+/** Apply the global "max response tokens" cap. `limit <= 0` means unlimited (return
+ *  the request's own value untouched). Otherwise return the smaller of the requested
+ *  value and the limit; when the request set no value, fall back to the limit. */
+export function clampMaxTokens(requested: number | null | undefined, limit: number): number | undefined {
+  if (!Number.isFinite(limit) || limit <= 0) return requested ?? undefined
+  if (requested == null || !Number.isFinite(requested) || requested <= 0) return limit
+  return Math.min(requested, limit)
 }

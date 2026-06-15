@@ -294,6 +294,9 @@ export type ModelDefaults = {
   ctx: number
   ngl: number
   imageMaxTokens?: number
+  /** Hard cap on tokens generated per response (0 = unlimited). Applies to in-app
+   *  chat and clamps external (Claude Code) requests too. */
+  maxTokens?: number
 }
 
 /** Telemetry consent level (spec 09 §3): off | anonymous benchmarks | + crash. */

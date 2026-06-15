@@ -101,6 +101,7 @@ export function SettingsScreen() {
   const [defCtx, setDefCtx] = useState<number>(8192)
   const [defNgl, setDefNgl] = useState<number>(99)
   const [defImageMax, setDefImageMax] = useState<number>(0)
+  const [defMaxTokens, setDefMaxTokens] = useState<number>(0)
   const [telemetry, setTelemetry] = useState<TelemetryLevel>('off')
   const [lanBind, setLanBind] = useState(false)
   const [requireApiKey, setRequireApiKey] = useState(true)
@@ -121,6 +122,7 @@ export function SettingsScreen() {
       setDefCtx(settings.modelDefaults?.ctx ?? 8192)
       setDefNgl(settings.modelDefaults?.ngl ?? 99)
       setDefImageMax(settings.modelDefaults?.imageMaxTokens ?? 0)
+      setDefMaxTokens(settings.modelDefaults?.maxTokens ?? 0)
       setTelemetry(settings.telemetryLevel ?? 'off')
       setLanBind(settings.lanBind ?? false)
       setRequireApiKey(settings.requireApiKey ?? true)
@@ -148,6 +150,7 @@ export function SettingsScreen() {
       ctx: Math.max(256, Math.round(defCtx)),
       ngl: clampN(defNgl, 0, 99),
       imageMaxTokens: Math.max(0, Math.round(defImageMax)),
+      maxTokens: Math.max(0, Math.round(defMaxTokens)),
     },
     comfyui: { enabled: comfyEnabled },
   })
@@ -319,6 +322,24 @@ export function SettingsScreen() {
                 step={256}
                 onCommit={setDefImageMax}
                 ariaLabel="Image max tokens"
+                className="w-24 rounded-md border border-border bg-bg px-2 py-1 text-right text-[13px] text-ink outline-none"
+              />
+              <span className="text-[12px] text-muted">tok</span>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between py-2">
+            <div>
+              <div className="text-[14px] font-medium text-ink">Max response tokens</div>
+              <div className="text-[12px] text-muted">Hard cap on tokens generated per reply (0 = unlimited). Also caps Claude Code / API requests.</div>
+            </div>
+            <div className="flex items-center gap-2">
+              <NumberField
+                value={defMaxTokens}
+                min={0}
+                step={256}
+                onCommit={setDefMaxTokens}
+                ariaLabel="Max response tokens"
                 className="w-24 rounded-md border border-border bg-bg px-2 py-1 text-right text-[13px] text-ink outline-none"
               />
               <span className="text-[12px] text-muted">tok</span>

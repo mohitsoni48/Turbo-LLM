@@ -2,6 +2,7 @@
 import type { Context, Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import type { Deps } from '../deps'
+import { clampMaxTokens } from '../config/config'
 import { getSysInfo } from '../sysinfo/sysinfo'
 import type { MessageStats } from './db'
 
@@ -282,6 +283,12 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
         return_progress: true,
         ...merged,
       }
+      // Apply the global "max response tokens" cap (0 = unlimited). Honors a smaller
+      // per-conversation value if one was set, but never lets it exceed the cap.
+      const maxLimit = d.store.snapshot().modelDefaults.maxTokens ?? 0
+      const cappedMax = clampMaxTokens(reqBody.max_tokens as number | undefined, maxLimit)
+      if (cappedMax != null) reqBody.max_tokens = cappedMax
+      else delete reqBody.max_tokens
       // Disable thinking at the engine level when requested: the model answers
       // directly with no reasoning pass. `reasoning_budget: 0` covers llama-server's
       // native reasoning control; `enable_thinking: false` covers Qwen-style chat

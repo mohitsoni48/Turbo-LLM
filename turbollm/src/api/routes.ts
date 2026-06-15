@@ -688,7 +688,7 @@ export function registerApi(app: Hono, d: Deps): void {
       lanBind?: boolean
       requireApiKey?: boolean
       telemetryLevel?: string
-      modelDefaults?: { ctx?: number; ngl?: number; imageMaxTokens?: number }
+      modelDefaults?: { ctx?: number; ngl?: number; imageMaxTokens?: number; maxTokens?: number }
       hfToken?: string
       comfyui?: { enabled?: boolean }
     }>(c)
@@ -732,7 +732,7 @@ export function registerApi(app: Hono, d: Deps): void {
     // Global model defaults (spec 05 §3): validate the supplied fields; missing
     // fields keep their current value (partial patch).
     const md = b.modelDefaults
-    const mdUpdates: { ctx?: number; ngl?: number; imageMaxTokens?: number } = {}
+    const mdUpdates: { ctx?: number; ngl?: number; imageMaxTokens?: number; maxTokens?: number } = {}
     if (md) {
       if (md.ctx !== undefined) {
         const v = Number(md.ctx)
@@ -748,6 +748,11 @@ export function registerApi(app: Hono, d: Deps): void {
         const v = Number(md.imageMaxTokens)
         if (!Number.isFinite(v) || v < 0) return err(c, 400, 'invalid_config_value', 'modelDefaults.imageMaxTokens must be a non-negative number.')
         mdUpdates.imageMaxTokens = Math.floor(v)
+      }
+      if (md.maxTokens !== undefined) {
+        const v = Number(md.maxTokens)
+        if (!Number.isFinite(v) || v < 0) return err(c, 400, 'invalid_config_value', 'modelDefaults.maxTokens must be a non-negative number (0 = unlimited).')
+        mdUpdates.maxTokens = Math.floor(v)
       }
     }
 
