@@ -26,7 +26,7 @@ import type { Deps } from './deps'
 // always reports the published version with no manual bump. Works in dev (this
 // file is src/cli.ts) and in the built package (dist/cli.js); both sit one level
 // below package.json. Falls back if the file can't be read.
-let version = '0.1.0'
+let version = '0.1.1'
 try {
   const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json')
   version = (JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: string }).version ?? version

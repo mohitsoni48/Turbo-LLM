@@ -137,6 +137,14 @@ export class Manager {
     const logPath = join(this.store.dir(), 'logs', `engine-${opts.engine.id}.log`)
     mkdirSync(dirname(logPath), { recursive: true })
     const logStream = createWriteStream(logPath) // truncates
+    // Header so the raw engine log is self-explanatory. `port` is the engine's OWN
+    // loopback port (allocated 8081+), DISTINCT from the TurboLLM app/UI port the
+    // user configures — surfacing it here stops the "it says 8081 even though I
+    // changed the port" confusion, since this log is what the user reads.
+    logStream.write(
+      `[turbollm] starting engine "${opts.engine.name}" on internal port ${port} ` +
+        `(127.0.0.1 only — the engine's own port, NOT the TurboLLM app/UI port).\n`,
+    )
 
     const { cmd, args } = engineCommand(opts, port)
     const child = spawn(cmd, args, { cwd: dirname(cmd), windowsHide: true })
@@ -284,6 +292,20 @@ export class Manager {
 
   private onTerminated(child: ChildProcess, code: number, logStream: NodeJS.WritableStream, errMsg: string | null): void {
     if (this.child !== child) return
+    // Terminal marker so the live engine log can't keep "looking connected" after
+    // the process dies. Without it the last line stays "...server is listening on
+    // <port>" forever, contradicting the Error state shown above it (the reported bug).
+    const cleanStop = this.state === 'stopping' || this.state === 'stopped'
+    try {
+      logStream.write(
+        cleanStop
+          ? `\n[turbollm] engine stopped — the model is no longer loaded.\n`
+          : `\n[turbollm] engine process exited unexpectedly (exit ${code})` +
+              `${errMsg ? ` — ${errMsg}` : ''}. The model did NOT load / is no longer loaded.\n`,
+      )
+    } catch {
+      /* best-effort marker */
+    }
     logStream.end()
     if (this.state === 'stopping' || this.state === 'stopped') {
       this.state = 'stopped'
@@ -371,14 +393,24 @@ function allocPort(): Promise<number> {
   })
 }
 
-async function probeReady(port: number): Promise<boolean> {
+// Readiness means the MODEL is loaded, not merely that the HTTP port is open. For
+// llama-server, /health returns 503 while the model loads and 200 only once it is
+// ready, so we trust it exclusively. /v1/models returns 200 the instant the socket
+// binds (before the weights finish loading), so it is NOT a readiness signal:
+// falling back to it made the engine flip to "running" prematurely and then to
+// "error" when the load actually failed — the contradictory-status bug users hit.
+// We use /v1/models only for engines that genuinely lack /health (e.g. mlx-lm,
+// which 404/501s the route).
+export async function probeReady(port: number): Promise<boolean> {
   const base = `http://127.0.0.1:${port}`
   try {
     const r = await fetch(`${base}/health`, { signal: AbortSignal.timeout(1500) })
     if (r.status === 200) return true
-    if (r.status === 503) return false
+    // 404/501 → this engine has no /health route; fall through to /v1/models below.
+    // 503 (still loading) or any other status → not ready yet, keep polling.
+    if (r.status !== 404 && r.status !== 501) return false
   } catch {
-    /* not up yet */
+    return false // connection refused / not up yet → keep polling
   }
   try {
     const r = await fetch(`${base}/v1/models`, { signal: AbortSignal.timeout(1500) })
