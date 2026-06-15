@@ -110,7 +110,13 @@ export function mapToOpenAI(req: AnthropicRequest): Record<string, unknown> {
     // reprocesses all of it each time, which is the dominant cost on a local model.
     cache_prompt: true,
   }
-  if (req.stream) oai.stream_options = { include_usage: true }
+  if (req.stream) {
+    oai.stream_options = { include_usage: true }
+    // Ask llama-server for prompt-processing progress so the engine card can show a
+    // live prefill % for gateway (Claude Code) traffic, same as in-app chat. These
+    // progress chunks are consumed during translation and never reach the client.
+    oai.return_progress = true
+  }
   if (req.temperature != null) oai.temperature = req.temperature
   if (req.top_p != null) oai.top_p = req.top_p
   if (req.top_k != null) oai.top_k = req.top_k
@@ -209,11 +215,16 @@ type OAIDelta = {
 /** Final usage observed while translating a stream (B4 session stats). */
 export type StreamUsage = { inputTokens: number; outputTokens: number }
 
+/** Live per-request progress published to the engine card while translating a
+ *  gateway stream. Mirrors the manager's LiveGen shape without importing it. */
+export type LiveProgress = { phase: 'prompt' | 'gen'; pct: number; outputTokens: number }
+
 export async function* streamToAnthropic(
   oaiStream: ReadableStream<Uint8Array>,
   modelName: string,
   msgId: string,
   onUsage?: (u: StreamUsage) => void,
+  onLive?: (p: LiveProgress) => void,
 ): AsyncGenerator<SseEvent> {
   let blockIdx = 0
   let inThinking = false
@@ -222,6 +233,7 @@ export async function* streamToAnthropic(
   let stopReason = 'end_turn'
   let outputTokens = 0
   let inputTokens = 0
+  let liveOut = 0 // running generated-token count for the live engine-card row
 
   yield sse('message_start', {
     message: {
@@ -261,6 +273,14 @@ export async function* streamToAnthropic(
           continue
         }
 
+        // Prompt-processing progress (return_progress): drives the live prefill % on
+        // the engine card. Consumed here — never forwarded to the Anthropic client.
+        const pp = chunk.prompt_progress as { processed?: number; total?: number } | undefined
+        if (pp?.total) {
+          onLive?.({ phase: 'prompt', pct: Math.round(((pp.processed ?? 0) / pp.total) * 100), outputTokens: 0 })
+          continue
+        }
+
         const usage = chunk.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined
         if (usage?.completion_tokens) outputTokens = usage.completion_tokens
         if (usage?.prompt_tokens) inputTokens = usage.prompt_tokens
@@ -278,6 +298,7 @@ export async function* streamToAnthropic(
             yield cbStart(blockIdx, { type: 'thinking', thinking: '' })
           }
           yield cbDelta(blockIdx, { type: 'thinking_delta', thinking: delta.reasoning_content })
+          onLive?.({ phase: 'gen', pct: 0, outputTokens: ++liveOut })
         }
 
         // content → text block
@@ -292,6 +313,7 @@ export async function* streamToAnthropic(
             yield cbStart(blockIdx, { type: 'text', text: '' })
           }
           yield cbDelta(blockIdx, { type: 'text_delta', text: delta.content })
+          onLive?.({ phase: 'gen', pct: 0, outputTokens: ++liveOut })
         }
 
         // tool_calls → tool_use blocks

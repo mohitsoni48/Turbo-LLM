@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import type { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import type { Deps } from '../deps'
+import { clampMaxTokens } from '../config/config'
 import { mapToOpenAI, mapFromOpenAI, streamToAnthropic, type AnthropicRequest } from './anthropic'
 
 export function registerGateway(app: Hono, d: Deps): void {
@@ -32,6 +33,9 @@ export function registerGateway(app: Hono, d: Deps): void {
         400,
       )
     }
+    // Enforce the global "max response tokens" cap on external (Claude Code) traffic.
+    const maxLimit = d.store.snapshot().modelDefaults.maxTokens ?? 0
+    req.max_tokens = clampMaxTokens(req.max_tokens, maxLimit) ?? req.max_tokens
 
     d.manager.touch()
     const status = d.manager.status()
@@ -72,11 +76,19 @@ export function registerGateway(app: Hono, d: Deps): void {
       // Record session stats (B4) from the final usage the generator observes.
       // Fail-safe: the callback is only invoked best-effort and swallows nothing
       // that affects the client stream.
-      const gen = streamToAnthropic(res.body, modelName, msgId, (u) => {
-        try {
-          d.manager.recordCompletion({ inputTokens: u.inputTokens, outputTokens: u.outputTokens })
-        } catch { /* swallow — stats are best-effort */ }
-      })
+      const gen = streamToAnthropic(
+        res.body,
+        modelName,
+        msgId,
+        (u) => {
+          try {
+            d.manager.recordCompletion({ inputTokens: u.inputTokens, outputTokens: u.outputTokens })
+          } catch { /* swallow — stats are best-effort */ }
+        },
+        // Live per-request progress for the engine card (prefill % + token count),
+        // so Claude Code traffic shows the same live row as in-app chat.
+        (live) => { try { d.manager.setLiveGen(live) } catch { /* best-effort */ } },
+      )
       // streamSSE flushes each chunk immediately through Node.js's HTTP layer.
       // Raw ReadableStream does not — chunks buffer until the response completes,
       // which makes Claude CLI (and any Anthropic-protocol client) appear "slow".
@@ -163,10 +175,28 @@ export function registerGateway(app: Hono, d: Deps): void {
     const headers = new Headers(c.req.raw.headers)
     headers.delete('host')
 
+    const isChat = c.req.method === 'POST' && url.pathname === '/v1/chat/completions'
+    const maxLimit = d.store.snapshot().modelDefaults.maxTokens ?? 0
+
     const init: RequestInit & { duplex?: 'half' } = { method: c.req.method, headers }
     if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {
-      init.body = c.req.raw.body
-      init.duplex = 'half'
+      // Clamp max_tokens on OpenAI chat completions when a cap is set — this means
+      // buffering + rewriting the body. Otherwise stream the body through untouched.
+      if (isChat && maxLimit > 0) {
+        let parsed: Record<string, unknown> | null = null
+        try { parsed = (await c.req.json()) as Record<string, unknown> } catch { parsed = null }
+        if (parsed) {
+          parsed.max_tokens = clampMaxTokens(parsed.max_tokens as number | undefined, maxLimit)
+          headers.delete('content-length') // re-serialized body has a new length
+          init.body = JSON.stringify(parsed)
+        } else {
+          init.body = c.req.raw.body
+          init.duplex = 'half'
+        }
+      } else {
+        init.body = c.req.raw.body
+        init.duplex = 'half'
+      }
     }
 
     const res = await fetch(upstream, init)
@@ -174,10 +204,14 @@ export function registerGateway(app: Hono, d: Deps): void {
     // Best-effort session-stats recording (B4) for OpenAI chat completions, fully
     // fail-safe and non-intrusive: tee the body so the client still gets the exact
     // upstream stream/bytes unchanged while we sniff usage off the copy.
-    if (res.ok && res.body && c.req.method === 'POST' && url.pathname === '/v1/chat/completions') {
+    if (res.ok && res.body && isChat) {
       try {
         const [a, b] = res.body.tee()
-        void recordOpenAiStreamUsage(d, b)
+        // Mark in-flight + publish live token count to the engine card while the teed
+        // copy drains, paired so the counter can't leak. (OpenAI clients don't get the
+        // prefill % — injecting return_progress would pollute their stream.)
+        d.manager.generationStart()
+        void recordOpenAiStreamUsage(d, b).finally(() => d.manager.generationEnd())
         return new Response(a, { status: res.status, headers: res.headers })
       } catch {
         return new Response(res.body, { status: res.status, headers: res.headers })
@@ -215,6 +249,7 @@ async function recordOpenAiStreamUsage(d: Deps, body: ReadableStream<Uint8Array>
     let completionTokens = 0
     let promptTps = 0
     let genTps = 0
+    let liveOut = 0 // running generated-token count for the live engine-card row
     for (;;) {
       const { done, value } = await reader.read()
       if (done) break
@@ -236,6 +271,11 @@ async function recordOpenAiStreamUsage(d: Deps, body: ReadableStream<Uint8Array>
         if (timings) {
           if (timings.prompt_per_second) promptTps = timings.prompt_per_second
           if (timings.predicted_per_second) genTps = timings.predicted_per_second
+        }
+        // Live token count for the engine card (each content chunk ≈ one token).
+        const delta = (chunk.choices as Array<{ delta?: { content?: string; reasoning_content?: string } }> | undefined)?.[0]?.delta
+        if (delta && (delta.content || delta.reasoning_content)) {
+          try { d.manager.setLiveGen({ phase: 'gen', pct: 0, outputTokens: ++liveOut }) } catch { /* best-effort */ }
         }
       }
     }
