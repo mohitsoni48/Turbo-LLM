@@ -36,6 +36,9 @@
 /turbollm/.preview-config.json
 /turbollm/.preview-config.json.broken-*
 /turbollm/daemon.pid
+# Runtime scan/hash caches (hold the dev box's absolute local model paths)
+/turbollm/models-cache.json
+/turbollm/model-hashes.json
 # Runtime SQLite chat DB (created beside a local config dir during dev)
 /turbollm/*.db
 /turbollm/*.db-shm
