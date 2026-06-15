@@ -102,8 +102,24 @@ export type Status = {
   bench: BenchState
   downloads: { active: number }
   engineProvision?: EngineProvision
+  /** ComfyUI GPU coordination state (null when the feature is off / not wired). */
+  comfyui?: ComfyRuntime | null
   telemetryLevel: string
   uptimeSec: number
+}
+
+/** Live ComfyUI coordination state (GET /api/v1/status). Drives the "paused while
+ *  ComfyUI renders" indicator and the reason a model load was refused. */
+export type ComfyRuntime = {
+  enabled: boolean
+  /** The gate node has been installed (a path is recorded). */
+  installed: boolean
+  /** Holding the GPU for ComfyUI right now (model unloaded, loads blocked). */
+  held: boolean
+  blocked: boolean
+  suspendedModelKey: string | null
+  /** ms since the last acquire/release signal from ComfyUI, or null if none yet. */
+  lastSignalAgoMs: number | null
 }
 
 /** A registered engine (GET /api/v1/engines, config §3 shape). */
@@ -157,6 +173,30 @@ export type EngineLogs = {
   lines: string[]
 }
 
+/** One entry in the engine catalog (ADR-044). Mirrors src/engines/catalog.ts. */
+export type CatalogEngine = {
+  id: string
+  name: string
+  kind: string
+  description: string
+  provision: 'github-release' | 'pip' | 'builtin'
+  homepage: string
+  repo?: string
+  platforms: string[]
+  support: 'stable' | 'experimental'
+  installEndpoint: string
+  comingSoon?: boolean
+  note?: string
+  /** Whether this engine can run on the current OS. */
+  supportedHere: boolean
+  /** For pip engines: whether one of this kind is already registered. */
+  installed?: boolean
+}
+
+export type EngineCatalog = {
+  engines: CatalogEngine[]
+}
+
 /** Error envelope used for every non-2xx response (spec 00 §3). */
 export type ApiErrorEnvelope = {
   error: { code: string; message: string }
@@ -206,6 +246,14 @@ export type ModelEntry = {
   /** Live gen t/s for the currently-loaded model; null unless this model is loaded
    *  and a recent figure exists (best-effort until a full session accumulator lands). */
   liveTps: number | null
+  /** Whether the currently-active engine can load this model's format (ADR-044).
+   *  Drives the model-list filter (GGUF under llama.cpp; safetensors under MLX/vLLM).
+   *  True when no engine is active. */
+  compatibleWithActiveEngine: boolean
+  /** Source HF repo — confirmed from download provenance, or inferred from the
+   *  on-disk layout (<root>/<owner>/<repo>/<file>) for imported files. Null when it
+   *  can't be determined. Lets the library open the model's HF page (card + quants). */
+  sourceRepo?: string | null
   mtime: string
 }
 
@@ -303,6 +351,12 @@ export type HfRepoFile = {
   mmproj: boolean
   sha256?: string
   url: string
+  /** True when this exact repo file was downloaded via TurboLLM and is still on
+   *  disk (matched by sha256 or repo+filename provenance, spec 10 §3). */
+  downloaded?: boolean
+  /** The local model key for this file when downloaded — lets the dialog offer
+   *  "Load" instead of "Download". */
+  localKey?: string | null
 }
 
 export type HfRepoDetail = {
@@ -313,9 +367,10 @@ export type HfRepoDetail = {
   likes: number
   card: string
   files: HfRepoFile[]
-  /** Quant labels already present in the local library — mark matching files
-   *  "Downloaded" (spec 10 §3). */
-  localQuants: string[]
+  /** True while the daemon is still computing content hashes to confirm whether
+   *  size-matching local files are this repo's quants (spec 10 §3). The UI re-polls
+   *  until it clears, then the "Downloaded" badges are final. */
+  verifying?: boolean
 }
 
 export type HfTokenTest = {

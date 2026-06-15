@@ -5,10 +5,13 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ConfigStore, defaultConfigPath, migrateLegacyDataDir } from './config/config'
 import { Manager, type StartOpts } from './engines/manager'
+import { ComfyGuard } from './engines/comfy-guard'
 import { Registry } from './engines/registry'
 import { ProvisionState } from './engines/provision-state'
 import { seedDefaultEngines } from './engines/seed'
+import { engineAcceptsFormat } from './engines/compat'
 import { Scanner } from './models/scanner'
+import { HashStore } from './models/hashes'
 import { resolveProfile, profileToArgs, type LoadProfile } from './models/profile'
 import { getSysInfo } from './sysinfo/sysinfo'
 import { ConversationStore } from './chat/db'
@@ -112,6 +115,7 @@ void seedDefaultEngines(registry, enginesDir, provision).then(() => registry.ens
 const manager = new Manager(store)
 const scanner = new Scanner(store)
 void scanner.rescan() // discover models in the background
+const hashes = new HashStore(store.dir())
 const db = new ConversationStore(store.dir())
 const hf = new HfClient(() => store.snapshot().hf.token, version)
 // A completed download triggers a rescan so the new model shows up in the library.
@@ -119,9 +123,13 @@ const downloads = new DownloadManager(store, () => void scanner.rescan(), () => 
 // Auto-benchmark + auto-tune runner (Differentiator #2, spec 09). Owns the engine
 // exclusively for a run; reuses manager/profile control rather than reimplementing it.
 const bench = new BenchRunner(manager, store, scanner, registry, version)
+// ComfyUI GPU coordinator (push): the installed ComfyUI gate node calls
+// /api/v1/comfyui/acquire|release to unload/reload the model around renders. Event-
+// driven — no polling. No-op until enabled in Settings + the node is installed.
+const comfy = new ComfyGuard(store, manager)
 const startedAt = Date.now()
 // `requestRestart` is attached after the server is created (it must close over it).
-const deps: Deps = { store, registry, manager, scanner, db, provision, hf, downloads, bench, version, startedAt }
+const deps: Deps = { store, registry, manager, scanner, hashes, db, provision, hf, downloads, bench, comfy, version, startedAt }
 const app = createApp(deps)
 
 // ── Resolve listen address ────────────────────────────────────────────────────
@@ -298,6 +306,7 @@ function spawnReplacement(): void {
 deps.requestRestart = () => {
   if (restarting) return
   restarting = true
+  comfy.stop() // don't let a tick reload a model mid-teardown
   let spawned = false
   const finish = () => {
     if (spawned) return
@@ -351,6 +360,9 @@ deps.requestRestart = () => {
 // profile pipeline (same as POST /engine/start); falls back to a legacy devModel.
 void (async () => {
   if (!cfg.autoLoadOnStart) return
+  // Don't fight ComfyUI for the GPU at startup — if it's already rendering, skip the
+  // auto-load (load it manually, or the guard's block lifts, once its queue drains).
+  if (comfy.isBlocked()) return
   const active = registry.active()
   if (!active) return
   await scanner.rescan() // ensure the model list is populated before resolving
@@ -358,8 +370,8 @@ void (async () => {
   const entry = cfg.lastLoaded.modelKey ? scanner.get(cfg.lastLoaded.modelKey) : undefined
 
   let opts: StartOpts | null = null
-  if (entry && !entry.incomplete && !entry.parseError && (active.kind === 'mlx') === (entry.format === 'mlx')) {
-    if (entry.format === 'mlx') {
+  if (entry && !entry.incomplete && !entry.parseError && engineAcceptsFormat(active.kind, entry.format)) {
+    if (entry.format !== 'gguf') {
       opts = {
         engine: active,
         model: { key: entry.key, name: entry.name, quant: entry.quant, ctx: entry.nativeCtx, vision: false },
@@ -394,6 +406,7 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     if (shuttingDown) return
     shuttingDown = true
     console.log('shutting down')
+    comfy.stop()
     void manager.shutdown().finally(() => { db.close(); server.close(() => process.exit(0)) })
     setTimeout(() => process.exit(0), 12_000).unref()
   })

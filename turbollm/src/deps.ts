@@ -1,8 +1,10 @@
 import type { ConfigStore } from './config/config'
 import type { Manager } from './engines/manager'
+import type { ComfyGuard } from './engines/comfy-guard'
 import type { Registry } from './engines/registry'
 import type { ProvisionState } from './engines/provision-state'
 import type { Scanner } from './models/scanner'
+import type { HashStore } from './models/hashes'
 import type { ConversationStore } from './chat/db'
 import type { HfClient } from './hf/hf'
 import type { DownloadManager } from './downloads/downloads'
@@ -13,11 +15,15 @@ export interface Deps {
   registry: Registry
   manager: Manager
   scanner: Scanner
+  hashes: HashStore
   db: ConversationStore
   provision: ProvisionState
   hf: HfClient
   downloads: DownloadManager
   bench: BenchRunner
+  /** ComfyUI GPU coordinator (spec: unload/block while ComfyUI renders, reload after).
+   *  Optional: only wired in the real `serve()` entrypoint (cli.ts); absent under tests. */
+  comfy?: ComfyGuard
   version: string
   startedAt: number
   /** Re-exec the daemon so config changes (port, LAN bind) take effect (spec 08 §2).

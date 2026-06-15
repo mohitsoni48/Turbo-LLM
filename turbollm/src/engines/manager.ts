@@ -7,6 +7,7 @@ import { createServer } from 'node:net'
 import { dirname, join } from 'node:path'
 import type { ConfigStore, Engine } from '../config/config'
 import { mlxServerCommand } from './mlx'
+import { vllmServerCommand } from './vllm'
 
 export type State = 'stopped' | 'starting' | 'running' | 'stopping' | 'error'
 
@@ -183,10 +184,22 @@ export class Manager {
     void gracefulStop(child, this.exited)
   }
 
-  async stopAndWait(): Promise<void> {
+  /** Kill the engine immediately (SIGKILL / taskkill /F) to free VRAM without the
+   *  graceful grace period. The `close` handler still runs and resolves `exited`. */
+  private forceStop(): void {
+    const child = this.child
+    if (!child || (this.state !== 'running' && this.state !== 'starting')) return
+    this.state = 'stopping'
+    forceKill(child)
+  }
+
+  async stopAndWait(opts?: { force?: boolean }): Promise<void> {
     const exited = this.exited
     if (this.state === 'running' || this.state === 'starting') {
-      this.stop()
+      // force: SIGKILL immediately rather than the graceful TERM→8s-then-kill path.
+      // Used by the ComfyUI guard, which needs the VRAM freed NOW before ComfyUI runs.
+      if (opts?.force) this.forceStop()
+      else this.stop()
       await Promise.race([exited, sleep(10_000)])
     } else if (this.state === 'stopping') {
       await Promise.race([exited, sleep(10_000)])
@@ -219,6 +232,13 @@ export class Manager {
 
   target(): string | null {
     return this.state === 'running' ? `http://127.0.0.1:${this.port}` : null
+  }
+
+  /** The StartOpts of the currently loaded (or loading) model, or null when nothing
+   *  is up. Lets an external coordinator (the ComfyUI guard) snapshot what to reload
+   *  after it has unloaded the model to free the GPU. */
+  currentOpts(): StartOpts | null {
+    return (this.state === 'running' || this.state === 'starting') ? this.opts : null
   }
 
   touch(): void {
@@ -325,7 +345,7 @@ export class Manager {
   }
 
   private async readiness(child: ChildProcess, port: number): Promise<void> {
-    const deadline = Date.now() + 120_000
+    const deadline = Date.now() + readinessTimeoutMs(this.opts?.engine.kind ?? 'llama-server')
     for (;;) {
       await sleep(500)
       if (this.child !== child || this.state !== 'starting') return
@@ -341,7 +361,7 @@ export class Manager {
           this.state = 'error'
           this.errInfo = {
             code: 'readiness_timeout',
-            message: 'The model did not become ready within 120 seconds.',
+            message: `The model did not become ready within ${Math.round(readinessTimeoutMs(this.opts?.engine.kind ?? 'llama-server') / 1000)} seconds.`,
             exitCode: -1,
             logTail: readTail(this.logPathStr, 20),
           }
@@ -369,7 +389,20 @@ function engineCommand(opts: StartOpts, port: number): { cmd: string; args: stri
     // llama.cpp LoadProfile flags in opts.extraArgs do not apply and are dropped.
     return mlxServerCommand(opts.engine.binPath, opts.modelPath, port, '127.0.0.1')
   }
+  if (opts.engine.kind === 'vllm') {
+    // vLLM: run the OpenAI server via the provisioned venv python. modelPath is an
+    // HF repo id or a local safetensors dir; llama.cpp LoadProfile flags don't apply.
+    return vllmServerCommand(opts.engine.binPath, opts.modelPath, port, '127.0.0.1')
+  }
   return { cmd: opts.engine.binPath, args: buildArgs(opts, port) }
+}
+
+/** Readiness deadline by engine kind. Python engines cold-start far slower than
+ *  llama.cpp: vLLM loads weights, compiles CUDA graphs, and warms up — routinely
+ *  minutes for a large model — so it gets a longer window before we declare a
+ *  readiness timeout. */
+function readinessTimeoutMs(kind: string): number {
+  return kind === 'vllm' ? 600_000 : 120_000
 }
 
 function buildArgs(opts: StartOpts, port: number): string[] {

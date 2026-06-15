@@ -9,6 +9,7 @@ import type {
   DownloadsList,
   Engine,
   EngineBackends,
+  EngineCatalog,
   EngineLogs,
   EnginesList,
   HfRepoDetail,
@@ -123,6 +124,18 @@ export function installBackend(backend: string): Promise<{ accepted: true; backe
 
 export function installMlx(): Promise<{ accepted: true; engine: 'mlx' }> {
   return request('/api/v1/engines/mlx', { method: 'POST', json: {} })
+}
+
+export function getEngineCatalog(): Promise<EngineCatalog> {
+  return request<EngineCatalog>('/api/v1/engines/catalog')
+}
+
+export function installVllm(): Promise<{ accepted: true; engine: 'vllm' }> {
+  return request('/api/v1/engines/vllm', { method: 'POST', json: {} })
+}
+
+export function installTurboquant(): Promise<{ accepted: true; engine: 'turboquant' }> {
+  return request('/api/v1/engines/turboquant', { method: 'POST', json: {} })
 }
 
 export function cancelBackendDownload(): Promise<{ ok: boolean }> {
@@ -286,6 +299,25 @@ export type ModelDefaults = {
 /** Telemetry consent level (spec 09 §3): off | anonymous benchmarks | + crash. */
 export type TelemetryLevel = 'off' | 'anon' | 'full'
 
+/** ComfyUI GPU coordination (push). When enabled and the gate node is installed in
+ *  ComfyUI, TurboLLM unloads the model + blocks loads while ComfyUI renders, then
+ *  reloads it when the queue drains. `gatePath` is where the node was installed. */
+export type ComfyUiSettings = {
+  enabled: boolean
+  gatePath: string
+}
+
+/** Install the ComfyUI gate node into the given ComfyUI folder (or its custom_nodes
+ *  dir). One-time setup; returns where it was written. */
+export function installComfyGate(path: string): Promise<{ ok: boolean; path: string; base: string; note?: string }> {
+  return request('/api/v1/comfyui/install', { method: 'POST', json: { path } })
+}
+
+/** Remove the installed gate node and forget its path. */
+export function uninstallComfyGate(): Promise<{ ok: boolean }> {
+  return request('/api/v1/comfyui/uninstall', { method: 'POST', json: {} })
+}
+
 export type DaemonSettings = {
   idleTtlMinutes: number
   /** Listen port (spec 08 §2). Takes effect on the next daemon restart. */
@@ -302,14 +334,21 @@ export type DaemonSettings = {
   requireApiKey: boolean
   telemetryLevel: TelemetryLevel
   modelDefaults: ModelDefaults
+  /** ComfyUI GPU coordination settings. */
+  comfyui: ComfyUiSettings
   /** Whether an HF token is stored (spec 10 §4). The token itself is never echoed
    *  back — write it via {@link saveSettings}'s `hfToken` patch field only. */
   hfTokenSet: boolean
 }
 
 /** Settings patch: the persisted {@link DaemonSettings} fields plus a write-only
- *  `hfToken` (spec 10 §4) that sets/clears the stored Hugging Face token. */
-export type DaemonSettingsPatch = Partial<DaemonSettings> & { hfToken?: string }
+ *  `hfToken` (spec 10 §4) that sets/clears the stored Hugging Face token. `comfyui`
+ *  is patchable per-field (only `enabled` is set here; `gatePath` is owned by the
+ *  install endpoints). */
+export type DaemonSettingsPatch = Partial<Omit<DaemonSettings, 'comfyui'>> & {
+  comfyui?: Partial<ComfyUiSettings>
+  hfToken?: string
+}
 
 export function getSettings(): Promise<DaemonSettings> {
   return request<DaemonSettings>('/api/v1/settings')

@@ -65,6 +65,16 @@ export interface LastLoaded {
 export interface HF {
   token: string
 }
+/** ComfyUI GPU-coordination (so the LLM engine and ComfyUI don't fight over VRAM).
+ *  Push-based: a one-time-installed ComfyUI custom node calls TurboLLM the moment a
+ *  render starts (TurboLLM unloads the model + blocks loads) and when the queue drains
+ *  (TurboLLM reloads the model it unloaded). No polling — see {@link ComfyGuard}. */
+export interface ComfyUI {
+  enabled: boolean
+  /** Absolute path to the ComfyUI `custom_nodes` dir the gate node was installed into
+   *  (set by the in-app installer). Empty until installed — lets the UI show state. */
+  gatePath: string
+}
 /** Global model defaults (spec 05 §3): the base LoadProfile values applied when a
  *  model is first seen and has no saved per-model profile. Saved profiles and
  *  per-request overrides still take precedence; these only replace the built-in
@@ -101,6 +111,7 @@ export interface Config {
   hf: HF
   modelDefaults: ModelDefaults
   featuredOverrideUrl: string
+  comfyui: ComfyUI
   devModel?: DevModel
 }
 
@@ -206,6 +217,7 @@ export function defaultConfig(): Config {
     hf: { token: '' },
     modelDefaults: { ctx: 8192, ngl: 99, imageMaxTokens: 0 },
     featuredOverrideUrl: '',
+    comfyui: { enabled: false, gatePath: '' },
   }
 }
 
@@ -351,6 +363,11 @@ function normalize(c: Config): void {
   c.benchResults ??= {}
   c.autoLoadOnStart ??= false
   c.featuredOverrideUrl ??= ''
+  // ComfyUI coordination (absent in pre-comfyui configs → defaults; never throw on an
+  // old file). Reseat only the known fields so the retired url/pollSeconds keys from
+  // the earlier polling design don't linger on disk.
+  const cu = (c.comfyui ?? {}) as Partial<ComfyUI>
+  c.comfyui = { enabled: !!cu.enabled, gatePath: typeof cu.gatePath === 'string' ? cu.gatePath : '' }
   // Telemetry level (spec 09 §3): the UI exposes 'off' | 'anon' | 'full'. Migrate
   // legacy/unknown values safely → 'off' (the conservative, opt-in default).
   c.telemetry.level = normalizeTelemetryLevel(c.telemetry.level)

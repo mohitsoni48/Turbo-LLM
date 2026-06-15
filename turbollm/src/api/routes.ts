@@ -1,8 +1,9 @@
 // Internal API routes (/api/v1/*) per spec 02. Thin handlers over config/engines.
 import type { Context, Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve, sep } from 'node:path'
+import { gateNodeSource } from '../comfyui/gate-template'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { homedir, networkInterfaces } from 'node:os'
 import { ValueError, type ApiKey } from '../config/config'
@@ -16,9 +17,13 @@ import {
   deleteBackend,
   installedBackendServer,
   provisionBackend,
+  provisionForkRelease,
   recommendBackendId,
 } from '../engines/download'
 import { ensureMlxEnv } from '../engines/mlx'
+import { ensureVllmEnv } from '../engines/vllm'
+import { catalogForPlatform, catalogEngine } from '../engines/catalog'
+import { engineAcceptsFormat } from '../engines/compat'
 import { ScannerError, type ModelEntry } from '../models/scanner'
 import { estimateVram, type LoadProfile, profileToArgs, resolveProfile } from '../models/profile'
 import { getSysInfo, primaryVendor } from '../sysinfo/sysinfo'
@@ -71,6 +76,8 @@ export function registerApi(app: Hono, d: Deps): void {
       bench: d.bench.status(),
       downloads: { active: d.downloads.activeCount() },
       engineProvision: d.provision.get(),
+      // ComfyUI GPU coordination: lets the UI explain a paused/unloaded engine.
+      comfyui: d.comfy?.snapshot() ?? null,
       telemetryLevel: d.store.snapshot().telemetry.level,
       uptimeSec: Math.floor((Date.now() - d.startedAt) / 1000),
     })
@@ -192,6 +199,81 @@ export function registerApi(app: Hono, d: Deps): void {
     return c.json({ accepted: true, engine: 'mlx' }, 202)
   })
 
+  // Engine catalog (ADR-044): the hardcoded, browsable list of installable
+  // engines for this platform. The list ships in app code; concrete versions
+  // resolve at install time. Per-entry `installed` is computed from the registry.
+  app.get('/api/v1/engines/catalog', (c) => {
+    const engines = d.registry.list().engines
+    const items = catalogForPlatform().map((e) => {
+      let installed: boolean | undefined
+      if (e.provision === 'pip') {
+        // pip engines (vLLM, MLX) register under their own kind.
+        installed = engines.some((x) => x.kind === e.kind)
+      } else if (e.id === 'turboquant') {
+        // TurboQuant is a llama-server fork (same kind as the default), so detect
+        // it by its install dir, not by kind.
+        installed = engines.some((x) => /[\\/]engines[\\/]turboquant[\\/]/.test(x.binPath))
+      }
+      return { ...e, installed }
+    })
+    return c.json({ engines: items })
+  })
+
+  // Provision the vLLM engine (ADR-044): uv → venv → `uv pip install vllm`, then
+  // register as a kind='vllm' engine. 202 + progress via GET /status engineProvision.
+  // Not platform-blocked (vLLM fails loudly where unsupported); the catalog marks
+  // support level so the UI can warn before the user commits to a multi-GB install.
+  app.post('/api/v1/engines/vllm', (c) => {
+    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    const root = join(d.store.dir(), 'engines')
+    void (async () => {
+      try {
+        d.provision.start('vllm')
+        const rt = await ensureVllmEnv(root, (p) => d.provision.progress(p.phase, p.pct, p.part, p.parts))
+        const eng = d.registry.addVllm(`vLLM (${rt.version})`, rt.python, rt.version)
+        d.registry.activate(eng.id)
+        d.provision.done()
+      } catch (e) {
+        d.provision.fail(`Could not install vLLM: ${e instanceof Error ? e.message : e}`)
+      }
+    })()
+    return c.json({ accepted: true, engine: 'vllm' }, 202)
+  })
+
+  // Provision a catalog fork via GitHub release (ADR-044) — TurboQuant. Downloads
+  // the platform-matching prebuilt llama-server, probes it (it IS llama-server
+  // compatible), and registers it as a kind='llama-server' engine. 202 + progress
+  // via /status. The fork currently ships macOS prebuilts only, so the install is
+  // platform-guarded to where an asset actually exists (matches the OS prefilter).
+  app.post('/api/v1/engines/turboquant', (c) => {
+    const entry = catalogEngine('turboquant')
+    if (!entry?.repo) return err(c, 500, 'internal', 'TurboQuant catalog entry is misconfigured.')
+    if (!entry.platforms.includes(process.platform)) {
+      return err(c, 409, 'unsupported_platform', 'TurboQuant has no prebuilt binary for this operating system yet.')
+    }
+    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    const root = join(d.store.dir(), 'engines')
+    void (async () => {
+      try {
+        d.provision.start('turboquant')
+        const bin = await provisionForkRelease(root, entry.repo!, 'turboquant', (p) =>
+          d.provision.progress(p.phase, p.pct, p.part, p.parts),
+        )
+        let eng = d.registry.list().engines.find((e) => e.binPath === bin)
+        if (!eng) eng = (await d.registry.add('TurboQuant', bin)).engine
+        d.registry.activate(eng.id)
+        d.provision.done()
+      } catch (e) {
+        const msg =
+          e instanceof Error && e.message === 'no_release_asset'
+            ? 'TurboQuant has no prebuilt binary for this operating system in its latest release.'
+            : `Could not install TurboQuant: ${e instanceof Error ? e.message : e}`
+        d.provision.fail(msg)
+      }
+    })()
+    return c.json({ accepted: true, engine: 'turboquant' }, 202)
+  })
+
   app.post('/api/v1/engines', async (c) => {
     const b = await body<{ name?: string; binPath?: string }>(c)
     if (!b.binPath || !b.binPath.trim()) return err(c, 400, 'invalid_config_value', 'binPath is required.')
@@ -307,6 +389,9 @@ export function registerApi(app: Hono, d: Deps): void {
     }>(c)
     const active = d.registry.active()
     if (!active) return err(c, 409, 'no_active_engine', 'Register and select an engine first.')
+    // ComfyUI guard: while ComfyUI is rendering it owns the GPU, so refuse to load a
+    // model (it would thrash/OOM VRAM). The guard reloads automatically once idle.
+    if (d.comfy?.isBlocked()) return err(c, 409, 'comfyui_busy', 'ComfyUI is rendering — model loading is paused until its queue finishes.')
     const cfg = d.store.snapshot()
     const sys = getSysInfo()
 
@@ -320,22 +405,14 @@ export function registerApi(app: Hono, d: Deps): void {
       if (entry.incomplete || entry.parseError) {
         return err(c, 409, 'model_not_loadable', 'This model is incomplete or unreadable.')
       }
-      // Engine/model format must match (spec 03 §2b): MLX engines load MLX models,
-      // llama.cpp engines load GGUF.
-      const engineIsMlx = active.kind === 'mlx'
-      if (engineIsMlx !== (entry.format === 'mlx')) {
-        return err(
-          c,
-          409,
-          'engine_model_mismatch',
-          engineIsMlx
-            ? 'The active engine is MLX — pick an MLX model, or switch to a llama.cpp engine for GGUF.'
-            : 'This is an MLX model — activate the MLX engine to load it.',
-        )
+      // Engine/model format must match (spec 03 §2b/2c): llama.cpp + forks load
+      // GGUF; MLX and vLLM load safetensors model directories.
+      if (!engineAcceptsFormat(active.kind, entry.format)) {
+        return err(c, 409, 'engine_model_mismatch', formatMismatchMessage(active.kind, entry.format))
       }
       let opts: StartOpts
-      if (entry.format === 'mlx') {
-        // MLX: no llama.cpp LoadProfile; the model dir is the launch target.
+      if (entry.format !== 'gguf') {
+        // MLX / vLLM: no llama.cpp LoadProfile; the model dir is the launch target.
         opts = {
           engine: active,
           model: { key: entry.key, name: entry.name, quant: entry.quant, ctx: entry.nativeCtx, vision: false },
@@ -394,6 +471,77 @@ export function registerApi(app: Hono, d: Deps): void {
     return c.json({ ok: true }, 202)
   })
 
+  // ---- ComfyUI GPU gate (push coordination) ----
+  // The installed ComfyUI node calls these. acquire() blocks until VRAM is freed so
+  // ComfyUI can safely start; release() reloads the model. Both are loopback calls
+  // from the local ComfyUI process (lanAuth exempts loopback — no key needed).
+  app.post('/api/v1/comfyui/acquire', async (c) => {
+    if (!d.comfy) return c.json({ ok: true, held: false })
+    await d.comfy.acquire()
+    return c.json({ ok: true, ...d.comfy.snapshot() })
+  })
+
+  app.post('/api/v1/comfyui/release', async (c) => {
+    if (d.comfy) await d.comfy.release()
+    return c.json({ ok: true })
+  })
+
+  // In-app installer (ADR: one-time setup): write the push-gate node into the user's
+  // ComfyUI custom_nodes dir, with TurboLLM's own URL baked in. `path` is the ComfyUI
+  // folder (or its custom_nodes dir). The daemon's actual reachable port comes from the
+  // request URL, so it's correct even when started with --port.
+  app.post('/api/v1/comfyui/install', async (c) => {
+    const b = await body<{ path?: string }>(c)
+    const raw = (b.path ?? '').trim()
+    if (!raw) return err(c, 400, 'invalid_config_value', 'Enter the path to your ComfyUI folder.')
+
+    const root = resolve(raw)
+    if (!existsSync(root) || !statSync(root).isDirectory()) {
+      return err(c, 400, 'invalid_config_value', 'That folder does not exist.')
+    }
+    // Accept either the ComfyUI root (contains custom_nodes) or the custom_nodes dir.
+    let customNodes: string
+    if (basename(root).toLowerCase() === 'custom_nodes') customNodes = root
+    else if (existsSync(join(root, 'custom_nodes'))) customNodes = join(root, 'custom_nodes')
+    else {
+      return err(c, 400, 'invalid_config_value', "No 'custom_nodes' folder here. Point me at your ComfyUI folder or its custom_nodes folder.")
+    }
+
+    // TurboLLM's reachable origin from ComfyUI's perspective: same machine → loopback,
+    // on whatever port this request arrived on (honors a --port override).
+    const reqUrl = new URL(c.req.url)
+    const port = reqUrl.port || (reqUrl.protocol === 'https:' ? '443' : '80')
+    const base = `http://127.0.0.1:${port}`
+
+    const gateDir = join(customNodes, 'turbollm_gate')
+    try {
+      mkdirSync(gateDir, { recursive: true })
+      writeFileSync(join(gateDir, '__init__.py'), gateNodeSource(base))
+    } catch (e) {
+      return err(c, 500, 'fs_write_failed', `Could not write the gate node: ${e instanceof Error ? e.message : e}`)
+    }
+    d.store.update((x) => {
+      x.comfyui.gatePath = gateDir
+    })
+    return c.json({ ok: true, path: gateDir, base, note: 'Restart ComfyUI to activate the gate.' })
+  })
+
+  // Remove the installed gate node and forget its path.
+  app.post('/api/v1/comfyui/uninstall', (c) => {
+    const dir = d.store.snapshot().comfyui.gatePath
+    if (dir && existsSync(dir)) {
+      try {
+        rmSync(dir, { recursive: true, force: true })
+      } catch (e) {
+        return err(c, 500, 'fs_write_failed', `Could not remove the gate node: ${e instanceof Error ? e.message : e}`)
+      }
+    }
+    d.store.update((x) => {
+      x.comfyui.gatePath = ''
+    })
+    return c.json({ ok: true })
+  })
+
   // ---- daemon self-restart (spec 08 §2) ----
   // Re-execs the whole daemon so port / LAN-bind changes take effect. Schedule on a
   // short timeout so this 202 flushes before the listen socket is torn down; the UI
@@ -441,6 +589,8 @@ export function registerApi(app: Hono, d: Deps): void {
     const b = await body<{ modelKey?: string; base?: Partial<LoadProfile> }>(c)
     const key = (b.modelKey ?? '').trim()
     if (!key) return err(c, 400, 'invalid_config_value', 'modelKey is required.')
+    // A sweep loads the model repeatedly — same GPU contention as a normal load.
+    if (d.comfy?.isBlocked()) return err(c, 409, 'comfyui_busy', 'ComfyUI is rendering — benchmarking is paused until its queue finishes.')
     try {
       // `base` is the user's current config (dialog draft): auto-tune fixes its ctx +
       // KV quant and sweeps only offload on top (spec 09 §1, honoring the user's config).
@@ -540,6 +690,7 @@ export function registerApi(app: Hono, d: Deps): void {
       telemetryLevel?: string
       modelDefaults?: { ctx?: number; ngl?: number; imageMaxTokens?: number }
       hfToken?: string
+      comfyui?: { enabled?: boolean }
     }>(c)
 
     const updates: Record<string, unknown> = {}
@@ -600,10 +751,16 @@ export function registerApi(app: Hono, d: Deps): void {
       }
     }
 
+    // ComfyUI coordination: only the master toggle is set here — the gate node's
+    // install path is owned by the /comfyui/install + /uninstall endpoints.
+    const cuUpdates: { enabled?: boolean } = {}
+    if (b.comfyui?.enabled !== undefined) cuUpdates.enabled = !!b.comfyui.enabled
+
     const before = d.store.snapshot().daemon
     d.store.update((cfg) => {
       Object.assign(cfg.daemon, updates)
       Object.assign(cfg.modelDefaults, mdUpdates)
+      Object.assign(cfg.comfyui, cuUpdates)
       if (b.autoLoadOnStart !== undefined) cfg.autoLoadOnStart = !!b.autoLoadOnStart
       if (telemetryLevel !== undefined) cfg.telemetry.level = telemetryLevel
       // HF token (spec 10 §4): write-only. An explicit '' clears it. Never logged.
@@ -707,13 +864,56 @@ export function registerApi(app: Hono, d: Deps): void {
   })
 
   // Repo detail (files + sizes + gated). The id contains a '/', so capture the
-  // wildcard tail. `localQuants` lists the quant labels already present locally so
-  // the UI can mark "Downloaded" without another scan pass.
+  // wildcard tail. Each file is annotated `downloaded` + `localKey` so the SAME
+  // model+quant from a different repo is correctly NOT marked downloaded. Two
+  // signals (spec 10 §3): (1) download provenance for files pulled via TurboLLM
+  // (sha256 exact, or repo+filename); (2) for imported / pre-existing files with no
+  // provenance, a content sha256 match — computed lazily and only for a local file
+  // whose byte size exactly matches a repo file (so we almost never hash). While a
+  // hash is still being computed the response carries `verifying:true` and the UI
+  // re-polls until the badge resolves.
   app.get('/api/v1/hf/models/:owner/:name', async (c) => {
     const repo = `${c.req.param('owner')}/${c.req.param('name')}`
     try {
       const detail = await d.hf.getRepo(repo)
-      return c.json({ ...detail, localQuants: localQuantsFor(d) })
+      const prov = d.downloads.provenance()
+      const models = d.scanner.list().models
+      const bySize = new Map<number, typeof models>()
+      for (const m of models) {
+        const arr = bySize.get(m.sizeBytes) ?? []
+        arr.push(m)
+        bySize.set(m.sizeBytes, arr)
+      }
+
+      let verifying = false
+      const files = detail.files.map((f) => {
+        // 1) Provenance: downloaded via TurboLLM.
+        const pmatch = prov.find(
+          (p) =>
+            (!!p.sha256 && !!f.sha256 && p.sha256 === f.sha256) ||
+            (p.repo === repo && p.filename === f.name),
+        )
+        let local = pmatch ? models.find((m) => m.path === pmatch.dest) : undefined
+
+        // 2) Content hash: imported / pre-existing files with no provenance. Gated
+        //    on exact byte size + single-part to avoid needless hashing and split
+        //    ambiguity. Uncached candidates are hashed in the background.
+        if (!local && f.sha256 && f.parts === 1) {
+          for (const cand of bySize.get(f.sizeBytes) ?? []) {
+            const mt = new Date(cand.mtime).getTime()
+            const h = d.hashes.get(cand.path, cand.sizeBytes, mt)
+            if (h === undefined) {
+              d.hashes.ensure(cand.path, cand.sizeBytes, mt)
+              verifying = true
+            } else if (h === f.sha256) {
+              local = cand
+              break
+            }
+          }
+        }
+        return { ...f, downloaded: !!local, localKey: local?.key ?? null }
+      })
+      return c.json({ ...detail, files, verifying })
     } catch (e) {
       return hfErr(c, e)
     }
@@ -847,10 +1047,55 @@ function overlayModel(e: ModelEntry, d: Deps, lastTpsMap?: Map<string, number>) 
   // Best local benchmark result (spec 09 §2): "N tok/s on your machine". Overlaid
   // from the persisted benchResults so it survives restart (the scanner seeds null).
   const benchTps = snap.benchResults[e.key]?.tps ?? null
-  return { ...e, loaded, hasProfile: e.key in profiles, lastTps, liveTps, benchTps }
+  // Whether the *active* engine can load this model (ADR-044) — drives the model-
+  // list filter so e.g. only GGUFs show under a llama.cpp engine, safetensors under
+  // MLX/vLLM. No active engine → everything is shown (compatible: true).
+  const active = d.registry.active()
+  const compatibleWithActiveEngine = active ? engineAcceptsFormat(active.kind, e.format) : true
+  // Source HF repo: confirmed from download provenance, else inferred from the
+  // on-disk layout (LM Studio / huggingface-cli store models as
+  // <root>/<owner>/<repo>/<file>). Lets the library open the model's HF page —
+  // card + other quants — even for files imported outside TurboLLM. An inferred
+  // guess that's wrong simply 404s when opened; it never marks anything downloaded.
+  const provRepo = d.downloads.provenance().find((p) => p.dest === e.path && p.repo)?.repo
+  const sourceRepo = provRepo ?? inferRepoFromPath(e.path, snap.modelDirs)
+  return { ...e, loaded, hasProfile: e.key in profiles, lastTps, liveTps, benchTps, compatibleWithActiveEngine, sourceRepo }
+}
+
+/** Infer an `owner/repo` HF id from a model file path laid out the way LM Studio /
+ *  huggingface-cli store downloads: `<modelDir>/<owner>/<repo>/<file>.gguf`. Returns
+ *  null when the path doesn't sit at least two folders under a configured model dir,
+ *  or the segments don't look like a valid repo id (best-effort, verified on open). */
+function inferRepoFromPath(filePath: string, modelDirs: string[]): string | null {
+  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '')
+  const fp = norm(filePath)
+  const seg = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+  for (const dir of modelDirs) {
+    const root = norm(dir)
+    if (!fp.toLowerCase().startsWith(root.toLowerCase() + '/')) continue
+    const parts = fp.slice(root.length + 1).split('/')
+    // Need at least owner/repo/file. owner+repo are the first two segments under root.
+    if (parts.length >= 3 && seg.test(parts[0]) && seg.test(parts[1])) {
+      return `${parts[0]}/${parts[1]}`
+    }
+    return null
+  }
+  return null
 }
 
 // ---- helpers ----
+
+/** User-facing message when the active engine can't load a model's format (ADR-044). */
+function formatMismatchMessage(engineKind: string, format: 'gguf' | 'mlx'): string {
+  if (engineKind === 'mlx')
+    return 'The active engine is MLX — pick a safetensors model, or switch to a llama.cpp engine for GGUF.'
+  if (engineKind === 'vllm')
+    return 'The active engine is vLLM — pick a safetensors / HF model, or switch to a llama.cpp engine for GGUF.'
+  // llama.cpp / fork active, model is a safetensors dir.
+  return format === 'mlx'
+    ? 'This is a safetensors model — activate an MLX or vLLM engine to load it.'
+    : 'The active engine can only load GGUF models.'
+}
 
 /** The /modeldirs response: the configured folders plus the EFFECTIVE primary
  *  (spec 01 §3, ADR-035) — the configured primary when it's still a valid dir,
@@ -882,6 +1127,7 @@ function settingsPayload(d: Deps) {
     requireApiKey: cfg.daemon.requireApiKey,
     telemetryLevel,
     modelDefaults: cfg.modelDefaults,
+    comfyui: cfg.comfyui,
     // The HF token is write-only over the wire (spec 10 §4): we never echo it back,
     // only whether one is set, so the UI can show "configured" without leaking it.
     hfTokenSet: cfg.hf.token.length > 0,
@@ -953,17 +1199,10 @@ function localCountFor(d: Deps, repo: string): number {
   return n
 }
 
-/** The set of quant labels present anywhere in the local library (spec 10 §3): the
- *  repo-detail UI marks a file "Downloaded" when its quant is already on disk. */
-function localQuantsFor(d: Deps): string[] {
-  const set = new Set<string>()
-  for (const m of d.scanner.list().models) if (m.quant) set.add(m.quant.toUpperCase())
-  return [...set]
-}
-
 function hfErr(c: Context, e: unknown) {
   if (e instanceof HfError) {
-    const status: Status = e.code === 'hf_unauthorized' ? 401 : e.code === 'hf_gated' ? 403 : 503
+    const status: Status =
+      e.code === 'hf_unauthorized' ? 401 : e.code === 'hf_gated' ? 403 : e.code === 'hf_not_found' ? 404 : 503
     return err(c, status, e.code, e.message)
   }
   return err(c, 500, 'internal', (e as Error).message)

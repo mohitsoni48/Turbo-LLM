@@ -31,11 +31,16 @@ import {
   getStatus,
   startBench,
   getSettings,
+  installComfyGate,
+  uninstallComfyGate,
   hfRepo,
   hfSearch,
   hfTokenTest,
   installBackend,
   installMlx,
+  installVllm,
+  installTurboquant,
+  getEngineCatalog,
   listDownloads,
   listEngines,
   loadModel,
@@ -61,6 +66,7 @@ import type {
   BenchState,
   DownloadsList,
   EngineBackends,
+  EngineCatalog,
   EngineStats,
   EnginesList,
   HfRepoDetail,
@@ -78,6 +84,7 @@ export const queryKeys = {
   status: ['status'] as const,
   engines: ['engines'] as const,
   engineBackends: ['engine-backends'] as const,
+  engineCatalog: ['engine-catalog'] as const,
   models: ['models'] as const,
   modelDirs: ['modeldirs'] as const,
   downloads: ['downloads'] as const,
@@ -155,16 +162,30 @@ export function useEngineBackends(provisioning: boolean): UseQueryResult<EngineB
   })
 }
 
+/** The engine catalog (ADR-044): browsable list of installable engines. Polls
+ *  while a provision is active so the `installed` flag flips when vLLM finishes. */
+export function useEngineCatalog(provisioning: boolean): UseQueryResult<EngineCatalog> {
+  return useQuery({
+    queryKey: queryKeys.engineCatalog,
+    queryFn: getEngineCatalog,
+    refetchInterval: provisioning ? 2000 : false,
+    retry: false,
+  })
+}
+
 export function useBackendInstall() {
   const qc = useQueryClient()
   const invalidate = () => {
     void qc.invalidateQueries({ queryKey: queryKeys.engineBackends })
+    void qc.invalidateQueries({ queryKey: queryKeys.engineCatalog })
     void qc.invalidateQueries({ queryKey: queryKeys.engines })
     void qc.invalidateQueries({ queryKey: queryKeys.status })
   }
   return {
     backend: useMutation({ mutationFn: (backend: string) => installBackend(backend), onSuccess: invalidate }),
     mlx: useMutation({ mutationFn: () => installMlx(), onSuccess: invalidate }),
+    vllm: useMutation({ mutationFn: () => installVllm(), onSuccess: invalidate }),
+    turboquant: useMutation({ mutationFn: () => installTurboquant(), onSuccess: invalidate }),
     cancel: useMutation({ mutationFn: () => cancelBackendDownload(), onSuccess: invalidate }),
     remove: useMutation({ mutationFn: (id: string) => deleteEngineBackend(id), onSuccess: invalidate }),
   }
@@ -298,6 +319,19 @@ export function useSettings() {
   return { query, save }
 }
 
+/** Install / uninstall the ComfyUI push-gate node. Both refresh settings (gatePath)
+ *  and status (live gate state) so the UI reflects the change immediately. */
+export function useComfyGate() {
+  const qc = useQueryClient()
+  const refresh = () => {
+    void qc.invalidateQueries({ queryKey: ['settings'] })
+    void qc.invalidateQueries({ queryKey: queryKeys.status })
+  }
+  const install = useMutation({ mutationFn: (path: string) => installComfyGate(path), onSuccess: refresh })
+  const uninstall = useMutation({ mutationFn: () => uninstallComfyGate(), onSuccess: refresh })
+  return { install, uninstall }
+}
+
 /** Restart the whole daemon (spec 08 §2). The socket drops mid-restart, so the
  *  caller drives a "Restarting…" overlay + /status poll itself. */
 export function useDaemonRestart() {
@@ -385,13 +419,16 @@ export function useHfSearch(q: string): UseQueryResult<HfSearchResult> {
   })
 }
 
-/** Repo detail (files + sizes + gated). Disabled until a repo is selected. */
+/** Repo detail (files + sizes + gated). Disabled until a repo is selected. While
+ *  the daemon is still hashing size-matching local files (`verifying`), re-poll so
+ *  the "Downloaded" badges resolve without a manual refresh. */
 export function useHfRepo(repo: string | null): UseQueryResult<HfRepoDetail> {
   return useQuery({
     queryKey: ['hf-repo', repo],
     queryFn: () => hfRepo(repo as string),
     enabled: !!repo,
     retry: false,
+    refetchInterval: (query) => (query.state.data?.verifying ? 1500 : false),
   })
 }
 

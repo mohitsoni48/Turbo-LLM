@@ -5,6 +5,7 @@ import { ScreenHeader } from '../components/common'
 import { Button } from '../components/ui/button'
 import { useUiStore, type Theme } from '../stores/ui'
 import {
+  useComfyGate,
   useDaemonRestart,
   useHfTokenTest,
   useNetworkInfo,
@@ -103,6 +104,7 @@ export function SettingsScreen() {
   const [telemetry, setTelemetry] = useState<TelemetryLevel>('off')
   const [lanBind, setLanBind] = useState(false)
   const [requireApiKey, setRequireApiKey] = useState(true)
+  const [comfyEnabled, setComfyEnabled] = useState(false)
   // Client-only "enable thinking by default" preference (ADR-042); default ON.
   const [thinkingEnabled, setThinkingEnabled] = useState(() => localStorage.getItem(THINKING_DEFAULT_KEY) !== 'false')
 
@@ -122,6 +124,7 @@ export function SettingsScreen() {
       setTelemetry(settings.telemetryLevel ?? 'off')
       setLanBind(settings.lanBind ?? false)
       setRequireApiKey(settings.requireApiKey ?? true)
+      setComfyEnabled(settings.comfyui?.enabled ?? false)
     }
   }, [settings])
 
@@ -146,6 +149,7 @@ export function SettingsScreen() {
       ngl: clampN(defNgl, 0, 99),
       imageMaxTokens: Math.max(0, Math.round(defImageMax)),
     },
+    comfyui: { enabled: comfyEnabled },
   })
 
   const handleSave = () => {
@@ -181,7 +185,7 @@ export function SettingsScreen() {
   }
 
   return (
-    <div className="mx-auto max-w-2xl px-6 py-6">
+    <div className="w-full px-6 py-6">
       <ScreenHeader title="Settings" description="Configure TurboLLM behavior and appearance." />
 
       {restartOverlay && <RestartOverlay onDismiss={() => setRestartOverlay(false)} />}
@@ -371,6 +375,13 @@ export function SettingsScreen() {
           </label>
         </section>
 
+        {/* ComfyUI GPU coordination */}
+        <ComfyUiSection
+          enabled={comfyEnabled}
+          setEnabled={setComfyEnabled}
+          gatePath={settings?.comfyui?.gatePath ?? ''}
+        />
+
         {/* Network (spec 08 §2) */}
         <NetworkSection lanBind={lanBind} setLanBind={setLanBind} requireApiKey={requireApiKey} setRequireApiKey={setRequireApiKey} port={port} setPort={setPort} />
 
@@ -456,6 +467,139 @@ function ExpertSection() {
             </button>{' '}
             screen.
           </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
+// ── ComfyUI GPU coordination (push) ───────────────────────────────────────────
+// ComfyUI and the LLM engine both want the GPU's VRAM. A one-time-installed ComfyUI
+// node tells TurboLLM the instant a render starts/ends — TurboLLM unloads the model +
+// blocks loads while ComfyUI runs, then reloads it. Event-driven; no polling.
+
+function ComfyUiSection({
+  enabled,
+  setEnabled,
+  gatePath,
+}: {
+  enabled: boolean
+  setEnabled: (v: boolean) => void
+  gatePath: string
+}) {
+  const { data: status } = useStatus()
+  const { install, uninstall } = useComfyGate()
+  const [path, setPath] = useState('')
+  const cu = status?.comfyui
+  const installed = !!gatePath
+  // The custom_nodes dir the node lives in (gatePath is …/custom_nodes/turbollm_gate).
+  const customNodesDir = gatePath.replace(/[\\/]turbollm_gate[\\/]?$/, '')
+
+  const doInstall = (p: string) => {
+    if (!p.trim()) {
+      toast.error('Enter the path to your ComfyUI folder first.')
+      return
+    }
+    install.mutate(p.trim(), {
+      onSuccess: (r) => {
+        toast.success(`Gate installed at ${r.path}. ${r.note ?? ''}`.trim())
+        setPath('')
+      },
+      onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not install the gate node.'),
+    })
+  }
+  const doUninstall = () => {
+    uninstall.mutate(undefined, {
+      onSuccess: () => toast.success('ComfyUI gate removed.'),
+      onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not remove the gate node.'),
+    })
+  }
+
+  // Live one-liner reflecting the daemon's actual gate state (only once enabled).
+  const live = (() => {
+    if (!cu?.enabled) return null
+    if (!cu.installed) return { color: 'var(--muted)', text: 'Install the gate node in ComfyUI to activate this.' }
+    if (cu.held) return { color: 'var(--warn)', text: 'ComfyUI is rendering — the model is unloaded and loads are paused.' }
+    if (cu.lastSignalAgoMs == null) return { color: 'var(--muted)', text: 'Installed. Restart ComfyUI, then run a job to connect.' }
+    return { color: 'var(--ok)', text: `ComfyUI idle — connected (last signal ${Math.round(cu.lastSignalAgoMs / 1000)}s ago).` }
+  })()
+
+  return (
+    <section className="rounded-lg border border-border bg-panel p-4">
+      <h2 className="mb-1 text-[13px] font-semibold uppercase tracking-wide text-faint">ComfyUI</h2>
+      <p className="mb-3 text-[12px] text-muted">
+        Share the GPU with ComfyUI. The instant ComfyUI starts a render, TurboLLM unloads its
+        model and pauses new loads so they don't fight over VRAM — then reloads the model when
+        ComfyUI's queue is empty. This needs a small one-time setup node installed in ComfyUI.
+      </p>
+
+      <label className="flex cursor-pointer items-center justify-between py-2">
+        <div>
+          <div className="text-[14px] font-medium text-ink">Pause for ComfyUI</div>
+          <div className="text-[12px] text-muted">Unload the model and block loads while ComfyUI renders (Save to apply)</div>
+        </div>
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => setEnabled(e.target.checked)}
+          className="h-4 w-4 accent-[var(--accent)]"
+        />
+      </label>
+
+      {enabled && (
+        <div className="mt-2 flex flex-col gap-3 border-t border-border pt-3">
+          <div className="text-[13px] font-medium text-ink">One-time setup</div>
+
+          {installed ? (
+            <>
+              <div className="text-[12px] text-muted">
+                <span className="inline-flex items-center gap-1.5 text-ink">
+                  <Check size={13} style={{ color: 'var(--ok)' }} /> Gate installed
+                </span>
+                <div className="mt-1 break-all font-mono text-[11px] text-faint">{gatePath}</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={() => doInstall(customNodesDir)} disabled={install.isPending}>
+                  {install.isPending ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+                  Reinstall / update
+                </Button>
+                <Button variant="outline" size="sm" onClick={doUninstall} disabled={uninstall.isPending}>
+                  {uninstall.isPending ? <Loader2 size={13} className="animate-spin" /> : <X size={13} />}
+                  Remove
+                </Button>
+              </div>
+              <div className="text-[12px] text-faint">Restart ComfyUI after installing or updating for the gate to take effect.</div>
+            </>
+          ) : (
+            <>
+              <div className="text-[12px] text-muted">
+                Enter your ComfyUI folder (the one containing <span className="font-mono">custom_nodes</span>), or the
+                <span className="font-mono"> custom_nodes</span> folder itself. TurboLLM writes the gate node there, wired to this daemon.
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <input
+                  type="text"
+                  value={path}
+                  onChange={(e) => setPath(e.target.value)}
+                  placeholder="e.g. D:\\ComfyUI_windows_portable\\ComfyUI"
+                  spellCheck={false}
+                  autoComplete="off"
+                  onKeyDown={(e) => { if (e.key === 'Enter') doInstall(path) }}
+                  className="flex-1 rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-[12px] text-ink outline-none"
+                />
+                <Button size="sm" onClick={() => doInstall(path)} disabled={install.isPending || !path.trim()}>
+                  {install.isPending ? <Loader2 size={13} className="animate-spin" /> : 'Install gate'}
+                </Button>
+              </div>
+            </>
+          )}
+
+          {live && (
+            <div className="flex items-center gap-2 border-t border-border pt-3 text-[12px] text-muted">
+              <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: live.color }} />
+              {live.text}
+            </div>
+          )}
         </div>
       )}
     </section>
