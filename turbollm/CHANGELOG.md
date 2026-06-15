@@ -23,7 +23,9 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 ## [Unreleased]
 
-_Targeting **0.2.0** (new features → minor bump)._
+_Nothing yet._
+
+## [0.2.0] - 2026-06-15
 
 ### Added
 - **Share the GPU with ComfyUI** — push-based GPU coordination. A one-time-installed
@@ -32,6 +34,12 @@ _Targeting **0.2.0** (new features → minor bump)._
   the queue drains. Installed from Settings → ComfyUI (no polling; deterministic handoff).
 - **vLLM** and **MLX** engine backends alongside llama.cpp, with one-click install/switch
   and an engine catalog. Model content hashing for provenance/dedup.
+- **Live prefill % + generated-token count on the engine card for gateway traffic** —
+  Claude Code (and any external API client) now shows the same live prompt-processing %
+  and running token count as in-app chat, instead of a quiet card mid-request.
+- **Global max response-token limit** — a "Max response tokens" setting (0 = unlimited)
+  that caps generation for in-app chat and clamps external (Claude Code) requests too,
+  so nothing on the machine can exceed it.
 
 ### Fixed
 - Chat now accepts an **image- or file-only message with no typed text** (the server no
