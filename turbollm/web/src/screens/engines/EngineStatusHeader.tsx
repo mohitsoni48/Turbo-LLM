@@ -105,9 +105,7 @@ export function EngineStatusHeader({
         )}
       </div>
 
-      {live && <LiveGenRow live={live} />}
-
-      {stats && <SessionStatsRow stats={stats} />}
+      {(live || stats) && <LiveStatsBlock live={live} stats={stats} />}
 
       {state === 'error' && error && (
         <div className="mt-3">
@@ -132,39 +130,60 @@ export function EngineStatusHeader({
   )
 }
 
-// ── Live per-request progress (spec 11) ───────────────────────────────────────
+// ── Live + session stats block (F-013) ────────────────────────────────────────
 
-/** Slim live row shown while a completion streams through the engine: a prefill
- *  progress bar during prompt processing, then a pulsing live token count during
- *  generation. Driven by the `/status` poll (1s while a request is in flight). */
-function LiveGenRow({ live }: { live: LiveGeneration }) {
-  if (live.phase === 'prompt') {
-    return (
-      <div className="mt-3 flex items-center gap-2 text-[12px] text-muted">
-        <span className="shrink-0">Processing prompt</span>
-        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-panel-2">
-          <div
-            className="h-full rounded-full transition-[width] duration-300"
-            style={{ width: `${Math.max(0, Math.min(100, live.pct))}%`, background: 'var(--accent)' }}
-          />
-        </div>
-        <span className="shrink-0 tabular-nums">{live.pct}%</span>
-      </div>
-    )
-  }
+/** Combined live-progress + session-stats block. While a request is in flight
+ *  the active live value (prefill bar during `prompt`, pulsing token count
+ *  during `gen`) renders at a visible tier directly above the session totals —
+ *  the two pieces of information are co-located so the user sees live progress
+ *  and context in one glance. Without a live request only the stats row shows.
+ *
+ *  Visibility tiers (raised in F-013):
+ *    live value  → text-[13px] text-ink  (accent color on the active number)
+ *    stats totals → text-[12px] text-muted  (one step above the old faint tier) */
+function LiveStatsBlock({
+  live,
+  stats,
+}: {
+  live: LiveGeneration | null
+  stats: EngineStats | null
+}) {
   return (
-    <div className="mt-3 flex items-center gap-2 text-[12px] text-muted">
-      <span className="tllm-pulse inline-block h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: 'var(--accent)' }} />
-      <span className="tabular-nums">{live.outputTokens.toLocaleString()} tok generated</span>
+    <div className="mt-3 border-t border-border pt-2">
+      {/* Live row — only shown while a request is in flight */}
+      {live && (
+        live.phase === 'prompt' ? (
+          <div className="mb-1.5 flex items-center gap-2 text-[13px] text-ink">
+            <span className="shrink-0">Processing prompt</span>
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-panel-2">
+              <div
+                className="h-full rounded-full transition-[width] duration-300"
+                style={{ width: `${Math.max(0, Math.min(100, live.pct))}%`, background: 'var(--accent)' }}
+              />
+            </div>
+            <span className="shrink-0 tabular-nums font-medium" style={{ color: 'var(--accent)' }}>
+              {live.pct}%
+            </span>
+          </div>
+        ) : (
+          <div className="mb-1.5 flex items-center gap-2 text-[13px] text-ink">
+            <span className="tllm-pulse inline-block h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: 'var(--accent)' }} />
+            <span className="tabular-nums font-medium" style={{ color: 'var(--accent)' }}>
+              {live.outputTokens.toLocaleString()} tok
+            </span>
+            <span className="text-muted">generated</span>
+          </div>
+        )
+      )}
+
+      {/* Session totals — always shown when stats exist */}
+      {stats && <SessionStatsLine stats={stats} />}
     </div>
   )
 }
 
-// ── Live session stats (B4) ───────────────────────────────────────────────────
-
-/** Compact, unobtrusive summary of the current running session. Resets whenever
- *  the engine stops or restarts (the daemon clears its accumulator). */
-function SessionStatsRow({ stats }: { stats: EngineStats }) {
+/** One-liner session summary at the secondary (muted) tier. */
+function SessionStatsLine({ stats }: { stats: EngineStats }) {
   const parts: string[] = []
   parts.push(`${stats.requests} ${stats.requests === 1 ? 'request' : 'requests'}`)
   if (stats.inputTokens > 0 || stats.outputTokens > 0) {
@@ -175,7 +194,7 @@ function SessionStatsRow({ stats }: { stats: EngineStats }) {
   parts.push(fmtDuration(stats.sinceMs))
 
   return (
-    <div className="mt-3 border-t border-border pt-2 text-[11px] text-faint" title="Session totals — reset when the engine stops or restarts">
+    <div className="text-[12px] text-muted" title="Session totals — reset when the engine stops or restarts">
       {parts.join(' · ')}
     </div>
   )
