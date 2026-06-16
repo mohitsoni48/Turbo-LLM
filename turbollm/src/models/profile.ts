@@ -14,6 +14,32 @@ export interface Sampling {
   presencePenalty: number
 }
 
+/** Per-engine multi-GPU split settings (ADR-054). Stored on the per-model profile;
+ *  the knobs are engine-kind-specific, so each field maps to a different launch flag:
+ *
+ *  - llama.cpp / TurboQuant (mapped in {@link profileToArgs}):
+ *      splitMode    → --split-mode {layer,row,none}
+ *      tensorSplit  → --tensor-split a,b,…   (per-GPU proportions; empty = even)
+ *      mainGpu      → --main-gpu N           (-1 = engine default)
+ *  - vLLM (mapped in vllm.ts `vllmServerCommand`):
+ *      tensorParallelSize → --tensor-parallel-size N  (1 = single GPU, vLLM default)
+ *  - MLX: not applicable (Apple unified memory) — fields ignored.
+ *
+ *  The defaults are deliberately no-ops: 'layer' split with an empty tensorSplit and
+ *  mainGpu -1 emit NO new flags, so llama.cpp keeps its built-in even layer-split
+ *  across all visible GPUs, and tensorParallelSize 1 keeps vLLM single-GPU. The config
+ *  only changes behavior when the user deviates. */
+export interface GpuProfile {
+  splitMode: 'layer' | 'row' | 'none'
+  tensorSplit: number[]
+  mainGpu: number
+  tensorParallelSize: number
+}
+
+export function defaultGpu(): GpuProfile {
+  return { splitMode: 'layer', tensorSplit: [], mainGpu: -1, tensorParallelSize: 1 }
+}
+
 export interface LoadProfile {
   ctx: number
   ngl: number
@@ -35,6 +61,8 @@ export interface LoadProfile {
   mtpHeadPath: string
   draftModelPath: string
   sampling: Sampling
+  /** Multi-GPU split settings (ADR-054). See {@link GpuProfile}. */
+  gpu: GpuProfile
   extraArgs: string[]
   /** Provenance of a saved profile (spec 05 §3, 09 §1): 'bench' = written by the
    *  auto-tune runner, 'user' = hand-saved. Absent on heuristic/global defaults. */
@@ -68,10 +96,24 @@ export function defaultSampling(): Sampling {
   return { temp: 0.8, topP: 0.95, topK: 40, minP: 0.05, repeatPenalty: 1.0, presencePenalty: 0.0 }
 }
 
+/** The VRAM budget a profile can use (ADR-054). A layer/row split — and the default —
+ *  spreads the model across ALL detected GPUs, so the honest budget is their summed
+ *  VRAM. 'none' restricts to a single GPU (mainGpu, else GPU 0). Single-GPU boxes are
+ *  unaffected (the sum equals GPU 0). Profiles without a `gpu` field (old saved/bench
+ *  profiles) fall back to the all-GPU sum — matching llama.cpp's default behavior. */
+export function gpuBudgetMb(sys: SysInfo, p?: Pick<LoadProfile, 'gpu'>): number {
+  if (sys.gpus.length === 0) return 0
+  if (p?.gpu?.splitMode === 'none') {
+    const idx = p.gpu.mainGpu >= 0 ? p.gpu.mainGpu : 0
+    return sys.gpus[idx]?.vramMb ?? sys.gpus[0]?.vramMb ?? 0
+  }
+  return sys.gpus.reduce((sum, g) => sum + (g.vramMb || 0), 0)
+}
+
 /** Estimate GPU memory use for a profile (spec 05 §6). Deterministic math — the
  *  only "numbers" we show pre-run; always labeled an estimate (ADR-012). */
 export function estimateVram(p: LoadProfile, m: ModelEntry, sys: SysInfo): VramFit {
-  const totalVramMb = sys.gpus[0]?.vramMb ?? 0
+  const totalVramMb = gpuBudgetMb(sys, p)
   if (totalVramMb === 0) return { estMb: 0, totalVramMb: 0, pct: 0, verdict: 'cpu' }
 
   const sizeMb = m.sizeBytes / 1e6
@@ -123,12 +165,15 @@ export function deriveDefault(m: ModelEntry, sys: SysInfo): LoadProfile {
     mtpHeadPath: '',
     draftModelPath: '',
     sampling: defaultSampling(),
+    gpu: defaultGpu(),
     extraArgs: [],
   }
 
-  // MoE: pick the smallest CPU-offload that fits ~85% of VRAM (spec 05 §3).
+  // MoE: pick the smallest CPU-offload that fits ~85% of VRAM (spec 05 §3). The
+  // budget spans all GPUs the default layer-split uses (ADR-054), so a multi-GPU
+  // box keeps more experts on the GPU(s).
   if (m.moe && hasGpu && m.blockCount > 0) {
-    const budget = (sys.gpus[0].vramMb || 0) * 0.85
+    const budget = gpuBudgetMb(sys, base) * 0.85
     base.nCpuMoe = m.blockCount
     for (let n = 0; n <= m.blockCount; n += 2) {
       if (estimateVram({ ...base, nCpuMoe: n }, m, sys).estMb <= budget) {
@@ -173,6 +218,9 @@ export function resolveProfile(
     ...(saved ?? {}),
     ...(overrides ?? {}),
     sampling: { ...base.sampling, ...(saved?.sampling ?? {}), ...(overrides?.sampling ?? {}) },
+    // gpu is deep-merged like sampling so a partial override (or an old saved profile
+    // missing some fields) keeps the rest of the defaults instead of going undefined.
+    gpu: { ...base.gpu, ...(saved?.gpu ?? {}), ...(overrides?.gpu ?? {}) },
   }
 }
 
@@ -183,6 +231,17 @@ export function profileToArgs(p: LoadProfile, m: ModelEntry, caps: Capabilities,
   const has = (flag: string) => caps.flags.length === 0 || caps.flags.includes(flag)
   const a: string[] = ['-c', String(p.ctx)]
   if (p.ngl > 0) a.push('-ngl', String(p.ngl))
+  // Multi-GPU split (ADR-054). Defaults are no-ops: 'layer' + empty tensorSplit +
+  // mainGpu -1 emit nothing, preserving llama.cpp's built-in even split across GPUs.
+  const g = p.gpu
+  if (g) {
+    if (g.splitMode !== 'layer' && has('--split-mode')) a.push('--split-mode', g.splitMode)
+    // tensor-split sets per-GPU proportions; meaningless for single-GPU 'none'.
+    if (g.splitMode !== 'none' && g.tensorSplit.length > 0 && has('--tensor-split')) {
+      a.push('--tensor-split', g.tensorSplit.join(','))
+    }
+    if (g.mainGpu >= 0 && has('--main-gpu')) a.push('--main-gpu', String(g.mainGpu))
+  }
   // Always pin --parallel: omitting it makes llama-server auto-pick 4 slots,
   // quadrupling KV memory (seen in logs).
   if (has('--parallel')) a.push('--parallel', String(p.parallel))

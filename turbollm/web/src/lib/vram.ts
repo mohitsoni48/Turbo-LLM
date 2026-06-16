@@ -1,9 +1,20 @@
 // Client-side mirror of the daemon's VRAM estimate (spec 05 §6) so the load
 // form can show a live fit as the user drags sliders. Deterministic math — the
 // only number we show pre-run, always labeled an estimate (ADR-012).
-import type { FitVerdict, LoadProfile, ModelEntry } from './types'
+import type { FitVerdict, LoadProfile, ModelEntry, SysGpu } from './types'
 
 const HEAD_DIM = 128
+
+/** Mirror of the daemon's `gpuBudgetMb` (ADR-054): a layer/row split (and the default)
+ *  spans all GPUs; 'none' restricts to one. Single-GPU is unaffected (sum = that GPU). */
+export function gpuBudgetMb(gpus: SysGpu[], gpu?: LoadProfile['gpu']): number {
+  if (!gpus.length) return 0
+  if (gpu?.splitMode === 'none') {
+    const idx = gpu.mainGpu >= 0 ? gpu.mainGpu : 0
+    return gpus[idx]?.vramMb ?? gpus[0]?.vramMb ?? 0
+  }
+  return gpus.reduce((sum, g) => sum + (g.vramMb || 0), 0)
+}
 
 function kvBytesPerElem(t: string): number {
   switch (t) {

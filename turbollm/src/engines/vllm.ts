@@ -78,15 +78,24 @@ export async function probeVllm(python: string): Promise<string> {
  * model directory — vLLM resolves both. We invoke the stable module entrypoint
  * (`vllm.entrypoints.openai.api_server`) rather than the `vllm` console script so
  * the launch path doesn't depend on the venv bin being on PATH.
+ *
+ * `tensorParallelSize` (ADR-054) shards the model across N GPUs via vLLM's
+ * `--tensor-parallel-size`. 1 (or undefined) is vLLM's single-GPU default and emits
+ * no flag, so existing single-GPU launches are unchanged.
  */
-export function vllmServerCommand(python: string, model: string, port: number, host: string): { cmd: string; args: string[] } {
-  return {
-    cmd: python,
-    args: [
-      '-m', 'vllm.entrypoints.openai.api_server',
-      '--model', model,
-      '--host', host,
-      '--port', String(port),
-    ],
-  }
+export function vllmServerCommand(
+  python: string,
+  model: string,
+  port: number,
+  host: string,
+  tensorParallelSize = 1,
+): { cmd: string; args: string[] } {
+  const args = [
+    '-m', 'vllm.entrypoints.openai.api_server',
+    '--model', model,
+    '--host', host,
+    '--port', String(port),
+  ]
+  if (tensorParallelSize > 1) args.push('--tensor-parallel-size', String(tensorParallelSize))
+  return { cmd: python, args }
 }

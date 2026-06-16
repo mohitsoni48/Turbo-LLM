@@ -301,8 +301,25 @@ export type LoadProfile = {
   mtpHeadPath: string
   draftModelPath: string
   sampling: Sampling
+  /** Multi-GPU split settings (ADR-054). Mirrors the daemon's GpuProfile. */
+  gpu: GpuProfile
   extraArgs: string[]
   tunedBy?: string
+}
+
+export type GpuProfile = {
+  /** llama.cpp --split-mode */
+  splitMode: 'layer' | 'row' | 'none'
+  /** llama.cpp --tensor-split per-GPU proportions (empty = even). */
+  tensorSplit: number[]
+  /** llama.cpp --main-gpu (-1 = engine default). */
+  mainGpu: number
+  /** vLLM --tensor-parallel-size (1 = single GPU). */
+  tensorParallelSize: number
+}
+
+export function defaultGpu(): GpuProfile {
+  return { splitMode: 'layer', tensorSplit: [], mainGpu: -1, tensorParallelSize: 1 }
 }
 
 export type FitVerdict = 'fits' | 'tight' | 'overflow' | 'cpu' | 'unknown'
@@ -320,6 +337,8 @@ export type ModelDetail = ModelEntry & {
   profile: LoadProfile
   vramFit: VramFit
   gpu: SysGpu | null
+  /** All detected GPUs (ADR-054) — drives the multi-GPU split controls. */
+  gpus: SysGpu[]
   /** Logical CPU cores — drives the threads slider max + the "Auto" hint. */
   cores: number
 }

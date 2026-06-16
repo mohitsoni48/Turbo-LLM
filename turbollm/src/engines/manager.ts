@@ -30,6 +30,9 @@ export interface StartOpts {
   model: ModelInfo
   modelPath: string
   extraArgs: string[]
+  /** vLLM multi-GPU shard count (ADR-054). Only consumed by the vllm branch of
+   *  {@link engineCommand}; llama.cpp carries its GPU flags in extraArgs instead. */
+  tensorParallelSize?: number
 }
 export interface Status {
   state: State
@@ -408,8 +411,9 @@ function engineCommand(opts: StartOpts, port: number, slotSavePath?: string): { 
   }
   if (opts.engine.kind === 'vllm') {
     // vLLM: run the OpenAI server via the provisioned venv python. modelPath is an
-    // HF repo id or a local safetensors dir; llama.cpp LoadProfile flags don't apply.
-    return vllmServerCommand(opts.engine.binPath, opts.modelPath, port, '127.0.0.1')
+    // HF repo id or a local safetensors dir; llama.cpp LoadProfile flags don't apply,
+    // but the multi-GPU shard count (ADR-054) maps to --tensor-parallel-size.
+    return vllmServerCommand(opts.engine.binPath, opts.modelPath, port, '127.0.0.1', opts.tensorParallelSize)
   }
   return { cmd: opts.engine.binPath, args: buildArgs(opts, port, slotSavePath) }
 }

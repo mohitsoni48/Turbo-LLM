@@ -3,8 +3,9 @@ import { useQueryClient } from '@tanstack/react-query'
 import { ChevronDown, ExternalLink, Gauge, RotateCcw, Save, X, Zap } from 'lucide-react'
 import { ApiError } from '../../lib/api'
 import { useBenchActions, useBenchState, useEngines, useModelActions, useModelDetail, useStatus } from '../../lib/queries'
-import type { LoadProfile } from '../../lib/types'
-import { estimateVram } from '../../lib/vram'
+import type { LoadProfile, SysGpu } from '../../lib/types'
+import { defaultGpu } from '../../lib/types'
+import { estimateVram, gpuBudgetMb } from '../../lib/vram'
 import { Button } from '../../components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../components/ui/dialog'
 import { toast } from '../../components/ui/sonner'
@@ -79,13 +80,16 @@ export function ModelDetailDialog({
 
   const fit = useMemo(() => {
     if (!detail || !draft) return null
-    return estimateVram(draft, detail, detail.gpu?.vramMb ?? 0)
+    // Budget spans all GPUs the chosen split uses (ADR-054), not just GPU 0.
+    return estimateVram(draft, detail, gpuBudgetMb(detail.gpus ?? [], draft.gpu))
   }, [detail, draft])
 
   const set = <K extends keyof LoadProfile>(k: K, v: LoadProfile[K]) =>
     setDraft((d) => (d ? { ...d, [k]: v } : d))
   const setS = <K extends keyof LoadProfile['sampling']>(k: K, v: number) =>
     setDraft((d) => (d ? { ...d, sampling: { ...d.sampling, [k]: v } } : d))
+  const setG = <K extends keyof LoadProfile['gpu']>(k: K, v: LoadProfile['gpu'][K]) =>
+    setDraft((d) => (d ? { ...d, gpu: { ...(d.gpu ?? defaultGpu()), [k]: v } } : d))
 
   const loadError = actions.load.error instanceof ApiError ? actions.load.error.message : null
 
@@ -172,6 +176,22 @@ export function ModelDetailDialog({
                 <Slider label="MoE experts on CPU" hint="Higher = less VRAM, slower. Lower = faster if it fits." value={draft.nCpuMoe} min={0} max={detail.blockCount} step={1} onChange={(v) => set('nCpuMoe', v)} />
               )}
             </Section>
+
+            {/* Multi-GPU split (ADR-054) — only when more than one GPU and a GPU engine. */}
+            {detail.gpus && detail.gpus.length > 1 && (activeEngine?.kind === 'llama-server' || activeEngine?.kind === 'vllm') && (
+              <>
+                <SectionTitle>Multi-GPU · {detail.gpus.length} GPUs</SectionTitle>
+                <Section>
+                  {activeEngine.kind === 'vllm' ? (
+                    <Row label="Tensor parallel size" hint="Shard the model across this many GPUs.">
+                      <NumberInput value={draft.gpu?.tensorParallelSize ?? 1} min={1} max={detail.gpus.length} onChange={(v) => setG('tensorParallelSize', v)} />
+                    </Row>
+                  ) : (
+                    <GpuSplitControls gpus={detail.gpus} gpu={draft.gpu ?? defaultGpu()} setG={setG} />
+                  )}
+                </Section>
+              </>
+            )}
 
             <Section>
               <Row label="Parallel slots">
@@ -489,6 +509,78 @@ function Segmented({ value, options, onChange }: { value: string; options: strin
         </button>
       ))}
     </div>
+  )
+}
+
+/** A GPU label like "GPU 0 · NVIDIA RTX 5070 Ti (16 GB)". */
+function fmtGpu(g: SysGpu, i: number): string {
+  const vram = g.vramMb ? ` (${Math.round(g.vramMb / 1024)} GB)` : ''
+  return `GPU ${i}${g.name ? ` · ${g.name}` : ''}${vram}`
+}
+
+/** Native select over GPU indices; `allowAuto` adds an Auto (-1) option. */
+function GpuPicker({ gpus, value, allowAuto, onChange }: {
+  gpus: SysGpu[]; value: number; allowAuto: boolean; onChange: (i: number) => void
+}) {
+  return (
+    <select
+      value={String(value)}
+      onChange={(e) => onChange(Number(e.target.value))}
+      className="max-w-[260px] rounded-md border border-border bg-bg px-2 py-1 text-[13px] text-ink outline-none"
+    >
+      {allowAuto && <option value="-1">Auto</option>}
+      {gpus.map((g, i) => (
+        <option key={i} value={String(i)}>{fmtGpu(g, i)}</option>
+      ))}
+    </select>
+  )
+}
+
+/** llama.cpp / TurboQuant multi-GPU controls: split mode + main GPU + optional
+ *  per-GPU tensor-split proportions (ADR-054). */
+function GpuSplitControls({ gpus, gpu, setG }: {
+  gpus: SysGpu[]
+  gpu: LoadProfile['gpu']
+  setG: <K extends keyof LoadProfile['gpu']>(k: K, v: LoadProfile['gpu'][K]) => void
+}) {
+  const custom = gpu.tensorSplit.length > 0
+  return (
+    <>
+      <Row label="Split mode" hint="layer = by layers (default) · row = tensor-parallel · none = single GPU.">
+        <Segmented value={gpu.splitMode} options={['layer', 'row', 'none']} onChange={(v) => setG('splitMode', v as LoadProfile['gpu']['splitMode'])} />
+      </Row>
+      {gpu.splitMode === 'none' ? (
+        <Row label="GPU" hint="Which GPU to load the model on.">
+          <GpuPicker gpus={gpus} value={gpu.mainGpu >= 0 ? gpu.mainGpu : 0} allowAuto={false} onChange={(i) => setG('mainGpu', i)} />
+        </Row>
+      ) : (
+        <>
+          <Row label="Main GPU" hint="Holds the KV cache / small tensors. Auto lets the engine choose.">
+            <GpuPicker gpus={gpus} value={gpu.mainGpu} allowAuto onChange={(i) => setG('mainGpu', i)} />
+          </Row>
+          <Toggle
+            label="Custom GPU split"
+            hint="Off = even split across GPUs. On = set each GPU's share."
+            value={custom}
+            onChange={(on) => setG('tensorSplit', on ? gpus.map(() => 1) : [])}
+          />
+          {custom && (
+            <div className="flex flex-col gap-2 pl-1">
+              {gpus.map((g, i) => (
+                <Row key={i} label={fmtGpu(g, i)}>
+                  <NumberInput
+                    value={gpu.tensorSplit[i] ?? 0}
+                    min={0}
+                    max={100}
+                    onChange={(v) => setG('tensorSplit', gpus.map((_, j) => (j === i ? v : gpu.tensorSplit[j] ?? 0)))}
+                  />
+                </Row>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </>
   )
 }
 

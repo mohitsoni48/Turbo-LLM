@@ -413,11 +413,16 @@ export function registerApi(app: Hono, d: Deps): void {
       let opts: StartOpts
       if (entry.format !== 'gguf') {
         // MLX / vLLM: no llama.cpp LoadProfile; the model dir is the launch target.
+        // vLLM still honors the per-model multi-GPU shard count (ADR-054) — read it
+        // straight off any saved profile (GGUF-oriented resolveProfile doesn't apply
+        // to safetensors); MLX ignores it. 1/absent = single GPU.
+        const savedGpu = (cfg.modelProfiles[entry.key] as Partial<LoadProfile> | undefined)?.gpu
         opts = {
           engine: active,
           model: { key: entry.key, name: entry.name, quant: entry.quant, ctx: entry.nativeCtx, vision: false },
           modelPath: entry.path,
           extraArgs: [],
+          tensorParallelSize: savedGpu?.tensorParallelSize,
         }
       } else {
         const saved = cfg.modelProfiles[entry.key] as Partial<LoadProfile> | undefined
@@ -656,7 +661,9 @@ export function registerApi(app: Hono, d: Deps): void {
     const snap = d.store.snapshot()
     const saved = snap.modelProfiles[e.key] as Partial<LoadProfile> | undefined
     const profile = resolveProfile(e, sys, saved, undefined, snap.modelDefaults)
-    return c.json({ ...overlayModel(e, d), profile, vramFit: estimateVram(profile, e, sys), gpu: sys.gpus[0] ?? null, cores: sys.cores })
+    // `gpu` (first GPU) kept for back-compat; `gpus` (full list) drives the multi-GPU
+    // split controls (ADR-054).
+    return c.json({ ...overlayModel(e, d), profile, vramFit: estimateVram(profile, e, sys), gpu: sys.gpus[0] ?? null, gpus: sys.gpus, cores: sys.cores })
   })
 
   app.put('/api/v1/models/:key/profile', async (c) => {
@@ -666,6 +673,23 @@ export function registerApi(app: Hono, d: Deps): void {
     const p = await body<LoadProfile>(c)
     if (!p || typeof p.ctx !== 'number' || p.ctx < 256) {
       return err(c, 400, 'invalid_profile_value', 'ctx must be at least 256.')
+    }
+    // Multi-GPU split settings (ADR-054). Validate only when present so older clients
+    // that omit `gpu` still save cleanly.
+    if (p.gpu) {
+      const g = p.gpu
+      if (!['layer', 'row', 'none'].includes(g.splitMode)) {
+        return err(c, 400, 'invalid_profile_value', 'gpu.splitMode must be layer, row, or none.')
+      }
+      if (!Array.isArray(g.tensorSplit) || g.tensorSplit.some((n) => typeof n !== 'number' || !(n >= 0))) {
+        return err(c, 400, 'invalid_profile_value', 'gpu.tensorSplit must be an array of non-negative numbers.')
+      }
+      if (!Number.isInteger(g.mainGpu) || g.mainGpu < -1) {
+        return err(c, 400, 'invalid_profile_value', 'gpu.mainGpu must be an integer ≥ -1.')
+      }
+      if (!Number.isInteger(g.tensorParallelSize) || g.tensorParallelSize < 1) {
+        return err(c, 400, 'invalid_profile_value', 'gpu.tensorParallelSize must be an integer ≥ 1.')
+      }
     }
     d.store.update((cfg) => {
       cfg.modelProfiles[key] = p as unknown as Record<string, unknown>
