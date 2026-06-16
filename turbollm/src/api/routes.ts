@@ -699,7 +699,7 @@ export function registerApi(app: Hono, d: Deps): void {
       telemetryLevel?: string
       modelDefaults?: { ctx?: number; ngl?: number; imageMaxTokens?: number; maxTokens?: number }
       hfToken?: string
-      comfyui?: { enabled?: boolean; url?: string; reverseGate?: boolean; cachePersist?: boolean }
+      comfyui?: { enabled?: boolean; url?: string; reverseGate?: boolean }
     }>(c)
 
     const updates: Record<string, unknown> = {}
@@ -769,10 +769,13 @@ export function registerApi(app: Hono, d: Deps): void {
     // here — the gate node's install path is owned by the /comfyui/install + /uninstall
     // endpoints. `url` is validated by config.validate() (empty or http(s):// origin);
     // reject a malformed origin here so the client gets a clean 400, not a 500.
-    const cuUpdates: { enabled?: boolean; url?: string; reverseGate?: boolean; cachePersist?: boolean } = {}
+    // KV prompt-cache persistence (F-014, cachePersist) is PARKED (ADR-053): the code is
+    // kept but intentionally not exposed — no Settings toggle and not writable here, so the
+    // product never enables it. It defaults off and is only reachable by hand-editing
+    // config.json. See src/engines/slot-cache.ts.
+    const cuUpdates: { enabled?: boolean; url?: string; reverseGate?: boolean } = {}
     if (b.comfyui?.enabled !== undefined) cuUpdates.enabled = !!b.comfyui.enabled
     if (b.comfyui?.reverseGate !== undefined) cuUpdates.reverseGate = !!b.comfyui.reverseGate
-    if (b.comfyui?.cachePersist !== undefined) cuUpdates.cachePersist = !!b.comfyui.cachePersist
     if (b.comfyui?.url !== undefined) {
       const u = b.comfyui.url.trim()
       if (u && !/^https?:\/\//i.test(u)) {

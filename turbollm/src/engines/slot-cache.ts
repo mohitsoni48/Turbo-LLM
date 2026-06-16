@@ -1,3 +1,12 @@
+// ⚠️ PARKED (ADR-053): this feature is implemented and unit-tested but intentionally NOT
+// exposed in the product — there is no Settings toggle and `comfyui.cachePersist` is not
+// writable via the settings API, so it defaults off and the wiring below is never reached
+// in normal use. It only helps text-only llama.cpp models (vision models 501 on multimodal
+// slot-save, and the user's primary models are all vision), so the value didn't justify a
+// user-facing switch. The code is kept (and still tested) so it can be re-enabled later by
+// restoring the Settings toggle + the `/settings` PATCH write. Reachable today only by
+// hand-editing `comfyui.cachePersist: true` in config.json.
+//
 // KV prompt-cache persistence across a ComfyUI-forced unload/reload (F-014). When the
 // ComfyUI guard force-kills llama-server to free VRAM, it evicts not just the model but
 // the whole KV/prompt cache — so on reload the long stable prefix (an agentic

@@ -108,7 +108,6 @@ export function SettingsScreen() {
   const [comfyEnabled, setComfyEnabled] = useState(false)
   const [comfyUrl, setComfyUrl] = useState('')
   const [comfyReverseGate, setComfyReverseGate] = useState(false)
-  const [comfyCachePersist, setComfyCachePersist] = useState(false)
   // Client-only "enable thinking by default" preference (ADR-042); default ON.
   const [thinkingEnabled, setThinkingEnabled] = useState(() => localStorage.getItem(THINKING_DEFAULT_KEY) !== 'false')
 
@@ -132,7 +131,6 @@ export function SettingsScreen() {
       setComfyEnabled(settings.comfyui?.enabled ?? false)
       setComfyUrl(settings.comfyui?.url ?? '')
       setComfyReverseGate(settings.comfyui?.reverseGate ?? false)
-      setComfyCachePersist(settings.comfyui?.cachePersist ?? false)
     }
   }, [settings])
 
@@ -158,7 +156,7 @@ export function SettingsScreen() {
       imageMaxTokens: Math.max(0, Math.round(defImageMax)),
       maxTokens: Math.max(0, Math.round(defMaxTokens)),
     },
-    comfyui: { enabled: comfyEnabled, url: comfyUrl.trim(), reverseGate: comfyReverseGate, cachePersist: comfyCachePersist },
+    comfyui: { enabled: comfyEnabled, url: comfyUrl.trim(), reverseGate: comfyReverseGate },
   })
 
   const handleSave = () => {
@@ -411,8 +409,6 @@ export function SettingsScreen() {
           setUrl={setComfyUrl}
           reverseGate={comfyReverseGate}
           setReverseGate={setComfyReverseGate}
-          cachePersist={comfyCachePersist}
-          setCachePersist={setComfyCachePersist}
         />
 
         {/* Network (spec 08 §2) */}
@@ -519,8 +515,6 @@ function ComfyUiSection({
   setUrl,
   reverseGate,
   setReverseGate,
-  cachePersist,
-  setCachePersist,
 }: {
   enabled: boolean
   setEnabled: (v: boolean) => void
@@ -529,8 +523,6 @@ function ComfyUiSection({
   setUrl: (v: string) => void
   reverseGate: boolean
   setReverseGate: (v: boolean) => void
-  cachePersist: boolean
-  setCachePersist: (v: boolean) => void
 }) {
   const { data: status } = useStatus()
   const { install, uninstall } = useComfyGate()
@@ -673,28 +665,6 @@ function ComfyUiSection({
                 />
               </div>
             )}
-          </div>
-
-          {/* KV prompt-cache persistence (F-014): the force-unload also evicts the model's
-              prompt cache, so a long prefix gets re-prefilled on reload. When this is on,
-              TurboLLM saves the cache to disk before ComfyUI borrows the GPU and restores it
-              after — turning the re-prefill into a memcpy (llama.cpp text-only). */}
-          <div className="flex flex-col gap-3 border-t border-border pt-3">
-            <label className="flex cursor-pointer items-center justify-between">
-              <div>
-                <div className="text-[13px] font-medium text-ink">Keep prompt cache across ComfyUI swaps</div>
-                <div className="text-[12px] text-muted">
-                  Save the model's prompt cache to disk before ComfyUI borrows the GPU and restore it on
-                  reload, so a long prompt isn't reprocessed (llama.cpp only; uses disk).
-                </div>
-              </div>
-              <input
-                type="checkbox"
-                checked={cachePersist}
-                onChange={(e) => setCachePersist(e.target.checked)}
-                className="h-4 w-4 accent-[var(--accent)]"
-              />
-            </label>
           </div>
 
           {live && (
