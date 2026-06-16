@@ -430,6 +430,10 @@ export function registerApi(app: Hono, d: Deps): void {
         }
       }
       await d.manager.stopAndWait()
+      // Reverse gate (F-011): before we take the GPU, ask ComfyUI to free its VRAM.
+      // No-op unless the reverse gate is enabled and ComfyUI is idle; non-fatal on
+      // failure (loads anyway). Forward direction stays guarded by isBlocked() above.
+      await d.comfy?.freeComfyUIBeforeLoad()
       try {
         await d.manager.start(opts)
       } catch (e) {
@@ -453,6 +457,7 @@ export function registerApi(app: Hono, d: Deps): void {
     if (!modelPath) return err(c, 409, 'no_such_model', 'No model specified. Pick one from the Models screen.')
     const opts: StartOpts = { engine: active, model: deriveModel(modelPath, name, extra), modelPath, extraArgs: extra }
     await d.manager.stopAndWait()
+    await d.comfy?.freeComfyUIBeforeLoad() // reverse gate (F-011) — see note above
     try {
       await d.manager.start(opts)
     } catch (e) {
@@ -591,6 +596,10 @@ export function registerApi(app: Hono, d: Deps): void {
     if (!key) return err(c, 400, 'invalid_config_value', 'modelKey is required.')
     // A sweep loads the model repeatedly — same GPU contention as a normal load.
     if (d.comfy?.isBlocked()) return err(c, 409, 'comfyui_busy', 'ComfyUI is rendering — benchmarking is paused until its queue finishes.')
+    // Reverse gate (F-011): a sweep loads the model repeatedly, so free ComfyUI's VRAM
+    // once before it begins — the sweep then owns the GPU. No-op unless the reverse gate
+    // is enabled and ComfyUI is idle; non-fatal on failure (benchmarks anyway).
+    await d.comfy?.freeComfyUIBeforeLoad()
     try {
       // `base` is the user's current config (dialog draft): auto-tune fixes its ctx +
       // KV quant and sweeps only offload on top (spec 09 §1, honoring the user's config).
@@ -690,7 +699,7 @@ export function registerApi(app: Hono, d: Deps): void {
       telemetryLevel?: string
       modelDefaults?: { ctx?: number; ngl?: number; imageMaxTokens?: number; maxTokens?: number }
       hfToken?: string
-      comfyui?: { enabled?: boolean }
+      comfyui?: { enabled?: boolean; url?: string; reverseGate?: boolean; cachePersist?: boolean }
     }>(c)
 
     const updates: Record<string, unknown> = {}
@@ -756,10 +765,21 @@ export function registerApi(app: Hono, d: Deps): void {
       }
     }
 
-    // ComfyUI coordination: only the master toggle is set here — the gate node's
-    // install path is owned by the /comfyui/install + /uninstall endpoints.
-    const cuUpdates: { enabled?: boolean } = {}
+    // ComfyUI coordination: the master toggle + the reverse-gate fields (F-011) are set
+    // here — the gate node's install path is owned by the /comfyui/install + /uninstall
+    // endpoints. `url` is validated by config.validate() (empty or http(s):// origin);
+    // reject a malformed origin here so the client gets a clean 400, not a 500.
+    const cuUpdates: { enabled?: boolean; url?: string; reverseGate?: boolean; cachePersist?: boolean } = {}
     if (b.comfyui?.enabled !== undefined) cuUpdates.enabled = !!b.comfyui.enabled
+    if (b.comfyui?.reverseGate !== undefined) cuUpdates.reverseGate = !!b.comfyui.reverseGate
+    if (b.comfyui?.cachePersist !== undefined) cuUpdates.cachePersist = !!b.comfyui.cachePersist
+    if (b.comfyui?.url !== undefined) {
+      const u = b.comfyui.url.trim()
+      if (u && !/^https?:\/\//i.test(u)) {
+        return err(c, 400, 'invalid_config_value', 'comfyui.url must be an http(s):// origin (e.g. http://127.0.0.1:8188).')
+      }
+      cuUpdates.url = u
+    }
 
     const before = d.store.snapshot().daemon
     d.store.update((cfg) => {

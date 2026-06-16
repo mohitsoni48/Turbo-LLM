@@ -7,6 +7,7 @@ import { createServer } from 'node:net'
 import { dirname, join } from 'node:path'
 import type { ConfigStore, Engine } from '../config/config'
 import { mlxServerCommand } from './mlx'
+import { slotCacheDir } from './slot-cache'
 import { vllmServerCommand } from './vllm'
 
 export type State = 'stopped' | 'starting' | 'running' | 'stopping' | 'error'
@@ -147,7 +148,22 @@ export class Manager {
         `(127.0.0.1 only — the engine's own port, NOT the TurboLLM app/UI port).\n`,
     )
 
-    const { cmd, args } = engineCommand(opts, port)
+    // KV prompt-cache persistence (F-014): when ComfyUI coordination + the opt-in are on
+    // and this is a llama.cpp engine whose caps allow the flag, point llama-server at the
+    // slot-cache dir via `--slot-save-path`. That arms the slot save/restore endpoints the
+    // ComfyUI guard uses to persist the prompt cache across a forced unload/reload. Not
+    // passed for mlx/vllm (no cross-restart slot persistence). The dir must exist first.
+    const cfg = this.store.snapshot()
+    let slotSavePath: string | undefined
+    if (cfg.comfyui.enabled && cfg.comfyui.cachePersist && opts.engine.kind === 'llama-server') {
+      const flags = opts.engine.capabilities.flags
+      if (flags.length === 0 || flags.includes('--slot-save-path')) {
+        slotSavePath = slotCacheDir(this.store.dir())
+        mkdirSync(slotSavePath, { recursive: true })
+      }
+    }
+
+    const { cmd, args } = engineCommand(opts, port, slotSavePath)
     const child = spawn(cmd, args, { cwd: dirname(cmd), windowsHide: true })
     // end:false — otherwise whichever of stdout/stderr closes first would end the
     // shared log stream and drop the other's output. We close it in onTerminated.
@@ -382,8 +398,9 @@ export class Manager {
 
 // ---- helpers ---------------------------------------------------------------
 
-/** Build the spawn command for an engine, branching on its kind (spec 03 §2b). */
-function engineCommand(opts: StartOpts, port: number): { cmd: string; args: string[] } {
+/** Build the spawn command for an engine, branching on its kind (spec 03 §2b).
+ *  `slotSavePath` (F-014) is appended only for llama.cpp; mlx/vllm don't support it. */
+function engineCommand(opts: StartOpts, port: number, slotSavePath?: string): { cmd: string; args: string[] } {
   if (opts.engine.kind === 'mlx') {
     // MLX: run the mlx-lm OpenAI server via the provisioned venv python. The
     // llama.cpp LoadProfile flags in opts.extraArgs do not apply and are dropped.
@@ -394,7 +411,7 @@ function engineCommand(opts: StartOpts, port: number): { cmd: string; args: stri
     // HF repo id or a local safetensors dir; llama.cpp LoadProfile flags don't apply.
     return vllmServerCommand(opts.engine.binPath, opts.modelPath, port, '127.0.0.1')
   }
-  return { cmd: opts.engine.binPath, args: buildArgs(opts, port) }
+  return { cmd: opts.engine.binPath, args: buildArgs(opts, port, slotSavePath) }
 }
 
 /** Readiness deadline by engine kind. Python engines cold-start far slower than
@@ -405,11 +422,14 @@ function readinessTimeoutMs(kind: string): number {
   return kind === 'vllm' ? 600_000 : 120_000
 }
 
-function buildArgs(opts: StartOpts, port: number): string[] {
+function buildArgs(opts: StartOpts, port: number, slotSavePath?: string): string[] {
   const args = ['-m', opts.modelPath, '--host', '127.0.0.1', '--port', String(port)]
   const flags = opts.engine.capabilities.flags
   if (flags.length === 0 || flags.includes('--metrics')) args.push('--metrics')
   if (flags.includes('--no-webui')) args.push('--no-webui')
+  // KV prompt-cache persistence (F-014): arms the slot save/restore endpoints. The caller
+  // only supplies a path once it has checked the cap (caps.flags allow it) and made the dir.
+  if (slotSavePath) args.push('--slot-save-path', slotSavePath)
   args.push(...opts.extraArgs)
   return args
 }

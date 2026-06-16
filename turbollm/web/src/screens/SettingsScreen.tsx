@@ -106,6 +106,9 @@ export function SettingsScreen() {
   const [lanBind, setLanBind] = useState(false)
   const [requireApiKey, setRequireApiKey] = useState(true)
   const [comfyEnabled, setComfyEnabled] = useState(false)
+  const [comfyUrl, setComfyUrl] = useState('')
+  const [comfyReverseGate, setComfyReverseGate] = useState(false)
+  const [comfyCachePersist, setComfyCachePersist] = useState(false)
   // Client-only "enable thinking by default" preference (ADR-042); default ON.
   const [thinkingEnabled, setThinkingEnabled] = useState(() => localStorage.getItem(THINKING_DEFAULT_KEY) !== 'false')
 
@@ -127,6 +130,9 @@ export function SettingsScreen() {
       setLanBind(settings.lanBind ?? false)
       setRequireApiKey(settings.requireApiKey ?? true)
       setComfyEnabled(settings.comfyui?.enabled ?? false)
+      setComfyUrl(settings.comfyui?.url ?? '')
+      setComfyReverseGate(settings.comfyui?.reverseGate ?? false)
+      setComfyCachePersist(settings.comfyui?.cachePersist ?? false)
     }
   }, [settings])
 
@@ -152,7 +158,7 @@ export function SettingsScreen() {
       imageMaxTokens: Math.max(0, Math.round(defImageMax)),
       maxTokens: Math.max(0, Math.round(defMaxTokens)),
     },
-    comfyui: { enabled: comfyEnabled },
+    comfyui: { enabled: comfyEnabled, url: comfyUrl.trim(), reverseGate: comfyReverseGate, cachePersist: comfyCachePersist },
   })
 
   const handleSave = () => {
@@ -401,6 +407,12 @@ export function SettingsScreen() {
           enabled={comfyEnabled}
           setEnabled={setComfyEnabled}
           gatePath={settings?.comfyui?.gatePath ?? ''}
+          url={comfyUrl}
+          setUrl={setComfyUrl}
+          reverseGate={comfyReverseGate}
+          setReverseGate={setComfyReverseGate}
+          cachePersist={comfyCachePersist}
+          setCachePersist={setComfyCachePersist}
         />
 
         {/* Network (spec 08 §2) */}
@@ -503,10 +515,22 @@ function ComfyUiSection({
   enabled,
   setEnabled,
   gatePath,
+  url,
+  setUrl,
+  reverseGate,
+  setReverseGate,
+  cachePersist,
+  setCachePersist,
 }: {
   enabled: boolean
   setEnabled: (v: boolean) => void
   gatePath: string
+  url: string
+  setUrl: (v: string) => void
+  reverseGate: boolean
+  setReverseGate: (v: boolean) => void
+  cachePersist: boolean
+  setCachePersist: (v: boolean) => void
 }) {
   const { data: status } = useStatus()
   const { install, uninstall } = useComfyGate()
@@ -614,6 +638,64 @@ function ComfyUiSection({
               </div>
             </>
           )}
+
+          {/* Reverse gate (F-011): the symmetric direction — when TurboLLM loads a model
+              it first asks ComfyUI to drop its VRAM, so whichever app the user is driving
+              wins the GPU. Needs ComfyUI's URL to reach its native /free endpoint. */}
+          <div className="flex flex-col gap-3 border-t border-border pt-3">
+            <label className="flex cursor-pointer items-center justify-between">
+              <div>
+                <div className="text-[13px] font-medium text-ink">Free ComfyUI when TurboLLM loads</div>
+                <div className="text-[12px] text-muted">
+                  Before loading a model, tell ComfyUI to unload its VRAM (Save to apply)
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={reverseGate}
+                onChange={(e) => setReverseGate(e.target.checked)}
+                className="h-4 w-4 accent-[var(--accent)]"
+              />
+            </label>
+            {reverseGate && (
+              <div className="flex flex-col gap-1.5">
+                <div className="text-[12px] text-muted">
+                  ComfyUI's address — TurboLLM calls its <span className="font-mono">/free</span> endpoint here.
+                </div>
+                <input
+                  type="text"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  placeholder="http://127.0.0.1:8188"
+                  spellCheck={false}
+                  autoComplete="off"
+                  className="rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-[12px] text-ink outline-none"
+                />
+              </div>
+            )}
+          </div>
+
+          {/* KV prompt-cache persistence (F-014): the force-unload also evicts the model's
+              prompt cache, so a long prefix gets re-prefilled on reload. When this is on,
+              TurboLLM saves the cache to disk before ComfyUI borrows the GPU and restores it
+              after — turning the re-prefill into a memcpy (llama.cpp text-only). */}
+          <div className="flex flex-col gap-3 border-t border-border pt-3">
+            <label className="flex cursor-pointer items-center justify-between">
+              <div>
+                <div className="text-[13px] font-medium text-ink">Keep prompt cache across ComfyUI swaps</div>
+                <div className="text-[12px] text-muted">
+                  Save the model's prompt cache to disk before ComfyUI borrows the GPU and restore it on
+                  reload, so a long prompt isn't reprocessed (llama.cpp only; uses disk).
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={cachePersist}
+                onChange={(e) => setCachePersist(e.target.checked)}
+                className="h-4 w-4 accent-[var(--accent)]"
+              />
+            </label>
+          </div>
 
           {live && (
             <div className="flex items-center gap-2 border-t border-border pt-3 text-[12px] text-muted">

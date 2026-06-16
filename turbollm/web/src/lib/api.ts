@@ -308,6 +308,16 @@ export type TelemetryLevel = 'off' | 'anon' | 'full'
 export type ComfyUiSettings = {
   enabled: boolean
   gatePath: string
+  /** ComfyUI's HTTP origin (e.g. http://127.0.0.1:8188). Used by the REVERSE gate to
+   *  call ComfyUI's native `POST /free` before TurboLLM loads a model (F-011). */
+  url: string
+  /** Reverse gate (F-011): when TurboLLM is about to load a model, first ask ComfyUI to
+   *  free its VRAM. The symmetric counterpart of the forward pause-for-ComfyUI gate. */
+  reverseGate: boolean
+  /** KV prompt-cache persistence (F-014): save the model's prompt cache to disk before a
+   *  ComfyUI-forced unload and restore it on reload, so a long prefix isn't re-prefilled.
+   *  Opt-in; llama.cpp text-only. */
+  cachePersist: boolean
 }
 
 /** Install the ComfyUI gate node into the given ComfyUI folder (or its custom_nodes

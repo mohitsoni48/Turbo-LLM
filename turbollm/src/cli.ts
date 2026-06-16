@@ -396,7 +396,12 @@ void (async () => {
       extraArgs: cfg.devModel.extraArgs,
     }
   }
-  if (opts) manager.start(opts).catch((e) => console.warn(`auto-load failed: ${e}`))
+  if (opts) {
+    // Reverse gate (F-011): ask ComfyUI to free its VRAM before we auto-load on start,
+    // same as the HTTP/bench load paths. No-op unless enabled + ComfyUI idle; non-fatal.
+    await comfy.freeComfyUIBeforeLoad()
+    manager.start(opts).catch((e) => console.warn(`auto-load failed: ${e}`))
+  }
 })()
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────

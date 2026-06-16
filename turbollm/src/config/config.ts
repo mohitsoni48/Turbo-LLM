@@ -74,6 +74,18 @@ export interface ComfyUI {
   /** Absolute path to the ComfyUI `custom_nodes` dir the gate node was installed into
    *  (set by the in-app installer). Empty until installed — lets the UI show state. */
   gatePath: string
+  /** ComfyUI's HTTP origin (e.g. `http://127.0.0.1:8188`). Used by the REVERSE gate to
+   *  call ComfyUI's native `POST /free` so it drops its VRAM before TurboLLM loads a
+   *  model. Empty disables the reverse direction (we can't reach ComfyUI). */
+  url: string
+  /** Reverse gate (F-011): when TurboLLM is about to load a model, first ask ComfyUI to
+   *  free its VRAM. The symmetric counterpart of the forward (acquire/release) gate —
+   *  whoever the user is actively driving wins the GPU. Off by default. */
+  reverseGate: boolean
+  /** Persist the llama-server KV prompt cache to disk before a ComfyUI-forced unload and
+   *  restore it on reload, so a long prefix isn't re-prefilled. Opt-in; llama.cpp
+   *  text-only. See slot-cache.ts. */
+  cachePersist: boolean
 }
 /** Global model defaults (spec 05 §3): the base LoadProfile values applied when a
  *  model is first seen and has no saved per-model profile. Saved profiles and
@@ -221,7 +233,7 @@ export function defaultConfig(): Config {
     hf: { token: '' },
     modelDefaults: { ctx: 8192, ngl: 99, imageMaxTokens: 0, maxTokens: 0 },
     featuredOverrideUrl: '',
-    comfyui: { enabled: false, gatePath: '' },
+    comfyui: { enabled: false, gatePath: '', url: '', reverseGate: false, cachePersist: false },
   }
 }
 
@@ -371,7 +383,17 @@ function normalize(c: Config): void {
   // old file). Reseat only the known fields so the retired url/pollSeconds keys from
   // the earlier polling design don't linger on disk.
   const cu = (c.comfyui ?? {}) as Partial<ComfyUI>
-  c.comfyui = { enabled: !!cu.enabled, gatePath: typeof cu.gatePath === 'string' ? cu.gatePath : '' }
+  c.comfyui = {
+    enabled: !!cu.enabled,
+    gatePath: typeof cu.gatePath === 'string' ? cu.gatePath : '',
+    // Reverse gate (F-011): ComfyUI origin + opt-in toggle. Absent in pre-F-011 configs
+    // → '' / false. Reseated here (like the other known fields) so they aren't dropped.
+    url: typeof cu.url === 'string' ? cu.url : '',
+    reverseGate: !!cu.reverseGate,
+    // KV prompt-cache persistence (F-014): opt-in. Absent in pre-F-014 configs → false.
+    // Reseated like the other known fields so it isn't dropped on every load.
+    cachePersist: !!cu.cachePersist,
+  }
   // Telemetry level (spec 09 §3): the UI exposes 'off' | 'anon' | 'full'. Migrate
   // legacy/unknown values safely → 'off' (the conservative, opt-in default).
   c.telemetry.level = normalizeTelemetryLevel(c.telemetry.level)
@@ -411,6 +433,11 @@ function validate(c: Config): void {
   }
   if (c.activeEngineId && !c.engines.some((e) => e.id === c.activeEngineId)) {
     throw new ValueError('activeEngineId', 'unknown engine id')
+  }
+  // ComfyUI reverse-gate origin (F-011): empty is allowed (reverse gate just stays off);
+  // if set, it must be an http(s):// origin so the `POST {url}/free` call is well-formed.
+  if (c.comfyui.url && !/^https?:\/\//i.test(c.comfyui.url)) {
+    throw new ValueError('comfyui.url', 'must be an http(s):// origin (e.g. http://127.0.0.1:8188)')
   }
 }
 
