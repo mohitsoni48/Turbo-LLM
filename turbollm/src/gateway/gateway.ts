@@ -10,14 +10,8 @@ export function registerGateway(app: Hono, d: Deps): void {
   // ── POST /v1/messages — Anthropic translation (spec 06 §2) ───────────────
 
   app.post('/v1/messages', async (c) => {
-    const target = d.manager.target()
-    if (!target) {
-      return c.json(
-        { type: 'error', error: { type: 'api_error', message: 'No model loaded. Load one in TurboLLM.' } },
-        503,
-      )
-    }
-
+    // Parse body first — needed to extract model for auto-swap (v0.6.0) and
+    // to validate max_tokens before potentially waiting for a model swap.
     let req: AnthropicRequest
     try {
       req = (await c.req.json()) as AnthropicRequest
@@ -37,7 +31,16 @@ export function registerGateway(app: Hono, d: Deps): void {
     const maxLimit = d.store.snapshot().modelDefaults.maxTokens ?? 0
     req.max_tokens = clampMaxTokens(req.max_tokens, maxLimit) ?? req.max_tokens
 
-    d.manager.touch()
+    // Route to the requested model — may trigger an auto-swap (v0.6.0).
+    const routeResult = await d.modelRouter.route(req.model ?? '')
+    if ('status' in routeResult) {
+      return c.json(
+        { type: 'error', error: { type: 'api_error', message: routeResult.message } },
+        routeResult.status,
+      )
+    }
+    const target = routeResult.target
+
     const status = d.manager.status()
     const modelName = status.state === 'running' ? (status.model?.name ?? req.model ?? 'local') : (req.model ?? 'local')
     const oaiBody = mapToOpenAI(req)
@@ -152,47 +155,45 @@ export function registerGateway(app: Hono, d: Deps): void {
   // ── /v1/* OpenAI pass-through (spec 06 §1) ────────────────────────────────
 
   app.all('/v1/*', async (c) => {
-    const target = d.manager.target()
-    if (!target) {
-      if (c.req.method === 'GET' && c.req.path === '/v1/models') {
+    const url = new URL(c.req.url)
+    const isChat = c.req.method === 'POST' && url.pathname === '/v1/chat/completions'
+
+    // For chat completions: parse the body to extract the model field for
+    // auto-swap routing (v0.6.0) and to apply the max_tokens cap if set.
+    // For all other endpoints: skip body parsing and pass through untouched.
+    let parsedBody: Record<string, unknown> | null = null
+    if (isChat) {
+      try { parsedBody = (await c.req.json()) as Record<string, unknown> } catch { parsedBody = null }
+    }
+
+    const requestedModel = isChat ? ((parsedBody?.model as string | undefined) ?? '') : ''
+    const routeResult = await d.modelRouter.route(requestedModel)
+    if ('status' in routeResult) {
+      if (c.req.method === 'GET' && url.pathname === '/v1/models') {
         return c.json({ object: 'list', data: [] })
       }
       return c.json(
-        {
-          error: {
-            message: 'No model loaded. Load one in TurboLLM.',
-            type: 'model_not_loaded',
-            code: 'model_not_loaded',
-          },
-        },
+        { error: { message: routeResult.message, type: 'model_not_loaded', code: 'model_not_loaded' } },
         503,
       )
     }
-    d.manager.touch()
+    const target = routeResult.target
 
-    const url = new URL(c.req.url)
     const upstream = target + url.pathname + url.search
     const headers = new Headers(c.req.raw.headers)
     headers.delete('host')
 
-    const isChat = c.req.method === 'POST' && url.pathname === '/v1/chat/completions'
     const maxLimit = d.store.snapshot().modelDefaults.maxTokens ?? 0
-
     const init: RequestInit & { duplex?: 'half' } = { method: c.req.method, headers }
+
     if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {
-      // Clamp max_tokens on OpenAI chat completions when a cap is set — this means
-      // buffering + rewriting the body. Otherwise stream the body through untouched.
-      if (isChat && maxLimit > 0) {
-        let parsed: Record<string, unknown> | null = null
-        try { parsed = (await c.req.json()) as Record<string, unknown> } catch { parsed = null }
-        if (parsed) {
-          parsed.max_tokens = clampMaxTokens(parsed.max_tokens as number | undefined, maxLimit)
-          headers.delete('content-length') // re-serialized body has a new length
-          init.body = JSON.stringify(parsed)
-        } else {
-          init.body = c.req.raw.body
-          init.duplex = 'half'
+      if (isChat) {
+        // Body already parsed above for routing. Apply token cap if set.
+        if (parsedBody && maxLimit > 0) {
+          parsedBody.max_tokens = clampMaxTokens(parsedBody.max_tokens as number | undefined, maxLimit)
         }
+        headers.delete('content-length') // re-serialised body has a new length
+        init.body = parsedBody ? JSON.stringify(parsedBody) : ''
       } else {
         init.body = c.req.raw.body
         init.duplex = 'half'

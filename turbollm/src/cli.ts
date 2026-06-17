@@ -18,6 +18,7 @@ import { ConversationStore } from './chat/db'
 import { HfClient } from './hf/hf'
 import { DownloadManager } from './downloads/downloads'
 import { BenchRunner } from './bench/bench'
+import { ModelRouter } from './gateway/model-router'
 import { launchCli } from './cli-launch'
 import { createApp } from './server'
 import type { Deps } from './deps'
@@ -127,9 +128,12 @@ const bench = new BenchRunner(manager, store, scanner, registry, version)
 // /api/v1/comfyui/acquire|release to unload/reload the model around renders. Event-
 // driven — no polling. No-op until enabled in Settings + the node is installed.
 const comfy = new ComfyGuard(store, manager)
+// Gateway intelligence (v0.6.0): auto model-swap router. Resolves the `model`
+// field in /v1/* requests and loads the matching model if not already running.
+const modelRouter = new ModelRouter(store, registry, manager, scanner, comfy)
 const startedAt = Date.now()
 // `requestRestart` is attached after the server is created (it must close over it).
-const deps: Deps = { store, registry, manager, scanner, hashes, db, provision, hf, downloads, bench, comfy, version, startedAt }
+const deps: Deps = { store, registry, manager, scanner, hashes, db, provision, hf, downloads, bench, modelRouter, comfy, version, startedAt }
 const app = createApp(deps)
 
 // ── Resolve listen address ────────────────────────────────────────────────────

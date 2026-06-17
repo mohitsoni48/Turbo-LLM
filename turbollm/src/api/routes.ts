@@ -738,6 +738,7 @@ export function registerApi(app: Hono, d: Deps): void {
       modelDefaults?: { ctx?: number; ngl?: number; imageMaxTokens?: number; maxTokens?: number }
       hfToken?: string
       comfyui?: { enabled?: boolean; url?: string; reverseGate?: boolean }
+      gateway?: { autoSwap?: boolean; keepN?: number }
     }>(c)
 
     const updates: Record<string, unknown> = {}
@@ -822,11 +823,21 @@ export function registerApi(app: Hono, d: Deps): void {
       cuUpdates.url = u
     }
 
+    // Gateway intelligence (v0.6.0): auto-swap toggle + keep-N pool size.
+    const gwUpdates: { autoSwap?: boolean; keepN?: number } = {}
+    if (b.gateway?.autoSwap !== undefined) gwUpdates.autoSwap = !!b.gateway.autoSwap
+    if (b.gateway?.keepN !== undefined) {
+      const v = Number(b.gateway.keepN)
+      if (!Number.isInteger(v) || v < 1 || v > 4) return err(c, 400, 'invalid_config_value', 'gateway.keepN must be 1–4.')
+      gwUpdates.keepN = v
+    }
+
     const before = d.store.snapshot().daemon
     d.store.update((cfg) => {
       Object.assign(cfg.daemon, updates)
       Object.assign(cfg.modelDefaults, mdUpdates)
       Object.assign(cfg.comfyui, cuUpdates)
+      Object.assign(cfg.gateway, gwUpdates)
       if (b.autoLoadOnStart !== undefined) cfg.autoLoadOnStart = !!b.autoLoadOnStart
       if (telemetryLevel !== undefined) cfg.telemetry.level = telemetryLevel
       // HF token (spec 10 §4): write-only. An explicit '' clears it. Never logged.
@@ -1194,6 +1205,7 @@ function settingsPayload(d: Deps) {
     telemetryLevel,
     modelDefaults: cfg.modelDefaults,
     comfyui: cfg.comfyui,
+    gateway: cfg.gateway,
     // The HF token is write-only over the wire (spec 10 §4): we never echo it back,
     // only whether one is set, so the UI can show "configured" without leaking it.
     hfTokenSet: cfg.hf.token.length > 0,

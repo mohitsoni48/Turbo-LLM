@@ -112,6 +112,8 @@ export function SettingsScreen() {
   const [comfyEnabled, setComfyEnabled] = useState(false)
   const [comfyUrl, setComfyUrl] = useState('')
   const [comfyReverseGate, setComfyReverseGate] = useState(false)
+  const [gatewayAutoSwap, setGatewayAutoSwap] = useState(true)
+  const [gatewayKeepN, setGatewayKeepN] = useState(1)
   // Client-only "enable thinking by default" preference (ADR-042); default ON.
   const [thinkingEnabled, setThinkingEnabled] = useState(() => localStorage.getItem(THINKING_DEFAULT_KEY) !== 'false')
 
@@ -135,6 +137,8 @@ export function SettingsScreen() {
       setComfyEnabled(settings.comfyui?.enabled ?? false)
       setComfyUrl(settings.comfyui?.url ?? '')
       setComfyReverseGate(settings.comfyui?.reverseGate ?? false)
+      setGatewayAutoSwap(settings.gateway?.autoSwap ?? true)
+      setGatewayKeepN(settings.gateway?.keepN ?? 1)
     }
   }, [settings])
 
@@ -161,6 +165,7 @@ export function SettingsScreen() {
       maxTokens: Math.max(0, Math.round(defMaxTokens)),
     },
     comfyui: { enabled: comfyEnabled, url: comfyUrl.trim(), reverseGate: comfyReverseGate },
+    gateway: { autoSwap: gatewayAutoSwap, keepN: clampN(gatewayKeepN, 1, 4) },
   })
 
   const handleSave = () => {
@@ -416,6 +421,14 @@ export function SettingsScreen() {
           setUrl={setComfyUrl}
           reverseGate={comfyReverseGate}
           setReverseGate={setComfyReverseGate}
+        />
+
+        {/* Gateway intelligence (v0.6.0) */}
+        <GatewaySection
+          autoSwap={gatewayAutoSwap}
+          setAutoSwap={setGatewayAutoSwap}
+          keepN={gatewayKeepN}
+          setKeepN={setGatewayKeepN}
         />
 
         {/* Network (spec 08 §2) */}
@@ -694,6 +707,58 @@ function ComfyUiSection({
           )}
         </div>
       )}
+    </section>
+  )
+}
+
+// ── Gateway intelligence (v0.6.0): auto model-swap + keep-N pool ─────────────
+
+function GatewaySection({
+  autoSwap,
+  setAutoSwap,
+  keepN,
+  setKeepN,
+}: {
+  autoSwap: boolean
+  setAutoSwap: (v: boolean) => void
+  keepN: number
+  setKeepN: (v: number) => void
+}) {
+  return (
+    <section className="rounded-lg border border-border bg-panel p-4">
+      <h2 className="mb-1 text-[13px] font-semibold uppercase tracking-wide text-faint">Gateway</h2>
+      <p className="mb-3 text-[12px] text-muted">
+        Controls how the OpenAI / Anthropic gateway handles the <code className="font-mono">model</code> field.
+        Auto-swap loads the requested model on demand; keep-N holds multiple models hot simultaneously.
+      </p>
+
+      <label className="flex cursor-pointer items-center justify-between py-2">
+        <div>
+          <div className="text-[14px] font-medium text-ink">Auto model-swap</div>
+          <div className="text-[12px] text-muted">Auto-load the model named in each API request (Save to apply)</div>
+        </div>
+        <input
+          type="checkbox"
+          checked={autoSwap}
+          onChange={(e) => setAutoSwap(e.target.checked)}
+          className="h-4 w-4 accent-[var(--accent)]"
+        />
+      </label>
+
+      <div className="flex items-center justify-between py-2">
+        <div>
+          <div className="text-[14px] font-medium text-ink">Keep-N models loaded</div>
+          <div className="text-[12px] text-muted">Max simultaneous hot models (1 = pure swap, 2–4 = pool with LRU eviction)</div>
+        </div>
+        <NumberField
+          value={keepN}
+          min={1}
+          max={4}
+          onCommit={setKeepN}
+          ariaLabel="Keep-N models"
+          className="w-16 rounded-md border border-border bg-bg px-2 py-1 text-right text-[13px] text-ink outline-none"
+        />
+      </div>
     </section>
   )
 }

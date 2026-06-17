@@ -65,6 +65,17 @@ export interface LastLoaded {
 export interface HF {
   token: string
 }
+/** Gateway intelligence (v0.6.0): auto model-swap + keep-N pool. */
+export interface Gateway {
+  /** When true, gateway requests that include a `model` field auto-load the named
+   *  model if it isn't already running. Default on. */
+  autoSwap: boolean
+  /** Maximum number of models to keep loaded simultaneously. Default 1 = pure
+   *  swap (unload A, load B). Values 2–4 keep multiple models hot in a pool with
+   *  LRU eviction. Capped at 4. */
+  keepN: number
+}
+
 /** ComfyUI GPU-coordination (so the LLM engine and ComfyUI don't fight over VRAM).
  *  Push-based: a one-time-installed ComfyUI custom node calls TurboLLM the moment a
  *  render starts (TurboLLM unloads the model + blocks loads) and when the queue drains
@@ -128,6 +139,7 @@ export interface Config {
   modelDefaults: ModelDefaults
   featuredOverrideUrl: string
   comfyui: ComfyUI
+  gateway: Gateway
   devModel?: DevModel
 }
 
@@ -234,6 +246,7 @@ export function defaultConfig(): Config {
     modelDefaults: { ctx: 8192, ngl: 99, imageMaxTokens: 0, maxTokens: 0 },
     featuredOverrideUrl: '',
     comfyui: { enabled: false, gatePath: '', url: '', reverseGate: false, cachePersist: false },
+    gateway: { autoSwap: true, keepN: 1 },
   }
 }
 
@@ -393,6 +406,12 @@ function normalize(c: Config): void {
     // KV prompt-cache persistence (F-014): opt-in. Absent in pre-F-014 configs → false.
     // Reseated like the other known fields so it isn't dropped on every load.
     cachePersist: !!cu.cachePersist,
+  }
+  // Gateway intelligence (v0.6.0): absent in pre-v0.6.0 configs → defaults; never throw.
+  const gw = (c.gateway ?? {}) as Partial<Gateway>
+  c.gateway = {
+    autoSwap: gw.autoSwap !== false,
+    keepN: typeof gw.keepN === 'number' && gw.keepN >= 1 ? Math.min(Math.floor(gw.keepN), 4) : 1,
   }
   // Telemetry level (spec 09 §3): the UI exposes 'off' | 'anon' | 'full'. Migrate
   // legacy/unknown values safely → 'off' (the conservative, opt-in default).

@@ -1,0 +1,250 @@
+// Gateway intelligence (v0.6.0): auto model-swap and keep-N pool.
+// When a /v1/* request includes a `model` field, the router resolves it against
+// the local model library and loads (or swaps to) that model automatically.
+// Inspired by llama-swap; operates on the existing Manager + Scanner primitives.
+import { Manager, type StartOpts } from '../engines/manager'
+import type { ConfigStore, Engine } from '../config/config'
+import type { Registry } from '../engines/registry'
+import type { Scanner, ModelEntry } from '../models/scanner'
+import type { ComfyGuard } from '../engines/comfy-guard'
+import { resolveProfile, profileToArgs, type LoadProfile } from '../models/profile'
+import { engineAcceptsFormat } from '../engines/compat'
+import { getSysInfo } from '../sysinfo/sysinfo'
+
+export type RouteResult = { target: string } | { status: 503; message: string }
+
+interface PoolSlot {
+  manager: Manager
+  modelKey: string
+  lastUsedMs: number
+}
+
+/** Auto-swap gateway: resolves the `model` field in API requests and loads the
+ *  requested model when it isn't already running. Supports a keep-N pool so
+ *  frequently-used models can stay loaded simultaneously (VRAM permitting). */
+export class ModelRouter {
+  /** Extra pool slots beyond the primary manager. Only populated when keepN > 1. */
+  private extraSlots = new Map<string, PoolSlot>()
+  /** Last-used timestamp for the primary manager slot (for LRU eviction). */
+  private primaryLastUsed = 0
+  /** Promise chain that serialises swap operations so concurrent requests for
+   *  different models queue rather than race. */
+  private swapChain: Promise<void> = Promise.resolve()
+
+  constructor(
+    private store: ConfigStore,
+    private registry: Registry,
+    private manager: Manager,
+    private scanner: Scanner,
+    private comfy: ComfyGuard | undefined,
+  ) {}
+
+  /** Route a request to the correct model target URL.
+   *  - If autoSwap is off: returns whatever the primary manager has loaded.
+   *  - If the requested model is already loaded: returns its target immediately.
+   *  - Otherwise: loads the model (swapping / evicting LRU as needed) and waits. */
+  async route(requestedModel: string): Promise<RouteResult> {
+    const cfg = this.store.snapshot()
+
+    // Auto-swap disabled or no model requested → fall back to current loaded model.
+    if (!cfg.gateway.autoSwap || !requestedModel.trim()) {
+      const t = this.manager.target()
+      return t ? { target: t } : { status: 503, message: 'No model loaded. Load one in TurboLLM.' }
+    }
+
+    const entry = this.resolveEntry(requestedModel)
+    if (!entry) {
+      // Unknown model — fall back gracefully so unrecognised aliases don't break clients.
+      const t = this.manager.target()
+      return t
+        ? { target: t }
+        : { status: 503, message: `No model matching '${requestedModel}' found. Add one in TurboLLM.` }
+    }
+
+    // Fast path: correct model already running in the primary manager.
+    {
+      const ms = this.manager.status()
+      if (ms.state === 'running' && ms.model && this.keysMatch(ms.model.key, entry)) {
+        this.primaryLastUsed = Date.now()
+        this.manager.touch()
+        return { target: this.manager.target()! }
+      }
+    }
+
+    // Fast path: already running in a pool slot.
+    const slot = this.extraSlots.get(entry.key)
+    if (slot) {
+      const ss = slot.manager.status()
+      if (ss.state === 'running') {
+        slot.lastUsedMs = Date.now()
+        slot.manager.touch()
+        return { target: slot.manager.target()! }
+      }
+      this.extraSlots.delete(entry.key) // dead slot — clean up
+    }
+
+    // Need to load / swap. Serialise so concurrent requests for different models
+    // queue rather than racing to start/stop the same engine simultaneously.
+    let unlock!: () => void
+    const prev = this.swapChain
+    this.swapChain = new Promise<void>(r => { unlock = r })
+    try {
+      await prev
+      return await this.doLoad(entry)
+    } finally {
+      unlock()
+    }
+  }
+
+  // ── internal ──────────────────────────────────────────────────────────────
+
+  private async doLoad(entry: ModelEntry): Promise<RouteResult> {
+    // Re-check after acquiring the lock — another queued request may have already
+    // loaded this model while we were waiting.
+    {
+      const ms = this.manager.status()
+      if (ms.state === 'running' && ms.model && this.keysMatch(ms.model.key, entry)) {
+        this.primaryLastUsed = Date.now()
+        this.manager.touch()
+        return { target: this.manager.target()! }
+      }
+      const slot = this.extraSlots.get(entry.key)
+      if (slot && slot.manager.status().state === 'running') {
+        slot.lastUsedMs = Date.now()
+        slot.manager.touch()
+        return { target: slot.manager.target()! }
+      }
+    }
+
+    if (this.comfy?.isBlocked()) {
+      return { status: 503, message: 'ComfyUI is rendering — model swap paused until its queue finishes.' }
+    }
+
+    const active = this.registry.active()
+    if (!active) return { status: 503, message: 'No active engine. Set one up in TurboLLM.' }
+    if (!engineAcceptsFormat(active.kind, entry.format)) {
+      return { status: 503, message: `Active engine cannot load model format '${entry.format}'.` }
+    }
+
+    const opts = this.buildOpts(entry, active)
+    if (!opts) return { status: 503, message: 'Model is incomplete or unreadable.' }
+
+    const keepN = Math.max(1, this.store.snapshot().gateway.keepN)
+    const targetManager = this.loadedCount() < keepN
+      ? (this.manager.status().state === 'stopped' || this.manager.status().state === 'error'
+          ? this.manager
+          : new Manager(this.store))
+      : this.evictLru()
+
+    await targetManager.stopAndWait()
+    await this.comfy?.freeComfyUIBeforeLoad()
+
+    try {
+      await targetManager.start(opts)
+    } catch (e) {
+      return { status: 503, message: `Engine start failed: ${(e as Error).message}` }
+    }
+
+    const ready = await this.waitReady(targetManager, active.kind)
+    if (!ready) {
+      const s = targetManager.status()
+      return { status: 503, message: s.err?.message ?? 'Model failed to become ready.' }
+    }
+
+    const target = targetManager.target()
+    if (!target) return { status: 503, message: 'Model loaded but target URL unavailable.' }
+
+    if (targetManager === this.manager) {
+      this.primaryLastUsed = Date.now()
+    } else {
+      this.extraSlots.set(entry.key, { manager: targetManager, modelKey: entry.key, lastUsedMs: Date.now() })
+    }
+
+    this.store.update(x => { x.lastLoaded = { modelKey: entry.key, engineId: active.id } })
+    return { target }
+  }
+
+  private loadedCount(): number {
+    const states = ['running', 'starting'] as const
+    const primaryUp = (states as readonly string[]).includes(this.manager.status().state)
+    const extraUp = [...this.extraSlots.values()].filter(
+      s => (states as readonly string[]).includes(s.manager.status().state),
+    ).length
+    return (primaryUp ? 1 : 0) + extraUp
+  }
+
+  private evictLru(): Manager {
+    const ms = this.manager.status()
+    const primaryAlive = ms.state === 'running' || ms.state === 'starting'
+    let lruManager: Manager = this.manager
+    let lruTime = primaryAlive ? this.primaryLastUsed : Infinity
+    let lruKey: string | null = null
+    for (const slot of this.extraSlots.values()) {
+      const st = slot.manager.status().state
+      if ((st === 'running' || st === 'starting') && slot.lastUsedMs < lruTime) {
+        lruTime = slot.lastUsedMs
+        lruManager = slot.manager
+        lruKey = slot.modelKey
+      }
+    }
+    if (lruKey !== null) this.extraSlots.delete(lruKey)
+    return lruManager
+  }
+
+  private resolveEntry(requested: string): ModelEntry | undefined {
+    const models = this.scanner.list().models
+    // Exact key, then exact name, then case-insensitive name, then partial name.
+    return (
+      models.find(e => e.key === requested) ??
+      models.find(e => e.name === requested) ??
+      models.find(e => e.name.toLowerCase() === requested.toLowerCase()) ??
+      models.find(e => e.name.toLowerCase().includes(requested.toLowerCase()))
+    )
+  }
+
+  private keysMatch(loadedKey: string, entry: ModelEntry): boolean {
+    return loadedKey === entry.key || loadedKey === entry.path
+  }
+
+  private buildOpts(entry: ModelEntry, engine: Engine): StartOpts | null {
+    if (entry.incomplete || entry.parseError) return null
+    const cfg = this.store.snapshot()
+    const sys = getSysInfo()
+    if (entry.format !== 'gguf') {
+      const savedGpu = (cfg.modelProfiles[entry.key] as Partial<LoadProfile> | undefined)?.gpu
+      return {
+        engine,
+        model: { key: entry.key, name: entry.name, quant: entry.quant, ctx: entry.nativeCtx, vision: false },
+        modelPath: entry.path,
+        extraArgs: [],
+        tensorParallelSize: savedGpu?.tensorParallelSize,
+      }
+    }
+    const saved = cfg.modelProfiles[entry.key] as Partial<LoadProfile> | undefined
+    const profile = resolveProfile(entry, sys, saved, undefined, cfg.modelDefaults)
+    return {
+      engine,
+      model: { key: entry.key, name: entry.name, quant: entry.quant, ctx: profile.ctx, vision: entry.vision },
+      modelPath: entry.path,
+      extraArgs: profileToArgs(profile, entry, engine.capabilities, sys.cores),
+    }
+  }
+
+  /** Poll until the manager's engine process becomes ready or fails.
+   *  Mirrors the Manager's internal readiness timeout by engine kind. */
+  private async waitReady(manager: Manager, engineKind: string): Promise<boolean> {
+    const timeoutMs = engineKind === 'vllm' ? 600_000 : 120_000
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const s = manager.status()
+      if (s.state === 'running') return true
+      if (s.state === 'error' || s.state === 'stopped') return false
+      await sleep(250)
+    }
+    return false
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(r => setTimeout(r, ms))
+}

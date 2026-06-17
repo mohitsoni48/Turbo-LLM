@@ -9,6 +9,7 @@ import type { ConversationStore } from './chat/db'
 import type { HfClient } from './hf/hf'
 import type { DownloadManager } from './downloads/downloads'
 import type { BenchRunner } from './bench/bench'
+import type { ModelRouter } from './gateway/model-router'
 
 export interface Deps {
   store: ConfigStore
@@ -21,6 +22,8 @@ export interface Deps {
   hf: HfClient
   downloads: DownloadManager
   bench: BenchRunner
+  /** Gateway model router (v0.6.0): auto model-swap and keep-N pool. */
+  modelRouter: ModelRouter
   /** ComfyUI GPU coordinator (spec: unload/block while ComfyUI renders, reload after).
    *  Optional: only wired in the real `serve()` entrypoint (cli.ts); absent under tests. */
   comfy?: ComfyGuard
