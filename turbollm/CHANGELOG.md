@@ -25,6 +25,30 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
+## [0.3.0] - 2026-06-17
+
+### Added
+- **Configurable multi-GPU, per model** — new GPU controls on each model's load profile,
+  shown (only when more than one GPU is detected) in the model's Load settings:
+  - **llama.cpp / TurboQuant:** split mode (`layer` / `row` / `none`), an optional custom
+    per-GPU split, and a main-GPU pick — mapped to `--split-mode` / `--tensor-split` /
+    `--main-gpu`.
+  - **vLLM:** a tensor-parallel size that shards the model across N GPUs
+    (`--tensor-parallel-size`).
+
+  Defaults are no-ops, so single-GPU machines and existing profiles are unchanged. The VRAM
+  estimate now budgets across the GPUs the chosen split actually uses (previously it only
+  counted the first GPU).
+- **Reverse ComfyUI GPU gate** — the symmetric direction of the 0.2.0 GPU coordination:
+  when you run a prompt in TurboLLM, it first asks ComfyUI to free its VRAM, then loads, so
+  whichever app you're actively driving wins the GPU automatically — in both directions. An
+  in-flight render is never interrupted. Enable in Settings → ComfyUI.
+
+### Changed
+- **Live prefill % is now co-located with the session stats on the engine card**, at a
+  larger size and higher contrast, so the headline live-progress signal is legible at a
+  glance while a prompt runs.
+
 ## [0.2.0] - 2026-06-15
 
 ### Added
