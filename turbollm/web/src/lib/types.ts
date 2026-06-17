@@ -239,6 +239,9 @@ export type ModelEntry = {
   vision: boolean
   mmprojPath: string | null
   hasChatTemplate: boolean
+  /** True when the model is an embedding model (BERT-family or embed filename pattern).
+   *  Activates --embeddings at startup so /v1/embeddings is available. */
+  embedding: boolean
   incomplete: boolean
   parseError: string | null
   loaded: boolean

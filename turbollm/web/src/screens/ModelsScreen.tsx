@@ -30,7 +30,7 @@ import { ModelDetailDialog } from './models/ModelDetailDialog'
 import { DiscoverTab } from './models/DiscoverTab'
 import { HfRepoDialog } from './models/HfRepoDialog'
 
-type Filter = 'all' | 'vision' | 'moe' | 'nextn'
+type Filter = 'all' | 'vision' | 'moe' | 'nextn' | 'embedding'
 type Tab = 'library' | 'discover'
 
 /** A model name shared by 2+ quant variants becomes a collapsible group; a name
@@ -109,6 +109,7 @@ export function ModelsScreen() {
     if (filter === 'vision') return m.vision
     if (filter === 'moe') return m.moe
     if (filter === 'nextn') return (m.nextnLayers ?? 0) > 0
+    if (filter === 'embedding') return m.embedding
     return true
   })
   const groups = groupModels(filtered)
@@ -271,9 +272,9 @@ function LibraryTab({
 
       {models.length > 0 && (
         <div className="mb-4 flex items-center gap-2">
-          {(['all', 'vision', 'moe', 'nextn'] as Filter[]).map((f) => (
+          {(['all', 'vision', 'moe', 'nextn', 'embedding'] as Filter[]).map((f) => (
             <FilterChip key={f} active={filter === f} onClick={() => setFilter(f)}>
-              {f === 'all' ? `All ${models.length}` : f === 'vision' ? 'Vision' : f === 'moe' ? 'MoE' : 'NextN'}
+              {f === 'all' ? `All ${models.length}` : f === 'vision' ? 'Vision' : f === 'moe' ? 'MoE' : f === 'nextn' ? 'NextN' : 'Embed'}
             </FilterChip>
           ))}
         </div>
@@ -462,6 +463,7 @@ function ModelRow({
           <span className="min-w-0 break-words font-medium text-ink sm:truncate">{child ? m.quant : m.name}</span>
           {m.loaded && <Tag tone="ok">loaded</Tag>}
           {m.vision && <Tag>vision</Tag>}
+          {m.embedding && <Tag>embed</Tag>}
           {m.moe && <Tag>MoE</Tag>}
           {modelHasNextn && <Tag tone="spec">NextN</Tag>}
           {m.hasProfile && <Tag>tuned</Tag>}
