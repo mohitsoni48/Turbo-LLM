@@ -1,15 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
-import { ChevronRight, Copy } from 'lucide-react'
+import { ChevronRight } from 'lucide-react'
 import { engineLogStreamUrl, getEngineLogs } from '../../lib/api'
 import { cn } from '../../lib/utils'
-import { Button } from '../../components/ui/button'
+import { CopyButton } from '../../components/ui/copy-button'
 import { Switch } from '../../components/ui/switch'
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from '../../components/ui/collapsible'
-import { toast } from '../../components/ui/sonner'
 
 const MAX_LINES = 2000
 
@@ -69,14 +68,6 @@ export function EngineLogPanel({
     }
   }, [lines, autoScroll])
 
-  const copyAll = async () => {
-    try {
-      await navigator.clipboard.writeText(lines.join('\n'))
-      toast.success('Log copied to clipboard')
-    } catch {
-      toast.error('Could not copy log')
-    }
-  }
 
   return (
     <Collapsible
@@ -98,9 +89,7 @@ export function EngineLogPanel({
               <Switch checked={autoScroll} onCheckedChange={setAutoScroll} />
               Auto-scroll
             </label>
-            <Button size="sm" variant="ghost" onClick={() => void copyAll()}>
-              <Copy size={14} /> Copy all
-            </Button>
+            <CopyButton text={lines.join('\n')} label="Copy all" size={14} />
           </div>
         )}
       </div>

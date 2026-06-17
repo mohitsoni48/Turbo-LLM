@@ -2,10 +2,10 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
-import { ChevronDown, ClipboardCopy, FileText, Pencil, RefreshCw, Trash2 } from 'lucide-react'
+import { ChevronDown, FileText, Pencil, RefreshCw, Trash2 } from 'lucide-react'
 import type { Message, MessageStats } from '../../lib/chat-types'
 import { Button } from '../../components/ui/button'
-import { toast } from '../../components/ui/sonner'
+import { CopyButton } from '../../components/ui/copy-button'
 
 // ── Thinking block ────────────────────────────────────────────────────────────
 
@@ -95,22 +95,20 @@ function Markdown({ children }: { children: string }) {
           <a href={href} target="_blank" rel="noopener noreferrer" className="text-accent underline underline-offset-2">{children}</a>
         ),
         code: ({ className, children, ...props }) => {
-          const isBlock = className?.includes('language-')
+          // A fenced block without a language tag has no className — detect it by
+          // checking for a trailing newline, which react-markdown always appends to
+          // block code. Inline code never contains newlines in practice.
+          const hasLang = !!className?.includes('language-')
+          const isBlock = hasLang || (typeof children === 'string' && children.includes('\n'))
           if (!isBlock) return <code className="rounded bg-panel-2 px-1 py-0.5 font-mono text-[0.88em]" {...props}>{children}</code>
           const lang = className?.replace('language-', '') ?? ''
           return (
             <div className="relative my-2 overflow-hidden rounded-lg border border-border">
-              {lang && <div className="flex items-center justify-between border-b border-border bg-panel-2 px-3 py-1 font-mono text-[11px] text-muted">
+              <div className="flex items-center justify-between border-b border-border bg-panel-2 px-3 py-1 font-mono text-[11px] text-muted">
                 <span>{lang}</span>
-                <button
-                  type="button"
-                  className="hover:text-ink"
-                  onClick={() => { void navigator.clipboard.writeText(String(children)).then(() => toast.success('Copied')) }}
-                >
-                  <ClipboardCopy size={12} />
-                </button>
-              </div>}
-              <code className={`${className} block overflow-auto p-3 text-[13px] leading-relaxed`} {...props}>{children}</code>
+                <CopyButton text={String(children)} size={12} />
+              </div>
+              <code className={`${className ?? ''} block overflow-auto p-3 font-mono text-[13px] leading-relaxed whitespace-pre`} {...props}>{children}</code>
             </div>
           )
         },
@@ -193,7 +191,6 @@ export function StreamingBubble({
 export function MessageBubble({
   message,
   isLast,
-  onCopy,
   onEdit,
   onDelete,
   onRegenerate,
@@ -204,7 +201,6 @@ export function MessageBubble({
 }: {
   message: Message
   isLast: boolean
-  onCopy: (m: Message) => void
   onEdit: (m: Message) => void
   onDelete: (m: Message) => void
   onRegenerate: () => void
@@ -260,7 +256,7 @@ export function MessageBubble({
           )}
           {!isEditing && (
             <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-              <ActionBtn icon={<ClipboardCopy size={12} />} label="Copy" onClick={() => onCopy(message)} />
+              <CopyButton text={message.content} className="rounded p-1 hover:bg-panel-2" />
               <ActionBtn icon={<Pencil size={12} />}        label="Edit"   onClick={() => { setEditDraft(message.content); onEdit(message) }} />
               <ActionBtn icon={<Trash2 size={12} />}        label="Delete" onClick={() => onDelete(message)} destructive />
             </div>
@@ -291,7 +287,7 @@ export function MessageBubble({
         )}
         <StatsRow stats={message.stats} />
         <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-          <ActionBtn icon={<ClipboardCopy size={12} />} label="Copy"       onClick={() => onCopy(message)} />
+          <CopyButton text={message.content} className="rounded p-1 hover:bg-panel-2" />
           {isLast && <ActionBtn icon={<RefreshCw size={12} />} label="Regenerate" onClick={onRegenerate} />}
           <ActionBtn icon={<Trash2 size={12} />}        label="Delete"     onClick={() => onDelete(message)} destructive />
         </div>

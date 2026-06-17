@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowDown, Brain, Paperclip, SendHorizontal, SlidersHorizontal, Square, X } from 'lucide-react'
+import { ArrowDown, Brain, Paperclip, SendHorizontal, SlidersHorizontal, Square, UserRound, X } from 'lucide-react'
 import { continueConversation, sendMessage } from '../lib/chat-api'
 import { useConversation, useConversationMutations } from '../lib/chat-queries'
 import { useModelActions, useModels, useStatus } from '../lib/queries'
@@ -315,10 +315,6 @@ export function ChatScreen() {
     void streamFrom(activeId, continueConversation(activeId, ac.signal, !thinkingEnabled))
   }
 
-  const handleCopy = (m: Message) => {
-    void navigator.clipboard.writeText(m.content).then(() => toast.success('Copied'))
-  }
-
   const handleDelete = (m: Message) => {
     if (!activeId) return
     mut.deleteMsg.mutate({ convId: activeId, msgId: m.id }, {
@@ -386,6 +382,18 @@ export function ChatScreen() {
           >
             <Brain size={15} />
           </Button>
+          {activeId && (() => {
+            const p = PERSONAS.find((px) => px.id === selectedPersonaId)
+            return p ? (
+              <span
+                title={p.description}
+                className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted select-none"
+              >
+                <UserRound size={11} />
+                {p.name}
+              </span>
+            ) : null
+          })()}
           {engineState === 'starting' && <span className="text-[12px] text-muted">Loading model…</span>}
           {engineState === 'stopping' && <span className="text-[12px] text-muted">Ejecting…</span>}
           {ready && (
@@ -428,7 +436,6 @@ export function ChatScreen() {
                 key={m.id}
                 message={m}
                 isLast={i === messages.length - 1 && !live}
-                onCopy={handleCopy}
                 onEdit={(msg) => setEditingId(msg.id)}
                 onDelete={handleDelete}
                 onRegenerate={handleRegenerate}
@@ -542,23 +549,17 @@ function PersonaPicker({ selected, onChange }: { selected: PersonaId; onChange: 
   return (
     <div className="flex flex-col items-center gap-1.5">
       <p className="text-[11px] uppercase tracking-wide text-faint">Persona</p>
-      <div className="flex overflow-hidden rounded-lg border border-border">
+      <select
+        value={selected}
+        onChange={(e) => onChange(e.target.value as PersonaId)}
+        className="rounded-md border border-border bg-bg px-2 py-1.5 text-[13px] text-ink outline-none"
+      >
         {PERSONAS.map((p) => (
-          <button
-            key={p.id}
-            type="button"
-            onClick={() => onChange(p.id)}
-            title={p.description}
-            className="px-3 py-1.5 text-[13px] transition-colors"
-            style={{
-              background: selected === p.id ? 'var(--accent)' : 'transparent',
-              color: selected === p.id ? 'var(--on-accent)' : 'var(--muted)',
-            }}
-          >
-            {p.name}
-          </button>
+          <option key={p.id} value={p.id}>
+            {p.name} — {p.description}
+          </option>
         ))}
-      </div>
+      </select>
     </div>
   )
 }

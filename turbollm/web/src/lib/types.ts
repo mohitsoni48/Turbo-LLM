@@ -120,6 +120,10 @@ export type ComfyRuntime = {
   suspendedModelKey: string | null
   /** ms since the last acquire/release signal from ComfyUI, or null if none yet. */
   lastSignalAgoMs: number | null
+  /** Version number found in the installed __init__.py, or null if unreadable. */
+  installedVersion: number | null
+  /** Current gate version shipped with this TurboLLM build. */
+  currentVersion: number
 }
 
 /** A registered engine (GET /api/v1/engines, config §3 shape). */

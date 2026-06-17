@@ -10,7 +10,7 @@
 //   • queue drained (last task_done): POST {base}/api/v1/comfyui/release → reload.
 
 /** Version stamp written into the node so the installer can detect/upgrade it. */
-export const GATE_VERSION = 1
+export const GATE_VERSION = 2
 
 /** Render the Python source for the gate node, with TurboLLM's base URL baked in.
  *  `baseUrl` is TurboLLM's own origin (e.g. http://127.0.0.1:6996), reachable from
@@ -73,6 +73,19 @@ def _acquire_blocking() -> None:
     _post("/api/v1/comfyui/acquire", ACQUIRE_TIMEOUT_SEC)
 
 
+def _free_self() -> None:
+    """Unload ComfyUI's own models and clear the CUDA cache so VRAM is available
+    for TurboLLM to reload its model. Called on the release edge (queue drained),
+    before notifying TurboLLM. In-process — no HTTP roundtrip."""
+    try:
+        import comfy.model_management as mm  # type: ignore[import]
+        mm.unload_all_models()
+        mm.soft_empty_cache()
+        _log("freed ComfyUI model cache.")
+    except Exception as e:  # noqa: BLE001
+        _log(f"could not free ComfyUI models ({e}); continuing.")
+
+
 def _release() -> None:
     _post("/api/v1/comfyui/release", RELEASE_TIMEOUT_SEC)
 
@@ -122,6 +135,7 @@ def _install_hooks() -> None:
                     _busy = False
                     do_release = True
             if do_release:
+                _free_self()
                 _release()
         return result
 

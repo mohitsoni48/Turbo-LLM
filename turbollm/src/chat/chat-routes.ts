@@ -355,6 +355,17 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
         const decoder = new TextDecoder()
         let buf = ''
 
+        // When the abort signal fires during body streaming, explicitly cancel the
+        // reader so undici closes the TCP socket to TurboQuant immediately. Without
+        // this, undici may drain the buffered response rather than cutting the wire,
+        // which lets TurboQuant run to completion instead of stopping mid-generation.
+        const cancelReader = () => void reader.cancel()
+        if (ac.signal.aborted) {
+          cancelReader()
+        } else {
+          ac.signal.addEventListener('abort', cancelReader, { once: true })
+        }
+
         outer: while (true) {
           const { done, value } = await reader.read()
           if (done) break
@@ -477,6 +488,7 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
             }
           }
         }
+        ac.signal.removeEventListener('abort', cancelReader)
 
         // Flush any pending think buf as reasoning if we're still in think at end
         if (pendingThinkBuf && inThink) {

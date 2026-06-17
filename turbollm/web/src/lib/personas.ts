@@ -110,10 +110,24 @@ export function savePersonalization(p: Personalization): void {
   set(LS_CUSTOM_INSTRUCTIONS, p.customInstructions)
 }
 
+/** Always-on capability injected into every TurboLLM conversation. Instructs the
+ *  model to use text-based charts and graphics when visual output would help — no
+ *  external tools or code execution required, pure Unicode/ASCII output. */
+const TURBOLLM_BASE_CAPABILITY = `You are running inside TurboLLM, a local-first AI chat app. You have the ability to render simple text-based charts and graphics directly in your responses using Unicode characters. Use this capability whenever a chart, table, or visual would help the user — even if they don't explicitly ask for it.
+
+Rendering guide:
+- Bar / column charts: use block fill characters █ ▓ ▒ ░ with a numeric scale and axis labels
+- Tables: use box-drawing characters ┌ ─ ┐ │ └ ┘ ├ ┤ ┬ ┴ ┼ for clean borders; align columns
+- Line / trend: sketch with · ╌ ╍ ╱ ╲ characters; mark key points with ●
+- Tree / hierarchy: use └─ ├─ │ connectors
+- Progress / gauge: [████████░░] style with a percentage
+
+Always include a title, axis/column labels, and the underlying numbers. Keep charts compact — no wider than ~60 characters. Wrap chart output in a plain code block (\`\`\`) so spacing is preserved.`
+
 /** Build the hidden system prompt for a new conversation from a persona + personalization. */
 export function buildSystemPrompt(personaId: PersonaId, p: Personalization): string {
   const persona = PERSONAS.find((px) => px.id === personaId)
-  const parts: string[] = []
+  const parts: string[] = [TURBOLLM_BASE_CAPABILITY]
   if (persona?.systemPrompt) parts.push(persona.systemPrompt)
   if (p.assistantName.trim()) parts.push(`Your name is ${p.assistantName.trim()}.`)
   if (p.userName.trim()) parts.push(`The user's name is ${p.userName.trim()}.`)

@@ -3,7 +3,7 @@ import type { Context, Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve, sep } from 'node:path'
-import { gateNodeSource } from '../comfyui/gate-template'
+import { GATE_VERSION, gateNodeSource } from '../comfyui/gate-template'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { homedir, networkInterfaces } from 'node:os'
 import { ValueError, type ApiKey } from '../config/config'
@@ -77,7 +77,21 @@ export function registerApi(app: Hono, d: Deps): void {
       downloads: { active: d.downloads.activeCount() },
       engineProvision: d.provision.get(),
       // ComfyUI GPU coordination: lets the UI explain a paused/unloaded engine.
-      comfyui: d.comfy?.snapshot() ?? null,
+      // Also expose the installed gate node version so the UI can prompt an upgrade.
+      comfyui: (() => {
+        const snap = d.comfy?.snapshot() ?? null
+        if (!snap) return null
+        const gatePath = d.store.snapshot().comfyui.gatePath
+        let installedVersion: number | null = null
+        if (gatePath) {
+          try {
+            const src = readFileSync(join(gatePath, '__init__.py'), 'utf-8')
+            const m = src.match(/^GATE_VERSION\s*=\s*(\d+)/m)
+            if (m) installedVersion = Number(m[1])
+          } catch { /* file missing or unreadable */ }
+        }
+        return { ...snap, installedVersion, currentVersion: GATE_VERSION }
+      })(),
       telemetryLevel: d.store.snapshot().telemetry.level,
       uptimeSec: Math.floor((Date.now() - d.startedAt) / 1000),
     })

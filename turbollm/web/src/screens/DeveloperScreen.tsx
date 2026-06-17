@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { Check, Copy, Globe, Key, Plus, Terminal, Trash2 } from 'lucide-react'
+import { Globe, Key, Plus, Terminal, Trash2 } from 'lucide-react'
+import { CopyButton } from '../components/ui/copy-button'
 import { ScreenHeader } from '../components/common'
 import { Button } from '../components/ui/button'
 import { useApiKeys } from '../lib/queries'
@@ -52,7 +53,7 @@ function ServerSection() {
         <span className="text-[13px] text-muted">Local URL</span>
         <div className="flex items-center gap-2">
           <code className="font-mono text-[13px] text-ink">{BASE}</code>
-          <CopyBtn text={BASE} />
+          <CopyButton text={BASE} />
         </div>
       </div>
     </section>
@@ -102,7 +103,7 @@ function ApiKeysSection() {
           </p>
           <div className="flex items-center gap-2 rounded border border-border bg-bg px-2 py-1.5">
             <code className="min-w-0 flex-1 break-all font-mono text-[12px] text-ink">{justCreated}</code>
-            <CopyBtn text={justCreated} />
+            <CopyButton text={justCreated} />
           </div>
         </div>
       )}
@@ -171,7 +172,7 @@ function ApisSection() {
             </span>
             <span className="min-w-0 flex-1 truncate font-mono text-[13px] text-ink">{path}</span>
             <span className="hidden shrink-0 text-[11px] text-muted sm:block">{desc}</span>
-            <CopyBtn text={`${BASE}${path}`} />
+            <CopyButton text={`${BASE}${path}`} />
           </div>
         ))}
       </div>
@@ -235,13 +236,6 @@ function ConnectCard({ cli }: { cli: { id: string; name: string; desc: string } 
 }
 
 function SnippetBlock({ step }: { step: ConnectStep }) {
-  const [copied, setCopied] = useState(false)
-  const copy = () => {
-    void navigator.clipboard.writeText(step.snippet).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    })
-  }
   return (
     <div>
       <div className="mb-1 text-[11px] text-faint">{step.label}</div>
@@ -249,37 +243,9 @@ function SnippetBlock({ step }: { step: ConnectStep }) {
         <pre className="overflow-x-auto whitespace-pre-wrap break-all px-3 py-2 pr-10 font-mono text-[12px] leading-relaxed text-ink">
           {step.snippet}
         </pre>
-        <button
-          type="button"
-          onClick={copy}
-          title="Copy"
-          className="absolute right-2 top-2 rounded p-1 text-muted transition-colors hover:text-ink"
-        >
-          {copied ? <Check size={13} className="text-green-500" /> : <Copy size={13} />}
-        </button>
+        <CopyButton text={step.snippet} className="absolute right-2 top-2" />
       </div>
     </div>
   )
 }
 
-// ── Shared ────────────────────────────────────────────────────────────────────
-
-function CopyBtn({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false)
-  const copy = () => {
-    void navigator.clipboard.writeText(text).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    })
-  }
-  return (
-    <button
-      type="button"
-      onClick={copy}
-      className="shrink-0 rounded p-1 text-faint transition-colors hover:text-ink"
-      title="Copy"
-    >
-      {copied ? <Check size={13} style={{ color: 'var(--ok)' }} /> : <Copy size={13} />}
-    </button>
-  )
-}

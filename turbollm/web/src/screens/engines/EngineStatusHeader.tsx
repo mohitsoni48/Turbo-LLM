@@ -1,9 +1,10 @@
-import { CircleSlash, Copy, RotateCw } from 'lucide-react'
+import { CircleSlash, RotateCw } from 'lucide-react'
 import type { EngineStats, LiveGeneration, Status } from '../../lib/types'
 import { useEngineMutations, useModelActions } from '../../lib/queries'
 import { ApiError } from '../../lib/api'
 import { Button } from '../../components/ui/button'
 import { StateChip } from '../../components/StateChip'
+import { CopyButton } from '../../components/ui/copy-button'
 import { toast } from '../../components/ui/sonner'
 
 /** Active engine status card: name + state chip + loading elapsed + error log,
@@ -36,15 +37,6 @@ export function EngineStatusHeader({
       onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not restart the engine.'),
     })
 
-  const copyLog = async () => {
-    const text = (error?.logTail ?? []).join('\n')
-    try {
-      await navigator.clipboard.writeText(text)
-      toast.success('Log copied to clipboard')
-    } catch {
-      toast.error('Could not copy log')
-    }
-  }
 
   return (
     <div className="rounded-[var(--radius)] border border-[color:var(--accent)] bg-panel p-4">
@@ -114,9 +106,7 @@ export function EngineStatusHeader({
               {error.message}
               {error.exitCode != null && ` (exit ${error.exitCode})`}
             </span>
-            <Button size="sm" variant="ghost" onClick={() => void copyLog()}>
-              <Copy size={14} /> Copy
-            </Button>
+            <CopyButton text={(error?.logTail ?? []).join('\n')} label="Copy" size={14} />
           </div>
           <pre
             className="max-h-48 overflow-auto rounded-md px-3 py-2 font-mono text-[12px] leading-[1.5]"

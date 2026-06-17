@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Moon, Sun, Monitor, Save, ExternalLink, ShieldAlert, Sparkles, RefreshCw, Check, X, Loader2 } from 'lucide-react'
+import { Moon, Sun, Monitor, Save, ExternalLink, ShieldAlert, Sparkles, RefreshCw, Check, X, Loader2, AlertTriangle } from 'lucide-react'
 import {
   PERSONAS, getDefaultPersonaId, getPersonalization, savePersonalization,
   setDefaultPersonaId, type PersonaId, type Personalization,
@@ -602,6 +602,18 @@ function ComfyUiSection({
                 </span>
                 <div className="mt-1 break-all font-mono text-[11px] text-faint">{gatePath}</div>
               </div>
+              {cu?.installedVersion != null && cu.installedVersion < (cu.currentVersion ?? Infinity) && (
+                <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
+                  style={{ borderColor: 'var(--warn)', background: 'color-mix(in srgb, var(--warn) 10%, transparent)' }}>
+                  <span className="inline-flex items-center gap-1.5 text-[12px]" style={{ color: 'var(--warn)' }}>
+                    <AlertTriangle size={13} />
+                    Update available — node v{cu.installedVersion} → v{cu.currentVersion}
+                  </span>
+                  <Button size="sm" onClick={() => doInstall(customNodesDir)} disabled={install.isPending}>
+                    {install.isPending ? <Loader2 size={13} className="animate-spin" /> : 'Update node'}
+                  </Button>
+                </div>
+              )}
               <div className="flex items-center gap-2">
                 <Button variant="outline" size="sm" onClick={() => doInstall(customNodesDir)} disabled={install.isPending}>
                   {install.isPending ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
@@ -1159,23 +1171,17 @@ function PersonalizationSection() {
             <div className="text-[14px] font-medium text-ink">Default persona</div>
             <div className="text-[12px] text-muted">Applied to new chats unless overridden in the chat window</div>
           </div>
-          <div className="flex flex-wrap overflow-hidden rounded-lg border border-border">
+          <select
+            value={defaultPersona}
+            onChange={(e) => setDefaultPersonaLocal(e.target.value as PersonaId)}
+            className="rounded-md border border-border bg-bg px-2 py-1.5 text-[13px] text-ink outline-none"
+          >
             {PERSONAS.map((persona) => (
-              <button
-                key={persona.id}
-                type="button"
-                onClick={() => setDefaultPersonaLocal(persona.id)}
-                title={persona.description}
-                className="px-3 py-1.5 text-[13px] transition-colors"
-                style={{
-                  background: defaultPersona === persona.id ? 'var(--accent)' : 'transparent',
-                  color: defaultPersona === persona.id ? 'var(--on-accent)' : 'var(--muted)',
-                }}
-              >
-                {persona.name}
-              </button>
+              <option key={persona.id} value={persona.id}>
+                {persona.name} — {persona.description}
+              </option>
             ))}
-          </div>
+          </select>
         </div>
 
         {/* Assistant name */}
