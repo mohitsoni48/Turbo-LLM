@@ -1,0 +1,122 @@
+export type PersonaId = 'default' | 'blunt' | 'concise' | 'detailed' | 'formal' | 'tutor' | 'creative'
+
+export interface Persona {
+  id: PersonaId
+  name: string
+  description: string
+  systemPrompt: string
+}
+
+export const PERSONAS: readonly Persona[] = [
+  {
+    id: 'default',
+    name: 'Default',
+    description: "Balanced and helpful — the model's built-in style",
+    systemPrompt: '',
+  },
+  {
+    id: 'concise',
+    name: 'Concise',
+    description: 'Shortest possible answers, bullet points over paragraphs',
+    systemPrompt:
+      'Keep answers as short as possible. Use bullet points over paragraphs when listing multiple items. No preamble, no trailing summary. Answer the question and stop.',
+  },
+  {
+    id: 'detailed',
+    name: 'Detailed',
+    description: 'Thorough explanations with context, examples, and reasoning',
+    systemPrompt:
+      'Give thorough, educational explanations. Include relevant context, examples, and reasoning. Do not truncate or summarize — explain fully.',
+  },
+  {
+    id: 'blunt',
+    name: 'Blunt',
+    description: 'Direct with no filler words or pleasantries',
+    systemPrompt:
+      'Be direct and blunt. Skip preambles and pleasantries — no "Certainly!", "Of course!", "Great question!". Get to the point immediately. If something is wrong, say so plainly.',
+  },
+  {
+    id: 'formal',
+    name: 'Formal',
+    description: 'Professional, polished prose suitable for documents',
+    systemPrompt:
+      'Write in a professional, polished tone. Avoid casual language, contractions, emojis, and conversational filler. Suit your response for a professional document or communication.',
+  },
+  {
+    id: 'tutor',
+    name: 'Tutor',
+    description: 'Asks a clarifying question first, then teaches step by step',
+    systemPrompt:
+      'You are a patient teacher. If the question is ambiguous, ask one focused clarifying question before answering. Otherwise, explain step by step as if teaching someone encountering this topic for the first time.',
+  },
+  {
+    id: 'creative',
+    name: 'Creative',
+    description: 'Imaginative, vivid language with unexpected angles',
+    systemPrompt:
+      'Prioritize imagination and novelty. Use vivid language, explore unexpected angles, and bring a distinct voice. Favor interesting over safe.',
+  },
+]
+
+export interface Personalization {
+  assistantName: string
+  userName: string
+  customInstructions: string
+}
+
+const LS_DEFAULT_PERSONA = 'tllm.persona.default'
+const LS_CONV_PERSONA = (id: string) => `tllm.persona.conv.${id}`
+const LS_ASSISTANT_NAME = 'tllm.personal.assistantName'
+const LS_USER_NAME = 'tllm.personal.userName'
+const LS_CUSTOM_INSTRUCTIONS = 'tllm.personal.customInstructions'
+
+function isPersonaId(v: unknown): v is PersonaId {
+  return PERSONAS.some((p) => p.id === v)
+}
+
+export function getDefaultPersonaId(): PersonaId {
+  const v = localStorage.getItem(LS_DEFAULT_PERSONA)
+  return isPersonaId(v) ? v : 'default'
+}
+
+export function setDefaultPersonaId(id: PersonaId): void {
+  localStorage.setItem(LS_DEFAULT_PERSONA, id)
+}
+
+export function getConvPersonaId(convId: string): PersonaId {
+  const v = localStorage.getItem(LS_CONV_PERSONA(convId))
+  return isPersonaId(v) ? v : getDefaultPersonaId()
+}
+
+export function setConvPersonaId(convId: string, id: PersonaId): void {
+  localStorage.setItem(LS_CONV_PERSONA(convId), id)
+}
+
+export function getPersonalization(): Personalization {
+  return {
+    assistantName: localStorage.getItem(LS_ASSISTANT_NAME) ?? '',
+    userName: localStorage.getItem(LS_USER_NAME) ?? '',
+    customInstructions: localStorage.getItem(LS_CUSTOM_INSTRUCTIONS) ?? '',
+  }
+}
+
+export function savePersonalization(p: Personalization): void {
+  const set = (key: string, val: string) => {
+    if (val.trim()) localStorage.setItem(key, val.trim())
+    else localStorage.removeItem(key)
+  }
+  set(LS_ASSISTANT_NAME, p.assistantName)
+  set(LS_USER_NAME, p.userName)
+  set(LS_CUSTOM_INSTRUCTIONS, p.customInstructions)
+}
+
+/** Build the hidden system prompt for a new conversation from a persona + personalization. */
+export function buildSystemPrompt(personaId: PersonaId, p: Personalization): string {
+  const persona = PERSONAS.find((px) => px.id === personaId)
+  const parts: string[] = []
+  if (persona?.systemPrompt) parts.push(persona.systemPrompt)
+  if (p.assistantName.trim()) parts.push(`Your name is ${p.assistantName.trim()}.`)
+  if (p.userName.trim()) parts.push(`The user's name is ${p.userName.trim()}.`)
+  if (p.customInstructions.trim()) parts.push(p.customInstructions.trim())
+  return parts.join('\n\n')
+}

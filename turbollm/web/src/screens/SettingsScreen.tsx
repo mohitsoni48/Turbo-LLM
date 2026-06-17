@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Moon, Sun, Monitor, Save, ExternalLink, ShieldAlert, Sparkles, RefreshCw, Check, X, Loader2 } from 'lucide-react'
+import {
+  PERSONAS, getDefaultPersonaId, getPersonalization, savePersonalization,
+  setDefaultPersonaId, type PersonaId, type Personalization,
+} from '../lib/personas'
 import { ScreenHeader } from '../components/common'
 import { Button } from '../components/ui/button'
 import { useUiStore, type Theme } from '../stores/ui'
@@ -368,6 +372,9 @@ export function SettingsScreen() {
             />
           </label>
         </section>
+
+        {/* Personalization */}
+        <PersonalizationSection />
 
         {/* Startup */}
         <section className="rounded-lg border border-border bg-panel p-4">
@@ -1121,6 +1128,108 @@ function StatRow({ label, value }: { label: string; value: string }) {
       <dt className="text-[13px] text-muted">{label}</dt>
       <dd className="text-[13px] text-ink">{value}</dd>
     </>
+  )
+}
+
+// ── Personalization ───────────────────────────────────────────────────────────
+
+function PersonalizationSection() {
+  const [defaultPersona, setDefaultPersonaLocal] = useState<PersonaId>(() => getDefaultPersonaId())
+  const [p, setP] = useState<Personalization>(() => getPersonalization())
+  const [saved, setSaved] = useState(false)
+
+  const handleSave = () => {
+    setDefaultPersonaId(defaultPersona)
+    savePersonalization(p)
+    setSaved(true)
+    setTimeout(() => setSaved(false), 2000)
+  }
+
+  return (
+    <section className="rounded-lg border border-border bg-panel p-4">
+      <h2 className="mb-1 text-[13px] font-semibold uppercase tracking-wide text-faint">Personalization</h2>
+      <p className="mb-3 text-[12px] text-muted">
+        Applied as hidden context in every new conversation. Persona can also be changed per-chat.
+      </p>
+
+      <div className="flex flex-col gap-4">
+        {/* Default persona */}
+        <div className="flex flex-col gap-2">
+          <div>
+            <div className="text-[14px] font-medium text-ink">Default persona</div>
+            <div className="text-[12px] text-muted">Applied to new chats unless overridden in the chat window</div>
+          </div>
+          <div className="flex flex-wrap overflow-hidden rounded-lg border border-border">
+            {PERSONAS.map((persona) => (
+              <button
+                key={persona.id}
+                type="button"
+                onClick={() => setDefaultPersonaLocal(persona.id)}
+                title={persona.description}
+                className="px-3 py-1.5 text-[13px] transition-colors"
+                style={{
+                  background: defaultPersona === persona.id ? 'var(--accent)' : 'transparent',
+                  color: defaultPersona === persona.id ? 'var(--on-accent)' : 'var(--muted)',
+                }}
+              >
+                {persona.name}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Assistant name */}
+        <div className="flex items-center justify-between gap-4">
+          <div className="shrink-0">
+            <div className="text-[14px] font-medium text-ink">Assistant name</div>
+            <div className="text-[12px] text-muted">What the assistant calls itself (empty = model default)</div>
+          </div>
+          <input
+            type="text"
+            value={p.assistantName}
+            onChange={(e) => setP((prev) => ({ ...prev, assistantName: e.target.value }))}
+            placeholder="e.g. Aria"
+            className="w-40 rounded-md border border-border bg-bg px-2 py-1 text-[13px] text-ink outline-none placeholder:text-faint"
+          />
+        </div>
+
+        {/* User name */}
+        <div className="flex items-center justify-between gap-4">
+          <div className="shrink-0">
+            <div className="text-[14px] font-medium text-ink">Your name</div>
+            <div className="text-[12px] text-muted">How the assistant addresses you (empty = not set)</div>
+          </div>
+          <input
+            type="text"
+            value={p.userName}
+            onChange={(e) => setP((prev) => ({ ...prev, userName: e.target.value }))}
+            placeholder="e.g. Alex"
+            className="w-40 rounded-md border border-border bg-bg px-2 py-1 text-[13px] text-ink outline-none placeholder:text-faint"
+          />
+        </div>
+
+        {/* Custom instructions */}
+        <div className="flex flex-col gap-1.5">
+          <div>
+            <div className="text-[14px] font-medium text-ink">Custom instructions</div>
+            <div className="text-[12px] text-muted">Extra instructions added to every new conversation</div>
+          </div>
+          <textarea
+            rows={3}
+            value={p.customInstructions}
+            onChange={(e) => setP((prev) => ({ ...prev, customInstructions: e.target.value }))}
+            placeholder="e.g. Always respond in Spanish. Prefer functional programming style."
+            className="w-full resize-none rounded-md border border-border bg-bg px-2 py-1.5 text-[13px] text-ink outline-none placeholder:text-faint"
+          />
+        </div>
+
+        <div className="flex justify-end">
+          <Button onClick={handleSave} size="sm">
+            {saved ? <><Check size={13} /> Saved</> : <><Save size={13} /> Save personalization</>}
+          </Button>
+        </div>
+      </div>
+    </section>
   )
 }
 

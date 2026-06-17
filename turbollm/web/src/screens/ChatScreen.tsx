@@ -15,6 +15,11 @@ import { ModelLoadMenu } from '../components/ModelLoadMenu'
 import { ModelDetailDialog } from './models/ModelDetailDialog'
 import { ConversationSettingsDialog } from './chat/ConversationSettingsDialog'
 import { useUiStore } from '../stores/ui'
+import {
+  PERSONAS, buildSystemPrompt, getConvPersonaId, getDefaultPersonaId,
+  getPersonalization, setConvPersonaId,
+  type PersonaId,
+} from '../lib/personas'
 
 // Streaming state
 interface LiveState {
@@ -57,6 +62,9 @@ export function ChatScreen() {
     if (activeId) localStorage.setItem(`tllm.thinkingEnabled.${activeId}`, String(val))
     setThinkingEnabledState(val)
   }
+
+  // Persona — per-conversation, defaults to the global default from Settings.
+  const [selectedPersonaId, setSelectedPersonaId] = useState<PersonaId>(() => getDefaultPersonaId())
   const abortRef = useRef<AbortController | null>(null)
   const deltaTimestamps = useRef<number[]>([])
   const scrollerRef = useRef<HTMLDivElement>(null)
@@ -160,6 +168,7 @@ export function ChatScreen() {
     setActiveId(null)
     setInput('')
     setLive(null)
+    setSelectedPersonaId(getDefaultPersonaId())
     inputRef.current?.focus()
   }
 
@@ -167,6 +176,7 @@ export function ChatScreen() {
     if (live) { abortRef.current?.abort(); setLive(null) }
     setActiveId(id)
     setEditingId(null)
+    setSelectedPersonaId(getConvPersonaId(id))
     userScrolledUp.current = false
     setTimeout(() => scrollToBottom(true), 50)
   }
@@ -256,11 +266,13 @@ export function ChatScreen() {
     userScrolledUp.current = false
 
     try {
-      // Create conversation on first message
+      // Create conversation on first message, baking in the selected persona + personalization.
       let convId = activeId
       if (!convId) {
-        const newConv = await mut.create.mutateAsync({ modelKey: model.key })
+        const sp = buildSystemPrompt(selectedPersonaId, getPersonalization())
+        const newConv = await mut.create.mutateAsync({ modelKey: model.key, systemPrompt: sp || undefined })
         convId = newConv.id
+        setConvPersonaId(convId, selectedPersonaId)
         setActiveId(convId)
       }
 
@@ -386,10 +398,11 @@ export function ChatScreen() {
           <div className="flex w-full flex-col gap-6 px-8 py-6">
             {/* Empty state */}
             {messages.length === 0 && !live && (
-              <div className="flex flex-col items-center gap-3 py-16">
+              <div className="flex flex-col items-center gap-4 py-16">
                 {model ? (
                   <>
                     <p className="text-[15px] font-medium text-ink">{model.name}</p>
+                    <PersonaPicker selected={selectedPersonaId} onChange={setSelectedPersonaId} />
                     <div className="flex flex-wrap justify-center gap-2">
                       {['Explain something to me', 'Help me write', 'Review this code'].map((s) => (
                         <button
@@ -519,6 +532,33 @@ export function ChatScreen() {
       </div>
 
       <ModelDetailDialog modelKey={settingsKey} onClose={() => setSettingsKey(null)} />
+    </div>
+  )
+}
+
+// ── Persona picker ─────────────────────────────────────────────────────────────
+
+function PersonaPicker({ selected, onChange }: { selected: PersonaId; onChange: (id: PersonaId) => void }) {
+  return (
+    <div className="flex flex-col items-center gap-1.5">
+      <p className="text-[11px] uppercase tracking-wide text-faint">Persona</p>
+      <div className="flex overflow-hidden rounded-lg border border-border">
+        {PERSONAS.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            onClick={() => onChange(p.id)}
+            title={p.description}
+            className="px-3 py-1.5 text-[13px] transition-colors"
+            style={{
+              background: selected === p.id ? 'var(--accent)' : 'transparent',
+              color: selected === p.id ? 'var(--on-accent)' : 'var(--muted)',
+            }}
+          >
+            {p.name}
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
