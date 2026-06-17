@@ -12,6 +12,9 @@ export interface Sampling {
   minP: number
   repeatPenalty: number
   presencePenalty: number
+  frequencyPenalty: number
+  /** Stop sequences: generation halts when any of these strings is produced. */
+  stop: string[]
 }
 
 /** Per-engine multi-GPU split settings (ADR-054). Stored on the per-model profile;
@@ -61,6 +64,21 @@ export interface LoadProfile {
   mtpHeadPath: string
   draftModelPath: string
   sampling: Sampling
+  /** Context overflow policy. 'shift' (default) is llama-server's built-in sliding
+   *  window — oldest tokens are evicted while keeping `nKeep` tokens from the start.
+   *  'keep' makes nKeep explicit (e.g. preserve the full system prompt).
+   *  Mapped in {@link profileToArgs} via --n-keep. */
+  contextOverflow: 'shift' | 'keep'
+  /** Tokens to keep from the start of the context when shifting (--n-keep).
+   *  Only applied when contextOverflow === 'keep' and nKeep > 0. */
+  nKeep: number
+  /** RoPE scaling type (--rope-scaling). 'none' = model-native; 'linear'/'yarn'
+   *  extend context beyond the trained limit. Only emitted when not 'none'. */
+  ropeScalingType: 'none' | 'linear' | 'yarn'
+  /** RoPE base frequency override (--rope-freq-base). 0 = model native. */
+  ropeFreqBase: number
+  /** RoPE frequency scale override (--rope-freq-scale). 0 = model native. */
+  ropeFreqScale: number
   /** Multi-GPU split settings (ADR-054). See {@link GpuProfile}. */
   gpu: GpuProfile
   extraArgs: string[]
@@ -93,7 +111,7 @@ function kvBytesPerElem(t: string): number {
 }
 
 export function defaultSampling(): Sampling {
-  return { temp: 0.8, topP: 0.95, topK: 40, minP: 0.05, repeatPenalty: 1.0, presencePenalty: 0.0 }
+  return { temp: 0.8, topP: 0.95, topK: 40, minP: 0.05, repeatPenalty: 1.0, presencePenalty: 0.0, frequencyPenalty: 0.0, stop: [] }
 }
 
 /** The VRAM budget a profile can use (ADR-054). A layer/row split — and the default —
@@ -165,6 +183,11 @@ export function deriveDefault(m: ModelEntry, sys: SysInfo): LoadProfile {
     mtpHeadPath: '',
     draftModelPath: '',
     sampling: defaultSampling(),
+    contextOverflow: 'shift',
+    nKeep: 0,
+    ropeScalingType: 'none',
+    ropeFreqBase: 0,
+    ropeFreqScale: 0,
     gpu: defaultGpu(),
     extraArgs: [],
   }
@@ -280,6 +303,27 @@ export function profileToArgs(p: LoadProfile, m: ModelEntry, caps: Capabilities,
   } else if (p.speculative === 'draft' && p.draftModelPath && has('--model-draft')) {
     if (specType) a.push('--spec-type', 'draft')
     a.push('--model-draft', p.draftModelPath, '--draft-max', '16', '--draft-min', '1')
+  }
+  // Sampling startup defaults — become the engine's per-request defaults; can still
+  // be overridden in the chat request body. Only emitted when non-default to avoid
+  // cluttering the startup command. llama-server built-in defaults match these values.
+  if (p.sampling.temp !== 0.8 && has('--temp')) a.push('--temp', String(p.sampling.temp))
+  if (p.sampling.topP !== 0.95 && has('--top-p')) a.push('--top-p', String(p.sampling.topP))
+  if (p.sampling.topK !== 40 && has('--top-k')) a.push('--top-k', String(p.sampling.topK))
+  if (p.sampling.minP !== 0.05 && has('--min-p')) a.push('--min-p', String(p.sampling.minP))
+  if (p.sampling.repeatPenalty !== 1.0 && has('--repeat-penalty')) a.push('--repeat-penalty', String(p.sampling.repeatPenalty))
+  if (p.sampling.presencePenalty !== 0.0 && has('--presence-penalty')) a.push('--presence-penalty', String(p.sampling.presencePenalty))
+  if (p.sampling.frequencyPenalty !== 0.0 && has('--frequency-penalty')) a.push('--frequency-penalty', String(p.sampling.frequencyPenalty))
+  // Context overflow: 'keep' pins the first nKeep tokens during context-shift so the
+  // system prompt / initial context is never evicted (--n-keep). 'shift' is the engine
+  // default (no flag needed).
+  if (p.contextOverflow === 'keep' && p.nKeep > 0 && has('--n-keep')) a.push('--n-keep', String(p.nKeep))
+  // Rope scaling: only emitted when the user explicitly requests a non-native scaling
+  // type. ropeFreqBase / ropeFreqScale of 0 mean "use the model's native value".
+  if (p.ropeScalingType !== 'none' && has('--rope-scaling')) {
+    a.push('--rope-scaling', p.ropeScalingType)
+    if (p.ropeFreqBase > 0 && has('--rope-freq-base')) a.push('--rope-freq-base', String(p.ropeFreqBase))
+    if (p.ropeFreqScale > 0 && has('--rope-freq-scale')) a.push('--rope-freq-scale', String(p.ropeFreqScale))
   }
   a.push(...p.extraArgs)
   return a

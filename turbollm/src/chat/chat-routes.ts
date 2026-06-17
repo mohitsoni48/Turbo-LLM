@@ -80,7 +80,7 @@ export function registerChatRoutes(app: Hono, d: Deps): void {
   })
 
   app.patch('/api/v1/conversations/:id', async (c) => {
-    const b = await body<{ title?: string; systemPrompt?: string; sampling?: Record<string, number> }>(c)
+    const b = await body<{ title?: string; systemPrompt?: string; sampling?: Record<string, unknown> }>(c)
     const ok = db.updateConversation(c.req.param('id'), b)
     if (!ok) return err(c, 404, 'not_found', 'Conversation not found.')
     return c.json(db.getConversation(c.req.param('id'))!)
@@ -270,10 +270,23 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
   const { db } = d
   const { convId, conv, engineMessages, assistantMsg, ms, target, ac, disableThinking } = ctx
 
-      // Merge sampling: model profile sampling ⊕ conversation overrides
-      const modelSampling: Record<string, number> = {}
-      const convSampling = conv.sampling ?? {}
-      const merged = { ...modelSampling, ...convSampling }
+      // Map conversation sampling overrides (camelCase) to the engine's snake_case
+      // parameter names. Only keys present in conv.sampling are forwarded — absent
+      // keys let the engine use the startup-flag defaults set by profileToArgs.
+      const convS = conv.sampling ?? {}
+      const SAMPLING_KEYS: Record<string, string> = {
+        temp: 'temperature', topP: 'top_p', topK: 'top_k', minP: 'min_p',
+        repeatPenalty: 'repeat_penalty', presencePenalty: 'presence_penalty',
+        frequencyPenalty: 'frequency_penalty',
+      }
+      const samplingOverride: Record<string, unknown> = {}
+      for (const [camel, snake] of Object.entries(SAMPLING_KEYS)) {
+        if (camel in convS) samplingOverride[snake] = convS[camel]
+      }
+      // Pass through any already-snake_case keys the client may have stored directly.
+      for (const [k, v] of Object.entries(convS)) {
+        if (!(k in SAMPLING_KEYS) && k !== 'stop') samplingOverride[k] = v
+      }
 
       const reqBody: Record<string, unknown> = {
         model: ms.model!.key,
@@ -281,8 +294,11 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
         stream: true,
         stream_options: { include_usage: true },
         return_progress: true,
-        ...merged,
+        ...samplingOverride,
       }
+      // Stop strings are string[], so they live outside the numeric sampling map.
+      const stopStrings = convS.stop as string[] | undefined
+      if (stopStrings?.length) reqBody.stop = stopStrings
       // Apply the global "max response tokens" cap (0 = unlimited). Honors a smaller
       // per-conversation value if one was set, but never lets it exceed the cap.
       const maxLimit = d.store.snapshot().modelDefaults.maxTokens ?? 0

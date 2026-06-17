@@ -1,0 +1,177 @@
+// Generation control tests (v0.4.0): sampling startup flags, context overflow,
+// rope scaling, frequency_penalty, stop strings.
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { defaultSampling, deriveDefault, profileToArgs, resolveProfile } from './profile'
+import type { LoadProfile } from './profile'
+import type { ModelEntry } from './scanner'
+import type { SysInfo } from '../sysinfo/sysinfo'
+
+function model(over: Partial<ModelEntry> = {}): ModelEntry {
+  return {
+    key: 'm|q4|1', name: 'm', path: '/models/m.gguf', dir: '/models', format: 'gguf',
+    sizeBytes: 8_000_000_000, sizeLabel: '8 GB', arch: 'llama', quant: 'Q4_K_M',
+    nativeCtx: 32768, blockCount: 32, headCountKv: 8, moe: false, expertCount: 0,
+    nextnLayers: 0, vision: false, mmprojPath: null, hasChatTemplate: true,
+    incomplete: false, parseError: null, loaded: false, hasProfile: false,
+    benchTps: null, mtime: '', ...over,
+  }
+}
+
+function sys(gpus: Array<{ vramMb: number }> = [{ vramMb: 16000 }]): SysInfo {
+  return {
+    os: 'linux/x64', cpu: 'test', cores: 8, ramMB: 32000,
+    gpus: gpus.map((g, i) => ({ name: `gpu${i}`, vramMb: g.vramMb, vendor: 'nvidia' as const })),
+  }
+}
+
+const caps = { kvTypes: [], flags: [] } // empty = all flags allowed (graceful-degrade)
+
+function base(): LoadProfile {
+  return deriveDefault(model(), sys())
+}
+
+// ── Sampling flags ────────────────────────────────────────────────────────────
+
+test('default sampling emits no sampling flags (engine defaults match)', () => {
+  const args = profileToArgs(base(), model(), caps)
+  for (const flag of ['--temp', '--top-p', '--top-k', '--min-p', '--repeat-penalty', '--presence-penalty', '--frequency-penalty']) {
+    assert.equal(args.includes(flag), false, `${flag} should not appear for default value`)
+  }
+})
+
+test('non-default temp is emitted', () => {
+  const p = { ...base(), sampling: { ...defaultSampling(), temp: 0.5 } }
+  const args = profileToArgs(p, model(), caps)
+  assert.equal(args[args.indexOf('--temp') + 1], '0.5')
+})
+
+test('non-default top-p, top-k, min-p are emitted', () => {
+  const p = { ...base(), sampling: { ...defaultSampling(), topP: 0.9, topK: 20, minP: 0.02 } }
+  const args = profileToArgs(p, model(), caps)
+  assert.equal(args[args.indexOf('--top-p') + 1], '0.9')
+  assert.equal(args[args.indexOf('--top-k') + 1], '20')
+  assert.equal(args[args.indexOf('--min-p') + 1], '0.02')
+})
+
+test('non-default repeat/presence/frequency penalties are emitted', () => {
+  const p = { ...base(), sampling: { ...defaultSampling(), repeatPenalty: 1.2, presencePenalty: 0.5, frequencyPenalty: 0.3 } }
+  const args = profileToArgs(p, model(), caps)
+  assert.equal(args[args.indexOf('--repeat-penalty') + 1], '1.2')
+  assert.equal(args[args.indexOf('--presence-penalty') + 1], '0.5')
+  assert.equal(args[args.indexOf('--frequency-penalty') + 1], '0.3')
+})
+
+test('sampling flags are gated by engine capability', () => {
+  const limited = { kvTypes: [], flags: ['-ngl', '--parallel'] }
+  const p = { ...base(), sampling: { ...defaultSampling(), temp: 0.3, frequencyPenalty: 0.5 } }
+  const args = profileToArgs(p, model(), limited)
+  assert.equal(args.includes('--temp'), false)
+  assert.equal(args.includes('--frequency-penalty'), false)
+})
+
+test('stop strings do not appear in profileToArgs (they are per-request only)', () => {
+  const p = { ...base(), sampling: { ...defaultSampling(), stop: ['</s>', '<|im_end|>'] } }
+  const args = profileToArgs(p, model(), caps)
+  assert.equal(args.includes('--stop'), false)
+  assert.equal(args.some((a) => a.includes('</s>')), false)
+})
+
+// ── Context overflow ──────────────────────────────────────────────────────────
+
+test("contextOverflow 'shift' (default) emits no extra flags", () => {
+  const p = base() // default is 'shift'
+  assert.equal(p.contextOverflow, 'shift')
+  const args = profileToArgs(p, model(), caps)
+  assert.equal(args.includes('--n-keep'), false)
+})
+
+test("contextOverflow 'keep' with nKeep > 0 emits --n-keep", () => {
+  const p = { ...base(), contextOverflow: 'keep' as const, nKeep: 512 }
+  const args = profileToArgs(p, model(), caps)
+  assert.equal(args[args.indexOf('--n-keep') + 1], '512')
+})
+
+test("contextOverflow 'keep' with nKeep = 0 emits no flag", () => {
+  const p = { ...base(), contextOverflow: 'keep' as const, nKeep: 0 }
+  const args = profileToArgs(p, model(), caps)
+  assert.equal(args.includes('--n-keep'), false)
+})
+
+test('--n-keep is gated by engine capability', () => {
+  const limited = { kvTypes: [], flags: ['-ngl', '--parallel'] }
+  const p = { ...base(), contextOverflow: 'keep' as const, nKeep: 256 }
+  assert.equal(profileToArgs(p, model(), limited).includes('--n-keep'), false)
+})
+
+// ── Rope scaling ──────────────────────────────────────────────────────────────
+
+test("ropeScalingType 'none' (default) emits no rope flags", () => {
+  const p = base()
+  assert.equal(p.ropeScalingType, 'none')
+  const args = profileToArgs(p, model(), caps)
+  assert.equal(args.includes('--rope-scaling'), false)
+})
+
+test("ropeScalingType 'linear' emits --rope-scaling linear", () => {
+  const p = { ...base(), ropeScalingType: 'linear' as const }
+  const args = profileToArgs(p, model(), caps)
+  assert.equal(args[args.indexOf('--rope-scaling') + 1], 'linear')
+})
+
+test('ropeFreqBase and ropeFreqScale emitted when non-zero', () => {
+  const p = { ...base(), ropeScalingType: 'yarn' as const, ropeFreqBase: 500000, ropeFreqScale: 0.25 }
+  const args = profileToArgs(p, model(), caps)
+  assert.equal(args[args.indexOf('--rope-scaling') + 1], 'yarn')
+  assert.equal(args[args.indexOf('--rope-freq-base') + 1], '500000')
+  assert.equal(args[args.indexOf('--rope-freq-scale') + 1], '0.25')
+})
+
+test('ropeFreqBase = 0 is not emitted (model native)', () => {
+  const p = { ...base(), ropeScalingType: 'linear' as const, ropeFreqBase: 0, ropeFreqScale: 0 }
+  const args = profileToArgs(p, model(), caps)
+  assert.equal(args.includes('--rope-freq-base'), false)
+  assert.equal(args.includes('--rope-freq-scale'), false)
+})
+
+test('rope flags gated by engine capability', () => {
+  const limited = { kvTypes: [], flags: ['-ngl', '--parallel'] }
+  const p = { ...base(), ropeScalingType: 'yarn' as const, ropeFreqBase: 100000, ropeFreqScale: 0.5 }
+  assert.equal(profileToArgs(p, model(), limited).includes('--rope-scaling'), false)
+})
+
+// ── resolveProfile / defaults ─────────────────────────────────────────────────
+
+test('defaultSampling includes frequencyPenalty and stop', () => {
+  const s = defaultSampling()
+  assert.equal(s.frequencyPenalty, 0.0)
+  assert.deepEqual(s.stop, [])
+})
+
+test('deriveDefault sets contextOverflow shift and ropeScalingType none', () => {
+  const p = deriveDefault(model(), sys())
+  assert.equal(p.contextOverflow, 'shift')
+  assert.equal(p.nKeep, 0)
+  assert.equal(p.ropeScalingType, 'none')
+  assert.equal(p.ropeFreqBase, 0)
+  assert.equal(p.ropeFreqScale, 0)
+})
+
+test('resolveProfile deep-merges stop strings (override replaces, not appends)', () => {
+  const m = model()
+  const s = sys()
+  const resolved = resolveProfile(m, s, { sampling: { ...defaultSampling(), stop: ['A'] } }, { sampling: { ...defaultSampling(), stop: ['B', 'C'] } })
+  assert.deepEqual(resolved.sampling.stop, ['B', 'C'])
+})
+
+test('resolveProfile carries contextOverflow and rope from saved profile', () => {
+  const m = model()
+  const s = sys()
+  const saved: Partial<LoadProfile> = { contextOverflow: 'keep', nKeep: 128, ropeScalingType: 'linear', ropeFreqBase: 500000, ropeFreqScale: 0.5 }
+  const resolved = resolveProfile(m, s, saved)
+  assert.equal(resolved.contextOverflow, 'keep')
+  assert.equal(resolved.nKeep, 128)
+  assert.equal(resolved.ropeScalingType, 'linear')
+  assert.equal(resolved.ropeFreqBase, 500000)
+  assert.equal(resolved.ropeFreqScale, 0.5)
+})

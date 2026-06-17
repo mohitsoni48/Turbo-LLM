@@ -278,6 +278,8 @@ export type Sampling = {
   minP: number
   repeatPenalty: number
   presencePenalty: number
+  frequencyPenalty: number
+  stop: string[]
 }
 
 export type LoadProfile = {
@@ -301,6 +303,11 @@ export type LoadProfile = {
   mtpHeadPath: string
   draftModelPath: string
   sampling: Sampling
+  contextOverflow: 'shift' | 'keep'
+  nKeep: number
+  ropeScalingType: 'none' | 'linear' | 'yarn'
+  ropeFreqBase: number
+  ropeFreqScale: number
   /** Multi-GPU split settings (ADR-054). Mirrors the daemon's GpuProfile. */
   gpu: GpuProfile
   extraArgs: string[]

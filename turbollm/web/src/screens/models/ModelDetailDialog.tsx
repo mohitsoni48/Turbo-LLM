@@ -175,6 +175,18 @@ export function ModelDetailDialog({
               {detail.moe && detail.blockCount > 0 && (
                 <Slider label="MoE experts on CPU" hint="Higher = less VRAM, slower. Lower = faster if it fits." value={draft.nCpuMoe} min={0} max={detail.blockCount} step={1} onChange={(v) => set('nCpuMoe', v)} />
               )}
+              <Row label="Context overflow" hint="What to do when the context window fills up.">
+                <Segmented
+                  value={draft.contextOverflow}
+                  options={['shift', 'keep']}
+                  onChange={(v) => set('contextOverflow', v as LoadProfile['contextOverflow'])}
+                />
+              </Row>
+              {draft.contextOverflow === 'keep' && (
+                <Row label="Tokens to keep" hint="Preserve this many tokens from the start (e.g. system prompt length) when shifting.">
+                  <NumberInput value={draft.nKeep} min={0} max={draft.ctx} onChange={(v) => set('nKeep', v)} />
+                </Row>
+              )}
             </Section>
 
             {/* Multi-GPU split (ADR-054) — only when more than one GPU and a GPU engine. */}
@@ -221,6 +233,16 @@ export function ModelDetailDialog({
               <Slider label="Top P" value={draft.sampling.topP} min={0} max={1} step={0.01} onChange={(v) => setS('topP', v)} fmt={(v) => v.toFixed(2)} />
               <Slider label="Top K" value={draft.sampling.topK} min={0} max={200} step={1} onChange={(v) => setS('topK', v)} />
               <Slider label="Min P" value={draft.sampling.minP} min={0} max={1} step={0.01} onChange={(v) => setS('minP', v)} fmt={(v) => v.toFixed(2)} />
+              <Slider label="Repeat penalty" hint="Penalise tokens that appeared earlier. 1.0 = off." value={draft.sampling.repeatPenalty} min={1} max={2} step={0.05} onChange={(v) => setS('repeatPenalty', v)} fmt={(v) => v.toFixed(2)} />
+              <Slider label="Presence penalty" hint="Flat penalty for any token that appeared. 0 = off." value={draft.sampling.presencePenalty} min={0} max={2} step={0.05} onChange={(v) => setS('presencePenalty', v)} fmt={(v) => v.toFixed(2)} />
+              <Slider label="Frequency penalty" hint="Penalty proportional to how often a token appeared. 0 = off." value={draft.sampling.frequencyPenalty} min={0} max={2} step={0.05} onChange={(v) => setS('frequencyPenalty', v)} fmt={(v) => v.toFixed(2)} />
+              <Row label="Stop strings" hint="Halt generation when any of these sequences is produced.">
+                <div className="w-full" />
+              </Row>
+              <StopStringInput
+                value={draft.sampling.stop}
+                onChange={(v) => setDraft((d) => d ? { ...d, sampling: { ...d.sampling, stop: v } } : d)}
+              />
             </Section>
 
             {specOptions.length > 1 && (
@@ -283,6 +305,23 @@ export function ModelDetailDialog({
                 />
                 {detail.vision && <Toggle label="Vision encoder on GPU" value={draft.mmprojGpu} onChange={(v) => set('mmprojGpu', v)} />}
                 {draft.parallel > 1 && <Toggle label="Unified KV across slots" value={draft.kvUnified} onChange={(v) => set('kvUnified', v)} />}
+                <Row label="RoPE scaling" hint="Extend context beyond the model's trained limit. 'none' = model native.">
+                  <Segmented
+                    value={draft.ropeScalingType}
+                    options={['none', 'linear', 'yarn']}
+                    onChange={(v) => set('ropeScalingType', v as LoadProfile['ropeScalingType'])}
+                  />
+                </Row>
+                {draft.ropeScalingType !== 'none' && (
+                  <>
+                    <Row label="RoPE freq base" hint="Base frequency override. 0 = model native.">
+                      <NumberInput value={draft.ropeFreqBase} min={0} max={10_000_000} onChange={(v) => set('ropeFreqBase', v)} />
+                    </Row>
+                    <Row label="RoPE freq scale" hint="Frequency scale. 0 = model native; e.g. 0.25 for 4× context.">
+                      <NumberInput value={draft.ropeFreqScale} min={0} max={10} step={0.01} onChange={(v) => set('ropeFreqScale', v)} />
+                    </Row>
+                  </>
+                )}
               </Section>
             )}
 
@@ -471,12 +510,13 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
   )
 }
 
-function NumberInput({ value, min, max, onChange }: { value: number; min: number; max: number; onChange: (v: number) => void }) {
+function NumberInput({ value, min, max, step = 1, onChange }: { value: number; min: number; max: number; step?: number; onChange: (v: number) => void }) {
   return (
     <input
       type="number"
       min={min}
       max={max}
+      step={step}
       value={value}
       onChange={(e) => onChange(Math.max(min, Math.min(max, Number(e.target.value) || min)))}
       className="w-20 rounded-md border border-border bg-bg px-2 py-1 text-right text-[13px] text-ink outline-none"
@@ -617,6 +657,41 @@ function PathField({ label, hint, value, placeholder, onChange }: {
         value={value}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
+        className="w-full rounded-md border border-border bg-bg px-2 py-1 font-mono text-[12px] text-ink outline-none placeholder:text-faint"
+      />
+    </div>
+  )
+}
+
+function StopStringInput({ value, onChange }: { value: string[]; onChange: (v: string[]) => void }) {
+  const [input, setInput] = useState('')
+  const add = (s: string) => {
+    const t = s.trim()
+    if (t && !value.includes(t)) onChange([...value, t])
+    setInput('')
+  }
+  return (
+    <div className="flex flex-col gap-1.5">
+      {value.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {value.map((s) => (
+            <span key={s} className="flex items-center gap-0.5 rounded border border-border bg-panel-2 px-1.5 py-0.5 font-mono text-[11px] text-ink">
+              {s}
+              <button type="button" onClick={() => onChange(value.filter((v) => v !== s))} className="ml-0.5 text-muted hover:text-[var(--err)]">×</button>
+            </span>
+          ))}
+        </div>
+      )}
+      <input
+        type="text"
+        value={input}
+        placeholder={value.length ? 'Add another…' : 'Type a stop string, press Enter'}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); add(input) }
+          if (e.key === 'Backspace' && !input && value.length) onChange(value.slice(0, -1))
+        }}
+        onBlur={() => { if (input.trim()) add(input) }}
         className="w-full rounded-md border border-border bg-bg px-2 py-1 font-mono text-[12px] text-ink outline-none placeholder:text-faint"
       />
     </div>

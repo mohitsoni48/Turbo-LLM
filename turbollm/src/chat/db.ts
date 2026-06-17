@@ -8,7 +8,9 @@ export interface Conversation {
   title: string
   systemPrompt: string
   modelKey: string
-  sampling: Record<string, number>
+  /** Sampling overrides applied to every request in this conversation. Numeric keys
+   *  (temp, topP, …) are camelCase; stop strings live under the 'stop' key as string[]. */
+  sampling: Record<string, unknown>
   /** When true, this is the built-in TurboLLM Expert thread: its system prompt is
    *  managed server-side and hidden from the UI (spec 08 §2). */
   expertMode: boolean
@@ -56,7 +58,7 @@ type P = Record<string, SQLInputValue>
 function safeJson(s: string): unknown { try { return JSON.parse(s) } catch { return {} } }
 
 function rowToConv(r: ConvRow): Conversation {
-  return { id: r.id, title: r.title, systemPrompt: r.system_prompt, modelKey: r.model_key, sampling: safeJson(r.sampling) as Record<string, number>, expertMode: r.expert_mode === 1, createdAt: r.created_at, updatedAt: r.updated_at }
+  return { id: r.id, title: r.title, systemPrompt: r.system_prompt, modelKey: r.model_key, sampling: safeJson(r.sampling) as Record<string, unknown>, expertMode: r.expert_mode === 1, createdAt: r.created_at, updatedAt: r.updated_at }
 }
 
 function rowToMsg(r: MsgRow): Message {
