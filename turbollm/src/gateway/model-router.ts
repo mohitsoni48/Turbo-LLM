@@ -130,11 +130,14 @@ export class ModelRouter {
     if (!opts) return { status: 503, message: 'Model is incomplete or unreadable.' }
 
     const keepN = Math.max(1, this.store.snapshot().gateway.keepN)
-    const targetManager = this.loadedCount() < keepN
+    // Embedding models don't consume a chat slot — they get their own implicit slot
+    // so a loaded chat model is never evicted just because an embed model is requested.
+    const needsNewSlot = entry.embedding || this.chatSlotCount() < keepN
+    const targetManager = needsNewSlot
       ? (this.manager.status().state === 'stopped' || this.manager.status().state === 'error'
           ? this.manager
           : new Manager(this.store))
-      : this.evictLru()
+      : this.evictChatLru()
 
     await targetManager.stopAndWait()
     await this.comfy?.freeComfyUIBeforeLoad()
@@ -164,29 +167,58 @@ export class ModelRouter {
     return { target }
   }
 
-  private loadedCount(): number {
-    const states = ['running', 'starting'] as const
-    const primaryUp = (states as readonly string[]).includes(this.manager.status().state)
-    const extraUp = [...this.extraSlots.values()].filter(
-      s => (states as readonly string[]).includes(s.manager.status().state),
+  /** Count of alive chat (non-embedding) slots. Embedding models don't consume
+   *  a keepN slot so chat models and embedding models can coexist independently. */
+  private chatSlotCount(): number {
+    const isAlive = (s: string) => s === 'running' || s === 'starting'
+    const ms = this.manager.status()
+    const primaryAlive = isAlive(ms.state)
+    const primaryEmbed = primaryAlive && !!ms.model &&
+      (this.scanner.get(ms.model.key)?.embedding ?? false)
+    const extraChat = [...this.extraSlots.values()].filter(
+      s => isAlive(s.manager.status().state) &&
+        !(this.scanner.get(s.modelKey)?.embedding ?? false),
     ).length
-    return (primaryUp ? 1 : 0) + extraUp
+    return (primaryAlive && !primaryEmbed ? 1 : 0) + extraChat
   }
 
-  private evictLru(): Manager {
+  /** Evict the least-recently-used chat (non-embedding) slot. Embedding slots are
+   *  skipped; if every alive slot is an embedding model the true LRU is used as
+   *  a fallback so we never deadlock. */
+  private evictChatLru(): Manager {
+    const isAlive = (s: string) => s === 'running' || s === 'starting'
     const ms = this.manager.status()
-    const primaryAlive = ms.state === 'running' || ms.state === 'starting'
+    const primaryAlive = isAlive(ms.state)
+    const primaryEmbed = primaryAlive && !!ms.model &&
+      (this.scanner.get(ms.model.key)?.embedding ?? false)
+
     let lruManager: Manager = this.manager
-    let lruTime = primaryAlive ? this.primaryLastUsed : Infinity
+    let lruTime = (primaryAlive && !primaryEmbed) ? this.primaryLastUsed : Infinity
     let lruKey: string | null = null
+
     for (const slot of this.extraSlots.values()) {
-      const st = slot.manager.status().state
-      if ((st === 'running' || st === 'starting') && slot.lastUsedMs < lruTime) {
+      const slotEmbed = this.scanner.get(slot.modelKey)?.embedding ?? false
+      if (isAlive(slot.manager.status().state) && !slotEmbed && slot.lastUsedMs < lruTime) {
         lruTime = slot.lastUsedMs
         lruManager = slot.manager
         lruKey = slot.modelKey
       }
     }
+
+    // Fallback: all alive slots are embedding models — evict true LRU.
+    if (lruTime === Infinity) {
+      lruTime = primaryAlive ? this.primaryLastUsed : Infinity
+      lruManager = this.manager
+      lruKey = null
+      for (const slot of this.extraSlots.values()) {
+        if (isAlive(slot.manager.status().state) && slot.lastUsedMs < lruTime) {
+          lruTime = slot.lastUsedMs
+          lruManager = slot.manager
+          lruKey = slot.modelKey
+        }
+      }
+    }
+
     if (lruKey !== null) this.extraSlots.delete(lruKey)
     return lruManager
   }

@@ -81,6 +81,9 @@ export interface LoadProfile {
   ropeFreqScale: number
   /** Multi-GPU split settings (ADR-054). See {@link GpuProfile}. */
   gpu: GpuProfile
+  /** GBNF grammar enforced at startup (--grammar). Empty string = no constraint.
+   *  Power-user override for models that should always respond in a fixed format. */
+  grammar: string
   extraArgs: string[]
   /** Provenance of a saved profile (spec 05 §3, 09 §1): 'bench' = written by the
    *  auto-tune runner, 'user' = hand-saved. Absent on heuristic/global defaults. */
@@ -189,6 +192,7 @@ export function deriveDefault(m: ModelEntry, sys: SysInfo): LoadProfile {
     ropeFreqBase: 0,
     ropeFreqScale: 0,
     gpu: defaultGpu(),
+    grammar: '',
     extraArgs: [],
   }
 
@@ -325,6 +329,10 @@ export function profileToArgs(p: LoadProfile, m: ModelEntry, caps: Capabilities,
     if (p.ropeFreqBase > 0 && has('--rope-freq-base')) a.push('--rope-freq-base', String(p.ropeFreqBase))
     if (p.ropeFreqScale > 0 && has('--rope-freq-scale')) a.push('--rope-freq-scale', String(p.ropeFreqScale))
   }
+  // Embedding models activate the /v1/embeddings endpoint via --embeddings.
+  if (m.embedding && has('--embeddings')) a.push('--embeddings')
+  // Startup GBNF grammar constraint — only emitted when the user has set one.
+  if (p.grammar && has('--grammar')) a.push('--grammar', p.grammar)
   a.push(...p.extraArgs)
   return a
 }

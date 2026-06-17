@@ -24,6 +24,9 @@ export interface ModelEntry {
   vision: boolean
   mmprojPath: string | null
   hasChatTemplate: boolean
+  /** True for embedding models (BERT-family arch or known embed filename patterns).
+   *  Passed to llama-server as --embeddings to activate /v1/embeddings. */
+  embedding: boolean
   incomplete: boolean
   parseError: string | null
   loaded: boolean
@@ -42,6 +45,18 @@ interface CacheRow {
 const CACHE_VERSION = 2
 
 const SPLIT_RE = /^(.*)-(\d{5})-of-(\d{5})\.gguf$/i
+
+// GGUF architectures that are always embedding models.
+const EMBED_ARCHS = new Set([
+  'bert', 'nomic-bert', 'jina-bert-v3-base', 'jina-bert',
+  'distilbert', 'roberta', 'xlm-roberta', 'electra',
+])
+// Filename patterns common for embedding / reranker models.
+const EMBED_FILE_RE = /\b(bge[-_]|nomic[-_]embed|all[-_]minilm|e5[-_]|gte[-_]|stella[-_]embed|jina[-_]embed|mxbai[-_]embed)\b/i
+
+function isEmbeddingModel(arch: string, name: string): boolean {
+  return EMBED_ARCHS.has(arch.toLowerCase()) || EMBED_FILE_RE.test(name)
+}
 
 /** Thrown by Scanner operations that fail in a caller-actionable way (e.g. delete
  *  of an unknown key). Carries a machine-checkable `code` for the API envelope. */
@@ -210,6 +225,7 @@ export class Scanner {
     const quant = meta?.quant || quantFromName(fileName)
     const name = meta?.name || cleanName(fileName)
     const vision = mmprojPath !== null
+    const arch = meta?.arch ?? 'unknown'
 
     return {
       key: `${name.toLowerCase()}|${quant}|${sizeBytes}`,
@@ -219,7 +235,7 @@ export class Scanner {
       format: 'gguf',
       sizeBytes,
       sizeLabel: meta?.sizeLabel ?? '',
-      arch: meta?.arch ?? 'unknown',
+      arch,
       quant,
       nativeCtx: meta?.nativeCtx ?? 0,
       blockCount: meta?.blockCount ?? 0,
@@ -230,6 +246,7 @@ export class Scanner {
       vision,
       mmprojPath: vision ? mmprojPath : null,
       hasChatTemplate: meta?.hasChatTemplate ?? false,
+      embedding: isEmbeddingModel(arch, fileName),
       incomplete,
       parseError,
       loaded: false, // overlaid live by the API layer
@@ -385,6 +402,7 @@ function mlxEntryFor(dir: string): ModelEntry {
     vision: false,
     mmprojPath: null,
     hasChatTemplate,
+    embedding: isEmbeddingModel(arch, basename(dir)),
     incomplete: false,
     parseError,
     loaded: false,

@@ -12,7 +12,7 @@ function model(over: Partial<ModelEntry> = {}): ModelEntry {
     key: 'm|q4|1', name: 'm', path: '/models/m.gguf', dir: '/models', format: 'gguf',
     sizeBytes: 8_000_000_000, sizeLabel: '8 GB', arch: 'llama', quant: 'Q4_K_M',
     nativeCtx: 32768, blockCount: 32, headCountKv: 8, moe: false, expertCount: 0,
-    nextnLayers: 0, vision: false, mmprojPath: null, hasChatTemplate: true,
+    nextnLayers: 0, vision: false, mmprojPath: null, hasChatTemplate: true, embedding: false,
     incomplete: false, parseError: null, loaded: false, hasProfile: false,
     benchTps: null, mtime: '', ...over,
   }
@@ -174,4 +174,45 @@ test('resolveProfile carries contextOverflow and rope from saved profile', () =>
   assert.equal(resolved.ropeScalingType, 'linear')
   assert.equal(resolved.ropeFreqBase, 500000)
   assert.equal(resolved.ropeFreqScale, 0.5)
+})
+
+// ── Embedding + grammar (v0.7.0) ──────────────────────────────────────────────
+
+test('--embeddings flag emitted for embedding models', () => {
+  const args = profileToArgs(base(), model({ embedding: true }), caps)
+  assert.ok(args.includes('--embeddings'), '--embeddings should appear for embedding models')
+})
+
+test('--embeddings not emitted for chat models', () => {
+  const args = profileToArgs(base(), model({ embedding: false }), caps)
+  assert.equal(args.includes('--embeddings'), false)
+})
+
+test('--embeddings gated by engine capability', () => {
+  const capNoEmbed = { kvTypes: [], flags: ['--some-other-flag'] }
+  const args = profileToArgs(base(), model({ embedding: true }), capNoEmbed)
+  assert.equal(args.includes('--embeddings'), false)
+})
+
+test('--grammar emitted when grammar is set', () => {
+  const p = { ...base(), grammar: 'root ::= [a-z]+' }
+  const args = profileToArgs(p, model(), caps)
+  assert.equal(args[args.indexOf('--grammar') + 1], 'root ::= [a-z]+')
+})
+
+test('--grammar not emitted when grammar is empty', () => {
+  const p = { ...base(), grammar: '' }
+  const args = profileToArgs(p, model(), caps)
+  assert.equal(args.includes('--grammar'), false)
+})
+
+test('--grammar gated by engine capability', () => {
+  const capNoGrammar = { kvTypes: [], flags: ['--some-other-flag'] }
+  const p = { ...base(), grammar: 'root ::= [a-z]+' }
+  const args = profileToArgs(p, model(), capNoGrammar)
+  assert.equal(args.includes('--grammar'), false)
+})
+
+test('deriveDefault grammar is empty string', () => {
+  assert.equal(deriveDefault(model(), sys()).grammar, '')
 })
