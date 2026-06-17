@@ -382,6 +382,8 @@ export type HfRepoFile = {
   sizeBytes: number
   parts: number
   mmproj: boolean
+  /** True for MLX component files (safetensors + JSON). */
+  mlx?: boolean
   sha256?: string
   url: string
   /** True when this exact repo file was downloaded via TurboLLM and is still on
@@ -400,6 +402,8 @@ export type HfRepoDetail = {
   likes: number
   card: string
   files: HfRepoFile[]
+  /** True when the repo is an MLX model (no GGUFs, safetensors weights). */
+  mlx?: boolean
   /** True while the daemon is still computing content hashes to confirm whether
    *  size-matching local files are this repo's quants (spec 10 §3). The UI re-polls
    *  until it clears, then the "Downloaded" badges are final. */

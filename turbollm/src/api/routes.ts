@@ -1011,7 +1011,7 @@ export function registerApi(app: Hono, d: Deps): void {
 
   // Enqueue from an HF repo file {repo, rfilename} OR a raw URL {url}. 202.
   app.post('/api/v1/downloads', async (c) => {
-    const b = await body<{ repo?: string; rfilename?: string; url?: string; size?: number; sha256?: string }>(c)
+    const b = await body<{ repo?: string; rfilename?: string; url?: string; size?: number; sha256?: string; subdir?: string }>(c)
     try {
       const rec = d.downloads.enqueue(b)
       return c.json(rec, 202)

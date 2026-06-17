@@ -62,6 +62,7 @@ export function HfRepoDialog({
 
   const detail = detailQ.data
   const vramMb = sysQ.data?.gpus?.[0]?.vramMb
+  const isMlx = !!detail?.mlx
   const [selected, setSelected] = useState<string>('')
 
   // Pre-select the recommended quant: largest that fits; prefer K-quants over IQ at
@@ -113,6 +114,19 @@ export function HfRepoDialog({
     )
   }
 
+  // MLX models download all component files into a subdirectory named after the repo.
+  const onDownloadMlx = () => {
+    if (!detail?.mlx || !detail.files.length) return
+    const subdir = detail.repo.split('/').pop() ?? detail.repo
+    let queued = 0
+    for (const f of detail.files) {
+      dlMut.enqueue.mutate({ repo: detail.repo, rfilename: f.name, size: f.sizeBytes, sha256: f.sha256, subdir })
+      queued++
+    }
+    toast.success(`Queued ${queued} files for ${subdir}`)
+    onClose()
+  }
+
   const onLoad = () => {
     const key = selectedFile?.localKey
     if (!key) return
@@ -152,6 +166,13 @@ export function HfRepoDialog({
             error={detailQ.error}
             onRetry={() => detailQ.refetch()}
             onSearch={onSearch ? () => onSearch(repoSearchTerm(repo)) : undefined}
+          />
+        ) : isMlx ? (
+          <MlxRepoBody
+            detail={detail}
+            vramMb={vramMb}
+            onDownload={onDownloadMlx}
+            isPending={dlMut.enqueue.isPending}
           />
         ) : !detail || ggufFiles.length === 0 ? (
           <div className="py-10 text-center text-[13px] text-muted">No GGUF files found in this repo.</div>
@@ -242,6 +263,42 @@ export function HfRepoDialog({
         )}
       </DialogContent>
     </Dialog>
+  )
+}
+
+/** Body shown for MLX repos — no quant selection, single directory download. */
+function MlxRepoBody({
+  detail,
+  vramMb,
+  onDownload,
+  isPending,
+}: {
+  detail: { files: { sizeBytes: number }[]; gated: boolean }
+  vramMb: number | undefined
+  onDownload: () => void
+  isPending: boolean
+}) {
+  const totalBytes = detail.files.reduce((s, f) => s + f.sizeBytes, 0)
+  const fit = fileFit(totalBytes, vramMb)
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="rounded-md border border-border bg-panel-2 px-3 py-2.5 text-[12px] text-muted">
+        MLX model — runs on Apple Silicon via mlx-lm. Downloads as a directory of safetensors weights.
+      </div>
+
+      <div className="flex items-center gap-2 rounded-md border border-border bg-panel-2 px-3 py-2.5 text-[12px]">
+        <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: FIT_COLOR[fit] }} />
+        <span className="text-muted">
+          {FIT_LABEL[fit]}
+          {vramMb ? ` (${(totalBytes / 1e9).toFixed(1)} GB total · ${(vramMb / 1024).toFixed(0)} GB VRAM)` : `${(totalBytes / 1e9).toFixed(1)} GB total`}
+        </span>
+      </div>
+
+      <Button className="w-full" onClick={onDownload} disabled={detail.gated || isPending}>
+        <Download size={14} />
+        {isPending ? 'Queuing…' : 'Download MLX model'}
+      </Button>
+    </div>
   )
 }
 

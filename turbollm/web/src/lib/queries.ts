@@ -463,7 +463,7 @@ export function useDownloadMutations() {
   }
   return {
     enqueue: useMutation({
-      mutationFn: (input: { repo?: string; rfilename?: string; url?: string; size?: number; sha256?: string }) =>
+      mutationFn: (input: { repo?: string; rfilename?: string; url?: string; size?: number; sha256?: string; subdir?: string }) =>
         enqueueDownload(input),
       onSuccess: invalidate,
     }),

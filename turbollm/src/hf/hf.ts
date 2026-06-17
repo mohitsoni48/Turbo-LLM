@@ -30,14 +30,17 @@ export interface HfSearchItem {
   tags: string[]
 }
 
-/** One logical GGUF file in a repo (spec 10 §3). Split parts are grouped into a
- *  single entry with summed size and `parts` > 1. */
+/** One logical file in a repo (spec 10 §3). For GGUF: split parts are grouped into
+ *  a single entry with summed size and `parts` > 1. For MLX: each component file
+ *  (safetensors + JSON) is its own entry with `mlx: true`. */
 export interface HfRepoFile {
   name: string
   quant: string
   sizeBytes: number
   parts: number
   mmproj: boolean
+  /** True for MLX model component files (safetensors, config.json, etc.). */
+  mlx?: boolean
   /** HF LFS sha256 when published in the tree metadata; used for integrity. */
   sha256?: string
   /** Download URL for the first/only part (resolve/main). */
@@ -52,6 +55,8 @@ export interface HfRepoDetail {
   likes: number
   card: string
   files: HfRepoFile[]
+  /** True when the repo is an MLX model (safetensors weights, no GGUFs). */
+  mlx?: boolean
 }
 
 interface CacheRow {
@@ -92,8 +97,36 @@ export class HfClient {
     const info = await this.getJson<RawRepoInfo>(`${BASE}/api/models/${repo}`)
     const tree = await this.getJson<RawTreeEntry[]>(`${BASE}/api/models/${repo}/tree/main?recursive=true`)
 
-    const gguf = tree.filter((e) => e.type === 'file' && /\.gguf$/i.test(e.path))
-    const files = groupFiles(repo, gguf)
+    const ggufEntries = tree.filter((e) => e.type === 'file' && /\.gguf$/i.test(e.path))
+    const safetensorsEntries = tree.filter((e) => e.type === 'file' && /\.safetensors$/i.test(e.path))
+
+    // MLX model: has safetensors weights but no GGUFs.
+    const isMlx = ggufEntries.length === 0 && safetensorsEntries.length > 0
+
+    let files: HfRepoFile[]
+    let mlx: boolean | undefined
+    if (isMlx) {
+      mlx = true
+      // Collect all component files: safetensors weights + JSON config/tokenizer files.
+      const components = tree.filter(
+        (e) =>
+          e.type === 'file' &&
+          (/\.safetensors$/i.test(e.path) || /\.json$/i.test(e.path)) &&
+          !e.path.includes('/'), // root-level only — no nested model card assets
+      )
+      files = components.map((e) => ({
+        name: e.path,
+        quant: 'mlx',
+        sizeBytes: e.lfs?.size ?? e.size ?? 0,
+        parts: 1,
+        mmproj: false,
+        mlx: true,
+        sha256: e.lfs?.oid,
+        url: this.fileUrl(repo, e.path),
+      }))
+    } else {
+      files = groupFiles(repo, ggufEntries)
+    }
 
     const gated = info.gated === true || info.gated === 'auto' || info.gated === 'manual'
     const license =
@@ -108,6 +141,7 @@ export class HfClient {
       likes: info.likes ?? 0,
       card: await this.getCard(repo),
       files,
+      ...(mlx ? { mlx } : {}),
     }
   }
 

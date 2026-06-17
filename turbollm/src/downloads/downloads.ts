@@ -77,6 +77,9 @@ export interface EnqueueInput {
   url?: string
   size?: number
   sha256?: string
+  /** Subdirectory under the primary model dir for the downloaded file. Used for
+   *  MLX models whose component files must all land in the same directory. */
+  subdir?: string
 }
 
 export class DownloadError extends Error {
@@ -137,28 +140,31 @@ export class DownloadManager {
     if (!dir) throw new DownloadError('no_model_dir', 'Add a model folder in Settings before downloading.')
 
     let repo = (input.repo ?? '').trim()
+    const subdir = (input.subdir ?? '').trim()
     let url: string
     let filename: string
     if (input.url) {
       const u = input.url.trim()
       if (!/^https?:\/\//i.test(u)) throw new DownloadError('invalid_url', 'URL must start with http:// or https://.')
       const path = safePathname(u)
-      if (!/\.gguf$/i.test(path) && !HF_BLOB_RE.test(u)) {
+      if (!subdir && !/\.gguf$/i.test(path) && !HF_BLOB_RE.test(u)) {
         throw new DownloadError('invalid_url', 'URL must point to a .gguf file.')
       }
       filename = basename(path)
-      if (!/\.gguf$/i.test(filename)) throw new DownloadError('invalid_url', 'Could not derive a .gguf filename from that URL.')
+      if (!subdir && !/\.gguf$/i.test(filename)) throw new DownloadError('invalid_url', 'Could not derive a .gguf filename from that URL.')
       url = u
       repo = '' // raw-URL import: no provenance
     } else {
       const rfilename = (input.rfilename ?? '').trim()
       if (!repo || !rfilename) throw new DownloadError('invalid_request', 'repo and rfilename are required.')
-      if (!/\.gguf$/i.test(rfilename)) throw new DownloadError('invalid_url', 'The file must be a .gguf.')
+      if (!subdir && !/\.gguf$/i.test(rfilename)) throw new DownloadError('invalid_url', 'The file must be a .gguf.')
       filename = basename(rfilename)
       url = `https://huggingface.co/${repo}/resolve/main/${rfilename}`
     }
 
     const total = input.size ?? 0
+    const destDir = subdir ? join(dir, subdir) : dir
+    if (subdir) mkdirSync(destDir, { recursive: true })
     if (total > 0) this.assertDisk(dir, total)
 
     const id = `dl-${Date.now().toString(36)}-${(this.nextSeq++).toString(36)}`
@@ -167,7 +173,7 @@ export class DownloadManager {
       name: filename,
       repo,
       url,
-      dest: join(dir, filename),
+      dest: join(destDir, filename),
       total,
       received: 0,
       status: 'queued',

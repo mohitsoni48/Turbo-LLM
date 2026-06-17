@@ -477,6 +477,7 @@ export function enqueueDownload(input: {
   url?: string
   size?: number
   sha256?: string
+  subdir?: string
 }): Promise<DownloadRecord> {
   return request<DownloadRecord>('/api/v1/downloads', { method: 'POST', json: input })
 }
