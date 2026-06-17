@@ -167,7 +167,7 @@ export class Manager {
     }
 
     const { cmd, args } = engineCommand(opts, port, slotSavePath)
-    const child = spawn(cmd, args, { cwd: dirname(cmd), windowsHide: true })
+    const child = spawn(cmd, args, { cwd: dirname(cmd), windowsHide: true, env: pyEngineEnv(opts.engine.kind, this.store.dir()) })
     // end:false — otherwise whichever of stdout/stderr closes first would end the
     // shared log stream and drop the other's output. We close it in onTerminated.
     child.stdout?.pipe(logStream, { end: false })
@@ -364,10 +364,27 @@ export class Manager {
   }
 
   private async readiness(child: ChildProcess, port: number): Promise<void> {
-    const deadline = Date.now() + readinessTimeoutMs(this.opts?.engine.kind ?? 'llama-server')
+    const kind = this.opts?.engine.kind ?? 'llama-server'
+    const deadline = Date.now() + readinessTimeoutMs(kind)
     for (;;) {
       await sleep(500)
       if (this.child !== child || this.state !== 'starting') return
+      // Python engines (mlx/vllm) load the model in a background thread AFTER the HTTP
+      // socket binds, so /v1/models answers 200 even when the load crashed — which would
+      // otherwise flip us to "running" and then hang every request forever on a dead
+      // generation thread. Detect a fatal load-failure traceback in the log and surface
+      // it as an engine error instead. (Checked before probeReady so we win the race.)
+      if (kind === 'mlx' || kind === 'vllm') {
+        const loadErr = detectPyLoadFailure(readTail(this.logPathStr, 200))
+        if (loadErr) {
+          if (this.child === child && this.state === 'starting') {
+            this.state = 'error'
+            this.errInfo = { code: 'model_load_failed', message: loadErr, exitCode: -1, logTail: readTail(this.logPathStr, 20) }
+            child.kill('SIGKILL')
+          }
+          return
+        }
+      }
       if (await probeReady(port)) {
         if (this.child === child && this.state === 'starting') {
           this.state = 'running'
@@ -424,6 +441,52 @@ function engineCommand(opts: StartOpts, port: number, slotSavePath?: string): { 
  *  readiness timeout. */
 function readinessTimeoutMs(kind: string): number {
   return kind === 'vllm' ? 600_000 : 120_000
+}
+
+/** Environment for Python-based engines (mlx, vllm). Returns undefined for native
+ *  engines so they inherit the daemon env unchanged. For Python engines we:
+ *   - force HuggingFace OFFLINE so a model load / request can never block on a network
+ *     call (TurboLLM downloads models itself; it is offline-first), and
+ *   - point the HF cache at a real, created dir inside the TurboLLM data dir so mlx-lm's
+ *     `/v1/models` (which calls huggingface_hub `scan_cache_dir()`) doesn't crash with
+ *     CacheNotFound when `~/.cache/huggingface/hub` is absent. */
+function pyEngineEnv(kind: string, dataDir: string): NodeJS.ProcessEnv | undefined {
+  if (kind !== 'mlx' && kind !== 'vllm') return undefined
+  const hfHome = join(dataDir, 'hf-cache')
+  const hubCache = join(hfHome, 'hub')
+  mkdirSync(hubCache, { recursive: true })
+  return {
+    ...process.env,
+    HF_HUB_OFFLINE: '1',
+    TRANSFORMERS_OFFLINE: '1',
+    HF_HOME: hfHome,
+    HF_HUB_CACHE: hubCache,
+  }
+}
+
+/** Scan a Python engine's log tail for a fatal model-load failure. mlx-lm loads the
+ *  model in a background "_generate" thread; if `load_weights` throws (e.g. a model
+ *  architecture or quantization the installed mlx-lm version doesn't support), that
+ *  thread dies but the HTTP server keeps answering /v1/models, so chat requests queue
+ *  to a dead thread and hang forever. We catch the crash and return a concise message;
+ *  null when no such failure is present. */
+function detectPyLoadFailure(lines: string[]): string | null {
+  const text = lines.join('\n')
+  // Gate on the load path specifically so unrelated tracebacks (e.g. the /v1/models
+  // CacheNotFound handler) never false-trigger this.
+  const isLoadCrash =
+    /Exception in thread[^\n]*_generate/.test(text) ||
+    /in load_default\b/.test(text) ||
+    /in load_model\b/.test(text) ||
+    /load_weights/.test(text)
+  if (!isLoadCrash) return null
+  // The final "SomeError: message" / "SomeException: message" line is the useful detail.
+  const errLine = [...lines].reverse().find((l) => /^[A-Za-z_][\w.]*(Error|Exception):/.test(l.trim()))
+  const detail = (errLine ? errLine.trim() : 'the model failed to load').slice(0, 200)
+  return (
+    `MLX could not load this model — ${detail} ` +
+    `This usually means the installed mlx-lm version does not support this model's architecture or quantization.`
+  )
 }
 
 function buildArgs(opts: StartOpts, port: number, slotSavePath?: string): string[] {
