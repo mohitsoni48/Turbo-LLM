@@ -19,6 +19,7 @@ export type EngineError = {
 export type EngineRuntime = {
   id: string
   name: string
+  kind?: string
   state: EngineState
   error?: EngineError
   port?: number
@@ -374,16 +375,17 @@ export type HfSearchResult = {
   results: HfSearchItem[]
 }
 
-/** One logical GGUF file in a repo (spec 10 §3): split parts are grouped into one
- *  entry with summed size and `parts` > 1. */
+/** One logical file in a repo (spec 10 §3): GGUF split parts are grouped into one
+ *  entry with summed size and `parts` > 1; safetensors component files each get
+ *  their own entry with `safetensors: true`. */
 export type HfRepoFile = {
   name: string
   quant: string
   sizeBytes: number
   parts: number
   mmproj: boolean
-  /** True for MLX component files (safetensors + JSON). */
-  mlx?: boolean
+  /** True for safetensors component files (MLX and vLLM repos). */
+  safetensors?: boolean
   sha256?: string
   url: string
   /** True when this exact repo file was downloaded via TurboLLM and is still on
@@ -402,8 +404,8 @@ export type HfRepoDetail = {
   likes: number
   card: string
   files: HfRepoFile[]
-  /** True when the repo is an MLX model (no GGUFs, safetensors weights). */
-  mlx?: boolean
+  /** True when the repo is a safetensors model (no GGUFs — covers MLX and vLLM). */
+  safetensors?: boolean
   /** True while the daemon is still computing content hashes to confirm whether
    *  size-matching local files are this repo's quants (spec 10 §3). The UI re-polls
    *  until it clears, then the "Downloaded" badges are final. */

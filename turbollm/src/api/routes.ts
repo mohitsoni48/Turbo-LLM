@@ -53,6 +53,7 @@ export function registerApi(app: Hono, d: Deps): void {
     const engine: Record<string, unknown> = {
       id: active?.id ?? '',
       name: active?.name ?? '',
+      kind: active?.kind ?? '',
       state: ms.state,
       port: ms.port,
       pid: ms.pid,
@@ -932,7 +933,7 @@ export function registerApi(app: Hono, d: Deps): void {
     const q = (c.req.query('q') ?? '').trim()
     if (!q) return c.json({ results: [] })
     try {
-      const results = await d.hf.searchModels(q)
+      const results = await d.hf.searchModels(q, d.registry.active()?.kind)
       const withLocal = results.map((r) => ({ ...r, localCount: localCountFor(d, r.repo) }))
       return c.json({ results: withLocal })
     } catch (e) {

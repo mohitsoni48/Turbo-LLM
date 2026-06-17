@@ -8,7 +8,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Download, ExternalLink, Lock, Zap } from 'lucide-react'
 import { ApiError } from '../../lib/api'
-import { useDownloadMutations, useHfRepo, useModelActions, useSysInfo } from '../../lib/queries'
+import { useDownloadMutations, useHfRepo, useModelActions, useStatus, useSysInfo } from '../../lib/queries'
 import type { FitVerdict } from '../../lib/types'
 import { Button } from '../../components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../components/ui/dialog'
@@ -60,9 +60,11 @@ export function HfRepoDialog({
   const dlMut = useDownloadMutations()
   const actions = useModelActions()
 
+  const statusQ = useStatus()
+  const engineKind = statusQ.data?.engine.kind ?? ''
   const detail = detailQ.data
   const vramMb = sysQ.data?.gpus?.[0]?.vramMb
-  const isMlx = !!detail?.mlx
+  const isSafetensors = !!detail?.safetensors
   const [selected, setSelected] = useState<string>('')
 
   // Pre-select the recommended quant: largest that fits; prefer K-quants over IQ at
@@ -114,9 +116,9 @@ export function HfRepoDialog({
     )
   }
 
-  // MLX models download all component files into a subdirectory named after the repo.
-  const onDownloadMlx = () => {
-    if (!detail?.mlx || !detail.files.length) return
+  // Safetensors repos (MLX / vLLM) download all component files into a subdirectory.
+  const onDownloadSafetensors = () => {
+    if (!detail?.safetensors || !detail.files.length) return
     const subdir = detail.repo.split('/').pop() ?? detail.repo
     let queued = 0
     for (const f of detail.files) {
@@ -167,11 +169,12 @@ export function HfRepoDialog({
             onRetry={() => detailQ.refetch()}
             onSearch={onSearch ? () => onSearch(repoSearchTerm(repo)) : undefined}
           />
-        ) : isMlx ? (
+        ) : isSafetensors ? (
           <MlxRepoBody
             detail={detail}
             vramMb={vramMb}
-            onDownload={onDownloadMlx}
+            engineKind={engineKind}
+            onDownload={onDownloadSafetensors}
             isPending={dlMut.enqueue.isPending}
           />
         ) : !detail || ggufFiles.length === 0 ? (
@@ -266,24 +269,33 @@ export function HfRepoDialog({
   )
 }
 
-/** Body shown for MLX repos — no quant selection, single directory download. */
+/** Body shown for safetensors repos (MLX / vLLM) — no quant selection, whole-directory download. */
 function MlxRepoBody({
   detail,
   vramMb,
+  engineKind,
   onDownload,
   isPending,
 }: {
   detail: { files: { sizeBytes: number }[]; gated: boolean }
   vramMb: number | undefined
+  engineKind: string
   onDownload: () => void
   isPending: boolean
 }) {
   const totalBytes = detail.files.reduce((s, f) => s + f.sizeBytes, 0)
   const fit = fileFit(totalBytes, vramMb)
+  const description =
+    engineKind === 'mlx'
+      ? 'MLX model — runs on Apple Silicon via mlx-lm. Downloads as a directory of safetensors weights.'
+      : engineKind === 'vllm'
+        ? 'HuggingFace model — runs via vLLM. Downloads as a directory of safetensors weights.'
+        : 'Safetensors model — downloads as a directory of weight files.'
+  const btnLabel = engineKind === 'mlx' ? 'Download MLX model' : 'Download model'
   return (
     <div className="flex flex-col gap-4">
       <div className="rounded-md border border-border bg-panel-2 px-3 py-2.5 text-[12px] text-muted">
-        MLX model — runs on Apple Silicon via mlx-lm. Downloads as a directory of safetensors weights.
+        {description}
       </div>
 
       <div className="flex items-center gap-2 rounded-md border border-border bg-panel-2 px-3 py-2.5 text-[12px]">
@@ -296,7 +308,7 @@ function MlxRepoBody({
 
       <Button className="w-full" onClick={onDownload} disabled={detail.gated || isPending}>
         <Download size={14} />
-        {isPending ? 'Queuing…' : 'Download MLX model'}
+        {isPending ? 'Queuing…' : btnLabel}
       </Button>
     </div>
   )

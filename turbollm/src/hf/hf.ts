@@ -31,16 +31,17 @@ export interface HfSearchItem {
 }
 
 /** One logical file in a repo (spec 10 §3). For GGUF: split parts are grouped into
- *  a single entry with summed size and `parts` > 1. For MLX: each component file
- *  (safetensors + JSON) is its own entry with `mlx: true`. */
+ *  a single entry with summed size and `parts` > 1. For safetensors repos (MLX /
+ *  vLLM): each component file (safetensors + JSON) is its own entry with
+ *  `safetensors: true`. */
 export interface HfRepoFile {
   name: string
   quant: string
   sizeBytes: number
   parts: number
   mmproj: boolean
-  /** True for MLX model component files (safetensors, config.json, etc.). */
-  mlx?: boolean
+  /** True for safetensors component files (MLX and vLLM repos). */
+  safetensors?: boolean
   /** HF LFS sha256 when published in the tree metadata; used for integrity. */
   sha256?: string
   /** Download URL for the first/only part (resolve/main). */
@@ -55,8 +56,8 @@ export interface HfRepoDetail {
   likes: number
   card: string
   files: HfRepoFile[]
-  /** True when the repo is an MLX model (safetensors weights, no GGUFs). */
-  mlx?: boolean
+  /** True when the repo is a safetensors model (no GGUFs — covers MLX and vLLM). */
+  safetensors?: boolean
 }
 
 interface CacheRow {
@@ -74,12 +75,18 @@ export class HfClient {
     private version: string,
   ) {}
 
-  /** Search GGUF repos (spec 10 §2). Returns up to 30 rows sorted by downloads. */
-  async searchModels(query: string): Promise<HfSearchItem[]> {
+  /** Search repos (spec 10 §2). Returns up to 30 rows sorted by downloads.
+   *  Format filter adapts to the active engine kind:
+   *  - llama-server / TurboQuant → filter=gguf
+   *  - mlx                       → filter=mlx (HF library tag)
+   *  - vllm                      → no format filter (searches all HF repos) */
+  async searchModels(query: string, engineKind?: string): Promise<HfSearchItem[]> {
     const q = query.trim()
+    const formatFilter =
+      engineKind === 'mlx' ? '&filter=mlx' : engineKind === 'vllm' ? '' : '&filter=gguf'
     const url =
       `${BASE}/api/models?search=${encodeURIComponent(q)}` +
-      `&filter=gguf&sort=downloads&direction=-1&limit=30&full=false`
+      `${formatFilter}&sort=downloads&direction=-1&limit=30&full=false`
     const raw = await this.getJson<RawSearchItem[]>(url)
     return raw.map((m) => ({
       repo: m.id ?? m.modelId ?? '',
@@ -100,13 +107,13 @@ export class HfClient {
     const ggufEntries = tree.filter((e) => e.type === 'file' && /\.gguf$/i.test(e.path))
     const safetensorsEntries = tree.filter((e) => e.type === 'file' && /\.safetensors$/i.test(e.path))
 
-    // MLX model: has safetensors weights but no GGUFs.
-    const isMlx = ggufEntries.length === 0 && safetensorsEntries.length > 0
+    // Safetensors repo (MLX or vLLM): has safetensors weights but no GGUFs.
+    const isSafetensors = ggufEntries.length === 0 && safetensorsEntries.length > 0
 
     let files: HfRepoFile[]
-    let mlx: boolean | undefined
-    if (isMlx) {
-      mlx = true
+    let safetensors: boolean | undefined
+    if (isSafetensors) {
+      safetensors = true
       // Collect all component files: safetensors weights + JSON config/tokenizer files.
       const components = tree.filter(
         (e) =>
@@ -120,7 +127,7 @@ export class HfClient {
         sizeBytes: e.lfs?.size ?? e.size ?? 0,
         parts: 1,
         mmproj: false,
-        mlx: true,
+        safetensors: true,
         sha256: e.lfs?.oid,
         url: this.fileUrl(repo, e.path),
       }))
@@ -141,7 +148,7 @@ export class HfClient {
       likes: info.likes ?? 0,
       card: await this.getCard(repo),
       files,
-      ...(mlx ? { mlx } : {}),
+      ...(safetensors ? { safetensors } : {}),
     }
   }
 

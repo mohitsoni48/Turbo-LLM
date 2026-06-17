@@ -352,6 +352,8 @@ export type DaemonSettings = {
   /** Whether an HF token is stored (spec 10 §4). The token itself is never echoed
    *  back — write it via {@link saveSettings}'s `hfToken` patch field only. */
   hfTokenSet: boolean
+  /** Gateway intelligence settings (ADR-06x): model auto-swap + keep-N pool. */
+  gateway: { autoSwap: boolean; keepN: number }
 }
 
 /** Settings patch: the persisted {@link DaemonSettings} fields plus a write-only
