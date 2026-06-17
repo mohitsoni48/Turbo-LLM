@@ -93,6 +93,10 @@ export function vllmServerCommand(
   const args = [
     '-m', 'vllm.entrypoints.openai.api_server',
     '--model', model,
+    // Serve under a fixed alias so requests can address the model by a stable name
+    // (TurboLLM's internal key is a display string with spaces). Mirrors mlx-lm's
+    // built-in `default_model` alias; see engineModelAlias() in compat.ts.
+    '--served-model-name', 'default_model',
     '--host', host,
     '--port', String(port),
   ]

@@ -4,6 +4,7 @@ import type { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import type { Deps } from '../deps'
 import { clampMaxTokens } from '../config/config'
+import { engineModelAlias } from '../engines/compat'
 import { mapToOpenAI, mapFromOpenAI, streamToAnthropic, type AnthropicRequest } from './anthropic'
 
 export function registerGateway(app: Hono, d: Deps): void {
@@ -44,6 +45,10 @@ export function registerGateway(app: Hono, d: Deps): void {
     const status = d.manager.status()
     const modelName = status.state === 'running' ? (status.model?.name ?? req.model ?? 'local') : (req.model ?? 'local')
     const oaiBody = mapToOpenAI(req)
+    // mlx-lm / vLLM serve under a fixed alias and reject the client's model id; rewrite
+    // the outbound field (routing above already used the original id). No-op for llama.cpp.
+    const oaiAlias = engineModelAlias(d.registry.active()?.kind ?? '')
+    if (oaiAlias) (oaiBody as Record<string, unknown>).model = oaiAlias
 
     // Mark the completion in-flight so the engine card's live "Generating…"
     // indicator counts Claude-CLI (Anthropic-protocol) traffic too. Each branch
@@ -191,6 +196,12 @@ export function registerGateway(app: Hono, d: Deps): void {
         // Body already parsed above for routing. Apply token cap if set.
         if (parsedBody && maxLimit > 0) {
           parsedBody.max_tokens = clampMaxTokens(parsedBody.max_tokens as number | undefined, maxLimit)
+        }
+        // Rewrite the outbound model id for engines that serve under a fixed alias
+        // (mlx-lm / vLLM). Routing above already used the caller's original id.
+        if (parsedBody) {
+          const alias = engineModelAlias(d.registry.active()?.kind ?? '')
+          if (alias) parsedBody.model = alias
         }
         headers.delete('content-length') // re-serialised body has a new length
         init.body = parsedBody ? JSON.stringify(parsedBody) : ''

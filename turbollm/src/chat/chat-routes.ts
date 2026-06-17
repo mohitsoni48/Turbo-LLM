@@ -3,6 +3,7 @@ import type { Context, Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import type { Deps } from '../deps'
 import { clampMaxTokens } from '../config/config'
+import { engineModelAlias } from '../engines/compat'
 import { getSysInfo } from '../sysinfo/sysinfo'
 import type { MessageStats } from './db'
 
@@ -289,7 +290,9 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
       }
 
       const reqBody: Record<string, unknown> = {
-        model: ms.model!.key,
+        // mlx-lm / vLLM serve under a fixed alias and 404 on TurboLLM's internal key;
+        // llama.cpp ignores the field. engineModelAlias() returns the right value per kind.
+        model: engineModelAlias(d.registry.active()?.kind ?? '') ?? ms.model!.key,
         messages: engineMessages,
         stream: true,
         stream_options: { include_usage: true },
@@ -596,7 +599,7 @@ async function autoTitle(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: ms.model?.key,
+        model: engineModelAlias(d.registry.active()?.kind ?? '') ?? ms.model?.key,
         messages: titleMessages,
         stream: false,
         temperature: 0.3,
