@@ -402,7 +402,7 @@ export function ChatScreen() {
         </div>
 
         {/* Message list — always visible; empty state shown only when no messages */}
-        <div ref={scrollerRef} className="min-h-0 flex-1 overflow-y-auto">
+        <div ref={scrollerRef} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
           <div className="flex w-full flex-col gap-6 px-8 py-6">
             {/* Empty state */}
             {messages.length === 0 && !live && (

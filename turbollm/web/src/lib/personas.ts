@@ -1,4 +1,4 @@
-export type PersonaId = 'default' | 'blunt' | 'concise' | 'detailed' | 'formal' | 'tutor' | 'creative'
+export type PersonaId = 'default' | 'blank' | 'blunt' | 'concise' | 'detailed' | 'formal' | 'tutor' | 'creative'
 
 export interface Persona {
   id: PersonaId
@@ -11,7 +11,13 @@ export const PERSONAS: readonly Persona[] = [
   {
     id: 'default',
     name: 'Default',
-    description: "Balanced and helpful — the model's built-in style",
+    description: "Balanced and helpful with chart capability and your personalization settings",
+    systemPrompt: '',
+  },
+  {
+    id: 'blank',
+    name: 'Blank',
+    description: 'Zero system prompt — raw model output, no instructions injected',
     systemPrompt: '',
   },
   {
@@ -137,6 +143,7 @@ Always include a title, axis/column labels, and the underlying numbers. Keep cha
 
 /** Build the hidden system prompt for a new conversation from a persona + personalization. */
 export function buildSystemPrompt(personaId: PersonaId, p: Personalization): string {
+  if (personaId === 'blank') return ''
   const persona = PERSONAS.find((px) => px.id === personaId)
   const parts: string[] = [TURBOLLM_BASE_CAPABILITY]
   if (persona?.systemPrompt) parts.push(persona.systemPrompt)

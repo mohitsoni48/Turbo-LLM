@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
@@ -85,7 +85,7 @@ function StatsRow({ stats }: { stats: Partial<MessageStats> }) {
 
 // ── Markdown renderer ─────────────────────────────────────────────────────────
 
-function Markdown({ children }: { children: string }) {
+const Markdown = memo(function Markdown({ children }: { children: string }) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
@@ -108,7 +108,9 @@ function Markdown({ children }: { children: string }) {
                 <span>{lang}</span>
                 <CopyButton text={String(children)} size={12} />
               </div>
-              <code className={`${className ?? ''} block overflow-auto p-3 font-mono text-[13px] leading-relaxed whitespace-pre`} {...props}>{children}</code>
+              <div className="overflow-x-auto overscroll-x-contain" onScroll={e => e.stopPropagation()}>
+                <code className={`${className ?? ''} block p-3 font-mono text-[13px] leading-relaxed whitespace-pre`} {...props}>{children}</code>
+              </div>
             </div>
           )
         },
@@ -121,7 +123,7 @@ function Markdown({ children }: { children: string }) {
       {children}
     </ReactMarkdown>
   )
-}
+})
 
 // ── Streaming message (in-progress) ──────────────────────────────────────────
 
