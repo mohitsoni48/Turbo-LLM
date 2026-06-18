@@ -1216,8 +1216,8 @@ function inferRepoFromPath(filePath: string, modelDirs: string[]): string | null
     const root = norm(dir)
     if (!fp.toLowerCase().startsWith(root.toLowerCase() + '/')) continue
     const parts = fp.slice(root.length + 1).split('/')
-    // Need at least owner/repo/file. owner+repo are the first two segments under root.
-    if (parts.length >= 3 && seg.test(parts[0]) && seg.test(parts[1])) {
+    // Need at least owner/repo (MLX dirs) or owner/repo/file (GGUF files).
+    if (parts.length >= 2 && seg.test(parts[0]) && seg.test(parts[1])) {
       return `${parts[0]}/${parts[1]}`
     }
     return null
