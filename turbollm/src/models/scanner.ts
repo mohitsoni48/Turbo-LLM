@@ -348,7 +348,7 @@ interface MlxConfig {
 }
 
 /** Build a ModelEntry for an MLX model directory by reading its config.json. */
-function mlxEntryFor(dir: string): ModelEntry {
+export function mlxEntryFor(dir: string): ModelEntry {
   let cfg: MlxConfig = {}
   let parseError: string | null = null
   try {

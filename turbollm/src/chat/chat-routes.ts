@@ -4,17 +4,12 @@ import { streamSSE } from 'hono/streaming'
 import type { Deps } from '../deps'
 import { clampMaxTokens } from '../config/config'
 import { engineModelAlias } from '../engines/compat'
+import { feedChunk, flushState, initParseState } from './parser'
 import { getSysInfo } from '../sysinfo/sysinfo'
 import type { MessageStats, ToolCallRecord } from './db'
 
 // Track in-flight abort controllers per conversation id.
 const inflight = new Map<string, AbortController>()
-
-const THINK_OPEN = '<think>'
-const THINK_CLOSE = '</think>'
-const CHAN_ANALYSIS_OPEN = '<|channel|>analysis<|message|>'
-const CHAN_CLOSE = '<|end|>'
-const CHAN_FINAL_SKIP = '<|start|>assistant<|channel|>final<|message|>'
 
 // Built-in system prompt for the TurboLLM Expert thread (spec 08 §2). Kept
 // server-side and never sent to the client, so it stays hidden from the UI.
@@ -385,10 +380,7 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
 
       // Per-round state
       let roundContent = ''
-      type ParsePhase = 'initial' | 'reasoning' | 'skipFinal' | 'content'
-      let parsePhase: ParsePhase = 'initial'
-      let parseIsChannel = false
-      let parseBuf = ''
+      let parseState = initParseState()
       let finishReason = ''
       // Accumulate streaming tool_calls by index (OpenAI format: fragmented across chunks)
       const pendingToolCalls = new Map<number, { id: string; name: string; argsBuffer: string }>()
@@ -457,105 +449,20 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
           const raw_content = delta.content ?? ''
           if (!raw_content) continue
 
-          parseBuf += raw_content
-
-          // State machine handles <think>...</think> (llama.cpp) and
-          // <|channel|>analysis<|message|>...<|end|> (GPT-OSS channel format).
-          while (parseBuf.length > 0) {
-            if (parsePhase === 'initial') {
-              const thinkIdx = parseBuf.indexOf(THINK_OPEN)
-              const chanIdx  = parseBuf.indexOf(CHAN_ANALYSIS_OPEN)
-              const hasThink = thinkIdx >= 0
-              const hasChan  = chanIdx >= 0
-              const useThink = hasThink && (!hasChan || thinkIdx <= chanIdx)
-              const openIdx  = useThink ? thinkIdx : hasChan ? chanIdx : -1
-              const openTag  = useThink ? THINK_OPEN : CHAN_ANALYSIS_OPEN
-
-              if (openIdx === 0) {
-                parseIsChannel = !useThink
-                parsePhase = 'reasoning'
-                if (!thinkStart) thinkStart = Date.now()
-                parseBuf = parseBuf.slice(openTag.length)
-              } else if (openIdx > 0) {
-                const before = parseBuf.slice(0, openIdx)
-                fullContent += before
-                roundContent += before
-                if (!ttftMs) ttftMs = Date.now() - requestStart
-                await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: before }) })
-                parseIsChannel = !useThink
-                parsePhase = 'reasoning'
-                if (!thinkStart) thinkStart = Date.now()
-                parseBuf = parseBuf.slice(openIdx + openTag.length)
-              } else {
-                // 29-char lookahead: safe threshold to detect the 30-char CHAN_ANALYSIS_OPEN
-                // tag before flushing. Tradeoff: non-reasoning responses buffer ~1 extra
-                // cycle before first delta (TTFT impact ≈ 30 chars / tok/s).
-                const safeLen = parseBuf.length - (CHAN_ANALYSIS_OPEN.length - 1)
-                if (safeLen > 0) {
-                  const flush = parseBuf.slice(0, safeLen)
-                  parseBuf = parseBuf.slice(safeLen)
-                  fullContent += flush
-                  roundContent += flush
-                  if (!ttftMs) ttftMs = Date.now() - requestStart
-                  d.manager.setLiveGen({ phase: 'gen', pct: 0, outputTokens: ++liveOut })
-                  await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: flush }) })
-                  parsePhase = 'content'
-                } else {
-                  break
-                }
-              }
-            } else if (parsePhase === 'reasoning') {
-              const closeTag = parseIsChannel ? CHAN_CLOSE : THINK_CLOSE
-              const closeIdx = parseBuf.indexOf(closeTag)
-              if (closeIdx >= 0) {
-                if (closeIdx > 0) {
-                  const chunk = parseBuf.slice(0, closeIdx)
-                  fullReasoning += chunk
-                  await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: chunk }) })
-                }
-                thinkEnd = Date.now()
-                const wasChannel = parseIsChannel
-                parseBuf = parseBuf.slice(closeIdx + closeTag.length)
-                parsePhase = wasChannel ? 'skipFinal' : 'content'
-                if (!wasChannel && parseBuf) {
-                  fullContent += parseBuf
-                  roundContent += parseBuf
-                  if (!ttftMs) ttftMs = Date.now() - requestStart
-                  await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: parseBuf }) })
-                  parseBuf = ''
-                }
-              } else if (parseBuf.length >= closeTag.length) {
-                const safe = parseBuf.length - (closeTag.length - 1)
-                const chunk = parseBuf.slice(0, safe)
-                parseBuf = parseBuf.slice(safe)
-                thinkEnd = Date.now()
-                fullReasoning += chunk
-                await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: chunk }) })
-              } else {
-                break
-              }
-            } else if (parsePhase === 'skipFinal') {
-              if (parseBuf.startsWith(CHAN_FINAL_SKIP)) {
-                parseBuf = parseBuf.slice(CHAN_FINAL_SKIP.length)
-                parsePhase = 'content'
-              } else if (CHAN_FINAL_SKIP.startsWith(parseBuf) && parseBuf.length < CHAN_FINAL_SKIP.length) {
-                break
-              } else {
-                // Unexpected prefix before skip token (e.g. whitespace between <|end|> and
-                // <|start|>assistant…). Find the token anywhere in the buffer so content
-                // after it isn't discarded along with the framing bytes.
-                const skipIdx = parseBuf.indexOf(CHAN_FINAL_SKIP)
-                parseBuf = skipIdx >= 0 ? parseBuf.slice(skipIdx + CHAN_FINAL_SKIP.length) : ''
-                parsePhase = 'content'
-              }
+          const { state: nextState, events: parseEvents } = feedChunk(parseState, raw_content)
+          parseState = nextState
+          for (const ev of parseEvents) {
+            if (ev.type === 'reasoning') {
+              if (!thinkStart) thinkStart = Date.now()
+              thinkEnd = Date.now()
+              fullReasoning += ev.text
+              await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: ev.text }) })
             } else {
+              fullContent += ev.text
+              roundContent += ev.text
               if (!ttftMs) ttftMs = Date.now() - requestStart
-              fullContent += parseBuf
-              roundContent += parseBuf
               d.manager.setLiveGen({ phase: 'gen', pct: 0, outputTokens: ++liveOut })
-              await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: parseBuf }) })
-              parseBuf = ''
-              break
+              await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: ev.text }) })
             }
           }
         }
@@ -563,15 +470,14 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
       ac.signal.removeEventListener('abort', cancelReader)
 
       // Flush lookahead buffer at end-of-stream.
-      if (parseBuf) {
-        if (parsePhase === 'reasoning') {
-          fullReasoning += parseBuf
-          await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: parseBuf }) })
+      for (const ev of flushState(parseState)) {
+        if (ev.type === 'reasoning') {
+          fullReasoning += ev.text
+          await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: ev.text }) })
         } else {
-          // Emit whatever's buffered, even if we're in skipFinal (truncated stream).
-          fullContent += parseBuf
-          roundContent += parseBuf
-          await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: parseBuf }) })
+          fullContent += ev.text
+          roundContent += ev.text
+          await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: ev.text }) })
         }
       }
 

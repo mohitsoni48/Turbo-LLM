@@ -30,6 +30,7 @@ import { getSysInfo, primaryVendor } from '../sysinfo/sysinfo'
 import { HfError } from '../hf/hf'
 import { DownloadError } from '../downloads/downloads'
 import { BenchError } from '../bench/bench'
+import { inferRepoFromPath } from './path-utils'
 
 type Status = 200 | 201 | 202 | 400 | 401 | 403 | 404 | 409 | 500 | 501 | 503
 
@@ -1202,27 +1203,6 @@ function overlayModel(e: ModelEntry, d: Deps, lastTpsMap?: Map<string, number>) 
   const provRepo = d.downloads.provenance().find((p) => p.dest === e.path && p.repo)?.repo
   const sourceRepo = provRepo ?? inferRepoFromPath(e.path, snap.modelDirs)
   return { ...e, loaded, hasProfile: e.key in profiles, lastTps, liveTps, benchTps, compatibleWithActiveEngine, sourceRepo }
-}
-
-/** Infer an `owner/repo` HF id from a model file path laid out the way LM Studio /
- *  huggingface-cli store downloads: `<modelDir>/<owner>/<repo>/<file>.gguf`. Returns
- *  null when the path doesn't sit at least two folders under a configured model dir,
- *  or the segments don't look like a valid repo id (best-effort, verified on open). */
-function inferRepoFromPath(filePath: string, modelDirs: string[]): string | null {
-  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '')
-  const fp = norm(filePath)
-  const seg = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
-  for (const dir of modelDirs) {
-    const root = norm(dir)
-    if (!fp.toLowerCase().startsWith(root.toLowerCase() + '/')) continue
-    const parts = fp.slice(root.length + 1).split('/')
-    // Need at least owner/repo (MLX dirs) or owner/repo/file (GGUF files).
-    if (parts.length >= 2 && seg.test(parts[0]) && seg.test(parts[1])) {
-      return `${parts[0]}/${parts[1]}`
-    }
-    return null
-  }
-  return null
 }
 
 // ---- helpers ----
