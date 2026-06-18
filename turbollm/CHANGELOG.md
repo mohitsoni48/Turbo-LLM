@@ -25,6 +25,22 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
+## [0.7.1] - 2026-06-18
+
+### Fixed
+- **MLX incomplete shard detection** — scanner reads `model.safetensors.index.json` and verifies
+  every listed shard exists on disk; partial downloads now surface as `incomplete: true` (blocks
+  load) instead of letting mlx-lm crash with `ValueError: Missing N parameters`.
+- **GPT-OSS channel streaming** — 4-phase state machine (`initial → reasoning → skipFinal →
+  content`) correctly routes `<|channel|>analysis<|message|>…<|end|>` to reasoning events and
+  the final answer to delta events; fixes channel framing tokens leaking into chat when whitespace
+  separates `<|end|>` from `<|start|>assistant…`.
+- **`delta.reasoning` field** — mlx-lm's reasoning field (`delta.reasoning`) now handled
+  alongside llama-server's `delta.reasoning_content`.
+- **Re-download button for incomplete models** — `inferRepoFromPath` now accepts MLX directory
+  paths (2 segments) so the HF repo dialog opens correctly instead of always falling back to
+  name-search.
+
 ## [0.7.0] - 2026-06-18
 
 ### Added
