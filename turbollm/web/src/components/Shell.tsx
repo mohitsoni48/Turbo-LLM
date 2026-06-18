@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
-import { Boxes, Code2, Cpu, MessageSquare, Settings2 } from 'lucide-react'
+import { Boxes, Code2, Cpu, MessageSquare, Puzzle, Settings2 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import type { Status } from '../lib/types'
 import { StateChip } from './StateChip'
@@ -16,6 +16,7 @@ const NAV = [
   { to: '/chat',      label: 'Chat',      icon: MessageSquare },
   { to: '/models',    label: 'Models',    icon: Boxes },
   { to: '/engines',   label: 'Engines',   icon: Cpu },
+  { to: '/customize', label: 'Customize', icon: Puzzle },
   { to: '/developer', label: 'Developer', icon: Code2 },
   { to: '/settings',  label: 'Settings',  icon: Settings2 },
 ] as const

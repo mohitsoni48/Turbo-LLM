@@ -36,7 +36,7 @@ export function useConversationMutations() {
 
   return {
     create: useMutation({
-      mutationFn: (p?: Partial<Pick<Conversation, 'title' | 'systemPrompt' | 'modelKey'>>) => createConversation(p),
+      mutationFn: (p?: Partial<Pick<Conversation, 'title' | 'systemPrompt' | 'modelKey' | 'toolPolicy'>>) => createConversation(p),
       onSuccess: invalidateList,
     }),
     createExpert: useMutation({

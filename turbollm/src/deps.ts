@@ -10,6 +10,7 @@ import type { HfClient } from './hf/hf'
 import type { DownloadManager } from './downloads/downloads'
 import type { BenchRunner } from './bench/bench'
 import type { ModelRouter } from './gateway/model-router'
+import type { ToolRegistry } from './tools/tool-registry'
 
 export interface Deps {
   store: ConfigStore
@@ -24,6 +25,8 @@ export interface Deps {
   bench: BenchRunner
   /** Gateway model router (v0.6.0): auto model-swap and keep-N pool. */
   modelRouter: ModelRouter
+  /** Tool registry (v0.7.0): built-in tools + MCP host. Optional — absent in tests. */
+  tools?: ToolRegistry
   /** ComfyUI GPU coordinator (spec: unload/block while ComfyUI renders, reload after).
    *  Optional: only wired in the real `serve()` entrypoint (cli.ts); absent under tests. */
   comfy?: ComfyGuard

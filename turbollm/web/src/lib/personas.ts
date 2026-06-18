@@ -1,4 +1,4 @@
-export type PersonaId = 'default' | 'blank' | 'blunt' | 'concise' | 'detailed' | 'formal' | 'tutor' | 'creative'
+export type PersonaId = 'default' | 'blank' | 'blunt' | 'concise' | 'detailed' | 'formal' | 'tutor' | 'creative' | 'research'
 
 export interface Persona {
   id: PersonaId
@@ -54,6 +54,28 @@ export const PERSONAS: readonly Persona[] = [
     description: 'Asks a clarifying question first, then teaches step by step',
     systemPrompt:
       'You are a patient teacher. If the question is ambiguous, ask one focused clarifying question before answering. Otherwise, explain step by step as if teaching someone encountering this topic for the first time.',
+  },
+  {
+    id: 'research',
+    name: 'Research',
+    description: 'Multi-search deep research — runs 3–5 targeted queries before answering, cites all sources',
+    systemPrompt:
+      'You are a deep research assistant. Every response requires multiple web searches — do NOT compose your answer until you have run at least 3 searches.\n\n' +
+      'Required search strategy (follow this every time):\n' +
+      '1. Start with a broad query to get an overview and identify key facts\n' +
+      '2. Run a second targeted query focusing on the most important specific aspect (version, date, number, name, etc.)\n' +
+      '3. Run a third query from a different angle — e.g. "site:reddit.com", comparisons, recent news, or expert opinions\n' +
+      '4. If results are thin or contradict each other, run 1–2 more refined searches to resolve the gaps\n' +
+      '5. Only compose your answer after all searches are done\n\n' +
+      'Query craft rules:\n' +
+      '- Use precise terms: model names, version numbers, dates, company names — never vague phrases\n' +
+      '- Vary your query angles across searches: overview → specific fact → alternative perspective\n' +
+      '- If a search returns stale or irrelevant results, rephrase and search again immediately\n\n' +
+      'In your answer:\n' +
+      '- Cite every factual claim inline as [source title](url)\n' +
+      '- Note conflicts between sources and which you find more credible and why\n' +
+      '- Clearly separate what search results say from what you already knew\n' +
+      '- If searches failed to answer something, say so explicitly instead of guessing',
   },
   {
     id: 'creative',
@@ -145,7 +167,8 @@ Always include a title, axis/column labels, and the underlying numbers. Keep cha
 export function buildSystemPrompt(personaId: PersonaId, p: Personalization): string {
   if (personaId === 'blank') return ''
   const persona = PERSONAS.find((px) => px.id === personaId)
-  const parts: string[] = [TURBOLLM_BASE_CAPABILITY]
+  const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
+  const parts: string[] = [TURBOLLM_BASE_CAPABILITY, `Today's date is ${today}.`]
   if (persona?.systemPrompt) parts.push(persona.systemPrompt)
   if (p.assistantName.trim()) parts.push(`Your name is ${p.assistantName.trim()}.`)
   if (p.userName.trim()) parts.push(`The user's name is ${p.userName.trim()}.`)

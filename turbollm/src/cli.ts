@@ -19,6 +19,7 @@ import { HfClient } from './hf/hf'
 import { DownloadManager } from './downloads/downloads'
 import { BenchRunner } from './bench/bench'
 import { ModelRouter } from './gateway/model-router'
+import { ToolRegistry } from './tools/tool-registry'
 import { launchCli } from './cli-launch'
 import { createApp } from './server'
 import type { Deps } from './deps'
@@ -131,9 +132,15 @@ const comfy = new ComfyGuard(store, manager)
 // Gateway intelligence (v0.6.0): auto model-swap router. Resolves the `model`
 // field in /v1/* requests and loads the matching model if not already running.
 const modelRouter = new ModelRouter(store, registry, manager, scanner, comfy)
+// Tool registry (v0.7.0): built-in tools + MCP host. Syncs MCP servers from config.
+const toolRegistry = new ToolRegistry(store.snapshot().tools)
+void (async () => {
+  const cfg = store.snapshot()
+  await toolRegistry.syncMcpServers(cfg.mcp.servers)
+})()
 const startedAt = Date.now()
 // `requestRestart` is attached after the server is created (it must close over it).
-const deps: Deps = { store, registry, manager, scanner, hashes, db, provision, hf, downloads, bench, modelRouter, comfy, version, startedAt }
+const deps: Deps = { store, registry, manager, scanner, hashes, db, provision, hf, downloads, bench, modelRouter, comfy, tools: toolRegistry, version, startedAt }
 const app = createApp(deps)
 
 // ── Resolve listen address ────────────────────────────────────────────────────
@@ -416,6 +423,7 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     shuttingDown = true
     console.log('shutting down')
     comfy.stop()
+    toolRegistry.disconnectAll()
     void manager.shutdown().finally(() => { db.close(); server.close(() => process.exit(0)) })
     setTimeout(() => process.exit(0), 12_000).unref()
   })

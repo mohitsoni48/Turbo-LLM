@@ -14,6 +14,9 @@ export interface Conversation {
   /** When true, this is the built-in TurboLLM Expert thread: its system prompt is
    *  managed server-side and hidden from the UI (spec 08 §2). */
   expertMode: boolean
+  /** Tool-calling policy for this conversation. 'force_web_search' forces the model
+   *  to call web_search on the first iteration before composing a reply. */
+  toolPolicy?: string
   createdAt: string
   updatedAt: string
   messages?: Message[]
@@ -36,6 +39,14 @@ export interface MessageStats {
   aborted: boolean
 }
 
+export interface ToolCallRecord {
+  id: string
+  name: string
+  args: Record<string, unknown>
+  result?: string
+  error?: string
+}
+
 export interface Message {
   id: string
   convId: string
@@ -45,12 +56,14 @@ export interface Message {
   reasoning: string
   attachments: string[]
   textAttachments: string[]
+  /** Tool calls made by this assistant turn (v0.7.0). */
+  toolCalls: ToolCallRecord[]
   stats: Partial<MessageStats>
   createdAt: string
 }
 
-interface ConvRow { id: string; title: string; system_prompt: string; model_key: string; sampling: string; expert_mode: number; created_at: string; updated_at: string }
-interface MsgRow  { id: string; conv_id: string; seq: number; role: 'user' | 'assistant'; content: string; reasoning: string; attachments: string; text_attachments: string | null; stats: string; model_key: string | null; created_at: string }
+interface ConvRow { id: string; title: string; system_prompt: string; model_key: string; sampling: string; expert_mode: number; tool_policy: string | null; created_at: string; updated_at: string }
+interface MsgRow  { id: string; conv_id: string; seq: number; role: 'user' | 'assistant'; content: string; reasoning: string; attachments: string; text_attachments: string | null; tool_calls: string | null; stats: string; model_key: string | null; created_at: string }
 
 // node:sqlite named-param objects need an explicit cast to Record<string, SQLInputValue>
 type P = Record<string, SQLInputValue>
@@ -58,11 +71,11 @@ type P = Record<string, SQLInputValue>
 function safeJson(s: string): unknown { try { return JSON.parse(s) } catch { return {} } }
 
 function rowToConv(r: ConvRow): Conversation {
-  return { id: r.id, title: r.title, systemPrompt: r.system_prompt, modelKey: r.model_key, sampling: safeJson(r.sampling) as Record<string, unknown>, expertMode: r.expert_mode === 1, createdAt: r.created_at, updatedAt: r.updated_at }
+  return { id: r.id, title: r.title, systemPrompt: r.system_prompt, modelKey: r.model_key, sampling: safeJson(r.sampling) as Record<string, unknown>, expertMode: r.expert_mode === 1, toolPolicy: r.tool_policy ?? undefined, createdAt: r.created_at, updatedAt: r.updated_at }
 }
 
 function rowToMsg(r: MsgRow): Message {
-  return { id: r.id, convId: r.conv_id, seq: r.seq, role: r.role, content: r.content, reasoning: r.reasoning, attachments: safeJson(r.attachments) as string[], textAttachments: r.text_attachments ? safeJson(r.text_attachments) as string[] : [], stats: safeJson(r.stats) as Partial<MessageStats>, createdAt: r.created_at }
+  return { id: r.id, convId: r.conv_id, seq: r.seq, role: r.role, content: r.content, reasoning: r.reasoning, attachments: safeJson(r.attachments) as string[], textAttachments: r.text_attachments ? safeJson(r.text_attachments) as string[] : [], toolCalls: r.tool_calls ? safeJson(r.tool_calls) as ToolCallRecord[] : [], stats: safeJson(r.stats) as Partial<MessageStats>, createdAt: r.created_at }
 }
 
 interface Changes { changes: number }
@@ -123,6 +136,24 @@ export class ConversationStore {
         PRAGMA user_version = 4;
       `)
     }
+    // v5 (v0.7.0 agentic): store tool call records on assistant messages so the UI
+    // can render tool invocations + results inline. Nullable — existing rows get NULL
+    // and are decoded as [] in rowToMsg (non-breaking).
+    if (v < 5) {
+      this.db.exec(`
+        ALTER TABLE messages ADD COLUMN tool_calls TEXT;
+        PRAGMA user_version = 5;
+      `)
+    }
+    // v6 (v0.7.0 agentic): per-conversation tool policy. 'force_web_search' forces
+    // the model to call web_search on the first iteration. Nullable — existing rows
+    // get NULL and default to standard auto tool_choice (non-breaking).
+    if (v < 6) {
+      this.db.exec(`
+        ALTER TABLE conversations ADD COLUMN tool_policy TEXT;
+        PRAGMA user_version = 6;
+      `)
+    }
   }
 
   listConversations(q?: string): Conversation[] {
@@ -138,11 +169,11 @@ export class ConversationStore {
     return (this.db.prepare(`SELECT * FROM conversations ORDER BY updated_at DESC LIMIT 200`).all() as unknown as ConvRow[]).map(rowToConv)
   }
 
-  createConversation(partial?: Partial<Pick<Conversation, 'title' | 'systemPrompt' | 'modelKey' | 'sampling' | 'expertMode'>>): Conversation {
+  createConversation(partial?: Partial<Pick<Conversation, 'title' | 'systemPrompt' | 'modelKey' | 'sampling' | 'expertMode' | 'toolPolicy'>>): Conversation {
     const now = new Date().toISOString()
     const id = randomUUID()
-    this.db.prepare(`INSERT INTO conversations (id,title,system_prompt,model_key,sampling,expert_mode,created_at,updated_at) VALUES ($id,$title,$sp,$mk,$samp,$expert,$now,$now)`)
-      .run({ $id: id, $title: partial?.title ?? 'New chat', $sp: partial?.systemPrompt ?? '', $mk: partial?.modelKey ?? '', $samp: JSON.stringify(partial?.sampling ?? {}), $expert: partial?.expertMode ? 1 : 0, $now: now } as P)
+    this.db.prepare(`INSERT INTO conversations (id,title,system_prompt,model_key,sampling,expert_mode,tool_policy,created_at,updated_at) VALUES ($id,$title,$sp,$mk,$samp,$expert,$tp,$now,$now)`)
+      .run({ $id: id, $title: partial?.title ?? 'New chat', $sp: partial?.systemPrompt ?? '', $mk: partial?.modelKey ?? '', $samp: JSON.stringify(partial?.sampling ?? {}), $expert: partial?.expertMode ? 1 : 0, $tp: partial?.toolPolicy ?? null, $now: now } as P)
     return this.getConversation(id)!
   }
 
@@ -176,7 +207,7 @@ export class ConversationStore {
     return (this.db.prepare(`SELECT * FROM messages WHERE conv_id = $id ORDER BY seq ASC`).all({ $id: convId } as P) as unknown as MsgRow[]).map(rowToMsg)
   }
 
-  addMessage(convId: string, role: 'user' | 'assistant', content: string, extra?: Partial<Pick<Message, 'reasoning' | 'attachments' | 'textAttachments' | 'stats'>>): Message {
+  addMessage(convId: string, role: 'user' | 'assistant', content: string, extra?: Partial<Pick<Message, 'reasoning' | 'attachments' | 'textAttachments' | 'toolCalls' | 'stats'>>): Message {
     const id = randomUUID()
     const now = new Date().toISOString()
     const row = this.db.prepare(`SELECT COALESCE(MAX(seq),0) AS ms FROM messages WHERE conv_id = $id`).get({ $id: convId } as P) as unknown as { ms: number }
@@ -184,8 +215,9 @@ export class ConversationStore {
     // can surface last-session gen t/s (spec 04 §5). User turns are left NULL.
     const modelKey = role === 'assistant' ? this.conversationModelKey(convId) : null
     const textAttachments = extra?.textAttachments?.length ? JSON.stringify(extra.textAttachments) : null
-    this.db.prepare(`INSERT INTO messages (id,conv_id,seq,role,content,reasoning,attachments,text_attachments,stats,model_key,created_at) VALUES ($id,$cid,$seq,$role,$content,$reasoning,$attachments,$ta,$stats,$mk,$now)`)
-      .run({ $id: id, $cid: convId, $seq: row.ms + 1, $role: role, $content: content, $reasoning: extra?.reasoning ?? '', $attachments: JSON.stringify(extra?.attachments ?? []), $ta: textAttachments, $stats: JSON.stringify(extra?.stats ?? {}), $mk: modelKey, $now: now } as P)
+    const toolCalls = extra?.toolCalls?.length ? JSON.stringify(extra.toolCalls) : null
+    this.db.prepare(`INSERT INTO messages (id,conv_id,seq,role,content,reasoning,attachments,text_attachments,tool_calls,stats,model_key,created_at) VALUES ($id,$cid,$seq,$role,$content,$reasoning,$attachments,$ta,$tc,$stats,$mk,$now)`)
+      .run({ $id: id, $cid: convId, $seq: row.ms + 1, $role: role, $content: content, $reasoning: extra?.reasoning ?? '', $attachments: JSON.stringify(extra?.attachments ?? []), $ta: textAttachments, $tc: toolCalls, $stats: JSON.stringify(extra?.stats ?? {}), $mk: modelKey, $now: now } as P)
     this.touchConversation(convId)
     return this.getMessage(id)!
   }
@@ -201,11 +233,12 @@ export class ConversationStore {
     return row ? rowToMsg(row) : null
   }
 
-  updateMessage(id: string, patch: Partial<Pick<Message, 'content' | 'reasoning' | 'stats'>>): boolean {
+  updateMessage(id: string, patch: Partial<Pick<Message, 'content' | 'reasoning' | 'toolCalls' | 'stats'>>): boolean {
     const sets: string[] = []
     const params: Record<string, SQLInputValue> = { $id: id }
     if (patch.content   !== undefined) { sets.push('content = $content');     params.$content   = patch.content }
     if (patch.reasoning !== undefined) { sets.push('reasoning = $reasoning'); params.$reasoning = patch.reasoning }
+    if (patch.toolCalls !== undefined) { sets.push('tool_calls = $tc');       params.$tc        = JSON.stringify(patch.toolCalls) }
     if (patch.stats     !== undefined) { sets.push('stats = $stats');         params.$stats     = JSON.stringify(patch.stats) }
     if (!sets.length) return false
     return ((this.db.prepare(`UPDATE messages SET ${sets.join(', ')} WHERE id = $id`).run(params) as unknown) as Changes).changes > 0
