@@ -83,13 +83,14 @@ TurboLLM does the opposite:
   Python**. It downloads only the engine your GPU actually needs (Vulkan ≈ 38 MB).
 - **🔌 Drop-in APIs.** OpenAI **and** Anthropic-compatible — so Claude Code and every existing
   tool work unchanged.
+- **🔀 A gateway that loads models for you.** Name any model in your API request and TurboLLM
+  loads it on demand, keeping your favorites hot in a small pool — so an agent that hops between
+  models just works, with nothing to pre-wire.
 - **🔒 Offline-first & private.** No account, no backend, no internet, **no telemetry.**
 
 ---
 
 ## Features
-
-The current capability list (kept in sync with [CHANGELOG.md](CHANGELOG.md)):
 
 **Engines**
 - Bring any `llama-server`-compatible engine — stock builds or community forks — with real capability probing
@@ -100,15 +101,20 @@ The current capability list (kept in sync with [CHANGELOG.md](CHANGELOG.md)):
 **Models**
 - Use your own local GGUF / safetensors, or browse & download from Hugging Face in-app
 - Per-model load profiles (context, GPU offload, KV-cache quant, flash-attn, draft models)
+- **Configurable multi-GPU per model** — tensor split / main-GPU pick (llama.cpp), tensor-parallel (vLLM)
 - Auto-tune on load with a **VRAM-fit verdict before you load**
 - Measured tokens/sec per model — never faked — live while you chat and remembered
 
 **Chat**
 - Streaming chat with live t/s, TTFT, context meter, and reasoning/thinking support
+- **Persona picker** (7 styles) + per-chat system prompt and full sampling controls
+- **Inline Unicode charts** when a comparison or trend genuinely warrants a visual
 - Image and document attachments — including **send an image or file with no text**
 
 **Integrations**
 - OpenAI- **and** Anthropic-compatible APIs — run Claude Code on your own GPU
+- **Smart gateway** — name a model in any request and it auto-loads; keep up to 4 models hot (LRU)
+- **Embeddings** (`/v1/embeddings`) and **structured output** (GBNF grammar / JSON-constrained)
 - LAN sharing with optional API-key auth
 - **Share the GPU with ComfyUI** — auto-unload the model while ComfyUI renders, reload when it's done
 
@@ -212,6 +218,9 @@ the UI when something fails to load.
 - **Fast by default:** flash attention on, NextN self-speculative decoding on for models that
   carry a draft head, threads auto — best speed out of the box, safely gated to what your
   engine actually accepts.
+- **Multi-GPU, per model** — split a model across cards (layer/row split + main-GPU pick on
+  llama.cpp, tensor-parallel on vLLM). Defaults are no-ops, so single-GPU rigs are untouched and
+  the VRAM verdict budgets across the GPUs the split actually uses.
 - **Saved per-model profiles** — tune once, and it loads that way every time.
 
 ---
@@ -225,10 +234,14 @@ A genuinely good chat UI, not an afterthought:
   **context-usage meter** (filled / max) on every reply.
 - **Thinking control** — toggle reasoning **off** to get a direct answer (saves time and
   tokens), or leave it **on** with collapsible, timed "thought for N s" blocks.
-- **Markdown + syntax-highlighted code** with one-click copy.
+- **Markdown + syntax-highlighted code** with one-click copy — plus **inline Unicode charts**
+  the model draws when a comparison, trend, or hierarchy is genuinely worth a visual.
+- **Personas** — pick a style (Concise · Detailed · Blunt · Formal · Tutor · Creative · Default)
+  per conversation, no prompt-wrangling required.
 - **Edit, regenerate, delete, copy** any message; **persistent, searchable conversations**
   with rename, delete, and **auto-generated titles**.
-- **Per-chat system prompt** and **per-chat sampling** overrides (temperature, top-p/k, min-p).
+- **Per-chat system prompt** and **per-chat sampling** overrides — the full set: temperature,
+  top-p/k, min-p, repeat/presence/frequency penalties, and **stop strings**.
 - **Image input** for vision models.
 - **TurboLLM Expert** — a built-in assistant that knows the app and your hardware, for
   onboarding and troubleshooting without leaving the UI.
@@ -247,10 +260,22 @@ curl http://127.0.0.1:6996/v1/chat/completions \
 ```
 
 - **OpenAI-compatible** `/v1/chat/completions`, `/v1/embeddings`, … — point any OpenAI client
-  or tool at it.
+  or tool at it. Embedding models are auto-detected and pooled separately, so a RAG pipeline and
+  a chat model can stay loaded side by side.
 - **Anthropic-compatible** `/v1/messages` — including **tool use and streaming** — which is
   what powers Claude Code below. No other local host offers this.
+- **Structured output** — constrain any response to a **GBNF grammar** (or JSON shape) for
+  reliable machine-readable results.
 - **API-key auth** you can require when sharing over a LAN (Settings → Network).
+
+### The gateway loads models for you
+
+Most local hosts make you load a model first, then call it. TurboLLM's gateway reads the
+`model` field of any incoming request, **fuzzy-matches it to your library, and loads it on the
+fly** if it isn't already running — then keeps up to **four models hot** in an LRU pool so the
+next switch is instant. An agent (or Claude Code) that hops between a coding model, a vision
+model, and an embedder just names each one and it works — no pre-wiring, no manual swaps. Tune
+it in Settings → Gateway (`autoSwap`, `keepN`).
 
 ---
 
@@ -364,6 +389,7 @@ Focused on the differences that matter — all four are good tools.
 | **Measured** t/s in the model list | ✅ | ◐ | ◐ | ❌ |
 | **Anthropic** API (tool use) → Claude Code | ✅ | ❌ | ❌ | ❌ |
 | OpenAI-compatible API | ✅ | ✅ | ✅ | ◐ proxy |
+| **Auto-load the requested model** (hot-swap pool) | ✅ | ❌ | ◐ | ❌ |
 | Use existing model folders (no re-download) | ✅ | ◐ | ❌ | ❌ |
 | Speculative decoding (NextN / MTP / draft) | ✅ | ◐ draft | ❌ | ❌ |
 | Web UI from any LAN device | ✅ | ❌ | ❌ | ✅ |
@@ -426,6 +452,6 @@ turbollm/
 Source-available under the **Functional Source License 1.1 (Apache-2.0 future grant)** — SPDX
 **`FSL-1.1-ALv2`**. Free for personal use, internal business use, education, and research; the
 only restriction is shipping a competing product. Each release converts to Apache-2.0 two
-years after it's published. Full text: [LICENSE.md](LICENSE.md).
+years after it's published. Full text: [LICENSE.md](https://github.com/mohitsoni48/Turbo-LLM/blob/main/turbollm/LICENSE.md).
 
 <p align="center"><sub>Built for people who refuse to wait for the mainstream to bless the fast path. ⚡</sub></p>
