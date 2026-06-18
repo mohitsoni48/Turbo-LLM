@@ -421,7 +421,7 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
           if (chunk.timings) finalTimings = chunk.timings as typeof finalTimings
 
           const choices = chunk.choices as Array<{
-            delta?: { content?: string; reasoning_content?: string; tool_calls?: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }> }
+            delta?: { content?: string; reasoning_content?: string; reasoning?: string; tool_calls?: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }> }
             finish_reason?: string
           }> | undefined
           if (!choices?.length) continue
@@ -444,9 +444,9 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
             continue
           }
 
-          // Reasoning content (explicit field — newer llama-server)
-          if (delta.reasoning_content) {
-            const rc = delta.reasoning_content
+          // Reasoning content — llama-server uses `reasoning_content`, mlx-lm uses `reasoning`.
+          const rc = (delta.reasoning_content ?? delta.reasoning) as string | undefined
+          if (rc) {
             if (!thinkStart) thinkStart = Date.now()
             thinkEnd = Date.now()
             fullReasoning += rc
@@ -487,6 +487,9 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
                 if (!thinkStart) thinkStart = Date.now()
                 parseBuf = parseBuf.slice(openIdx + openTag.length)
               } else {
+                // 29-char lookahead: safe threshold to detect the 30-char CHAN_ANALYSIS_OPEN
+                // tag before flushing. Tradeoff: non-reasoning responses buffer ~1 extra
+                // cycle before first delta (TTFT impact ≈ 30 chars / tok/s).
                 const safeLen = parseBuf.length - (CHAN_ANALYSIS_OPEN.length - 1)
                 if (safeLen > 0) {
                   const flush = parseBuf.slice(0, safeLen)
@@ -507,7 +510,6 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
               if (closeIdx >= 0) {
                 if (closeIdx > 0) {
                   const chunk = parseBuf.slice(0, closeIdx)
-                  thinkEnd = Date.now()
                   fullReasoning += chunk
                   await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: chunk }) })
                 }
@@ -539,6 +541,7 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
               } else if (CHAN_FINAL_SKIP.startsWith(parseBuf) && parseBuf.length < CHAN_FINAL_SKIP.length) {
                 break
               } else {
+                parseBuf = ''
                 parsePhase = 'content'
               }
             } else {
@@ -560,7 +563,8 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
         if (parsePhase === 'reasoning') {
           fullReasoning += parseBuf
           await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: parseBuf }) })
-        } else if (parsePhase !== 'skipFinal') {
+        } else {
+          // Emit whatever's buffered, even if we're in skipFinal (truncated stream).
           fullContent += parseBuf
           roundContent += parseBuf
           await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: parseBuf }) })
