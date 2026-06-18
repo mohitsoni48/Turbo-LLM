@@ -541,7 +541,11 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
               } else if (CHAN_FINAL_SKIP.startsWith(parseBuf) && parseBuf.length < CHAN_FINAL_SKIP.length) {
                 break
               } else {
-                parseBuf = ''
+                // Unexpected prefix before skip token (e.g. whitespace between <|end|> and
+                // <|start|>assistant…). Find the token anywhere in the buffer so content
+                // after it isn't discarded along with the framing bytes.
+                const skipIdx = parseBuf.indexOf(CHAN_FINAL_SKIP)
+                parseBuf = skipIdx >= 0 ? parseBuf.slice(skipIdx + CHAN_FINAL_SKIP.length) : ''
                 parsePhase = 'content'
               }
             } else {
