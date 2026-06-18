@@ -8,12 +8,21 @@ export const WEB_SEARCH_TOOL = {
   type: 'function' as const,
   function: {
     name: 'web_search',
-    description: 'Search the web for up-to-date information. Use this for current events, facts, or anything you are not certain about.',
+    description:
+      'Search the web for real-time information. Call this BEFORE answering any question that depends on current events, recent data, prices, specific facts, or anything your training data may not cover accurately. ' +
+      'Formulate a precise, keyword-focused query — include names, dates, or version numbers when relevant. ' +
+      'Run multiple focused searches rather than one broad one for complex questions.',
     parameters: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'The search query.' },
-        max_results: { type: 'number', description: 'Maximum number of results to return (default 5, max 10).' },
+        query: {
+          type: 'string',
+          description:
+            'A precise, specific search query. Use key terms and identifiers. ' +
+            'Good: "Python 3.13 release date new features". Bad: "Python new stuff". ' +
+            'Good: "NVIDIA RTX 5090 benchmark 2025". Bad: "new GPU benchmarks".',
+        },
+        max_results: { type: 'number', description: 'Number of results to return (default 5, max 10).' },
       },
       required: ['query'],
     },
@@ -74,8 +83,14 @@ export async function execWebSearch(args: Record<string, unknown>, tavilyApiKey:
     resp = await fetch('https://api.tavily.com/search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key: tavilyApiKey, query, max_results: maxResults }),
-      signal: AbortSignal.timeout(15_000),
+      body: JSON.stringify({
+        api_key: tavilyApiKey,
+        query,
+        max_results: maxResults,
+        search_depth: 'advanced',
+        include_answer: true,
+      }),
+      signal: AbortSignal.timeout(20_000),
     })
   } catch (e) {
     return `Error: could not reach Tavily — ${(e as Error).message}`
@@ -91,12 +106,12 @@ export async function execWebSearch(args: Record<string, unknown>, tavilyApiKey:
   if (results.length === 0) return 'No results found.'
 
   const lines: string[] = []
-  if (data.answer) lines.push(`Summary: ${data.answer}\n`)
+  if (data.answer) lines.push(`ANSWER: ${data.answer}\n`)
+  lines.push(`SOURCES (${results.length} results for "${query}"):`)
   for (const [i, r] of results.entries()) {
-    lines.push(`[${i + 1}] ${r.title}`)
-    lines.push(`URL: ${r.url}`)
-    lines.push(r.content.slice(0, 400))
-    lines.push('')
+    lines.push(`\n[${i + 1}] ${r.title}`)
+    lines.push(`Source: ${r.url}`)
+    lines.push(r.content.slice(0, 700))
   }
   return lines.join('\n').trim()
 }
