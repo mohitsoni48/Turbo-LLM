@@ -161,7 +161,8 @@ Always include a title, axis/column labels, and the underlying numbers. Keep cha
 export function buildSystemPrompt(personaId: PersonaId, p: Personalization): string {
   if (personaId === 'blank') return ''
   const persona = PERSONAS.find((px) => px.id === personaId)
-  const parts: string[] = [TURBOLLM_BASE_CAPABILITY]
+  const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
+  const parts: string[] = [TURBOLLM_BASE_CAPABILITY, `Today's date is ${today}.`]
   if (persona?.systemPrompt) parts.push(persona.systemPrompt)
   if (p.assistantName.trim()) parts.push(`Your name is ${p.assistantName.trim()}.`)
   if (p.userName.trim()) parts.push(`The user's name is ${p.userName.trim()}.`)
