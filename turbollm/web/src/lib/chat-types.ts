@@ -54,6 +54,9 @@ export interface Conversation {
   /** Built-in TurboLLM Expert thread — its system prompt is managed server-side
    *  and hidden from the UI (spec 08 §2). */
   expertMode: boolean
+  /** When set, the backend enforces a tool_choice policy on the first generation
+   *  iteration. 'force_web_search' forces web_search before the model can reply. */
+  toolPolicy?: string
   createdAt: string
   updatedAt: string
   messages?: Message[]

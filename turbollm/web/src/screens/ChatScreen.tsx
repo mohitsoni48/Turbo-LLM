@@ -283,7 +283,11 @@ export function ChatScreen() {
       let convId = activeId
       if (!convId) {
         const sp = buildSystemPrompt(selectedPersonaId, getPersonalization())
-        const newConv = await mut.create.mutateAsync({ modelKey: model.key, systemPrompt: sp || undefined })
+        const newConv = await mut.create.mutateAsync({
+          modelKey: model.key,
+          systemPrompt: sp || undefined,
+          toolPolicy: selectedPersonaId === 'research' ? 'force_web_search' : undefined,
+        })
         convId = newConv.id
         setConvPersonaId(convId, selectedPersonaId)
         setActiveId(convId)

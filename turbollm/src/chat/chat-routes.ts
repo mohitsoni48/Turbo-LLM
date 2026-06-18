@@ -55,8 +55,8 @@ export function registerChatRoutes(app: Hono, d: Deps): void {
   })
 
   app.post('/api/v1/conversations', async (c) => {
-    const b = await body<{ title?: string; systemPrompt?: string; modelKey?: string }>(c)
-    const conv = db.createConversation({ title: b.title, systemPrompt: b.systemPrompt, modelKey: b.modelKey })
+    const b = await body<{ title?: string; systemPrompt?: string; modelKey?: string; toolPolicy?: string }>(c)
+    const conv = db.createConversation({ title: b.title, systemPrompt: b.systemPrompt, modelKey: b.modelKey, toolPolicy: b.toolPolicy })
     return c.json(conv, 201)
   })
 
@@ -341,6 +341,16 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
       // Attach tools only when the engine kind supports them (llama.cpp + TurboQuant).
       // MLX/vLLM passthrough is fine too — they ignore unknown fields gracefully.
       if (toolDefs.length > 0) reqBody.tools = toolDefs
+      // Force web_search on the first iteration when the conversation has a
+      // force_web_search policy (e.g. Research persona). Subsequent iterations
+      // use the default "auto" so the model can compose its answer after searching.
+      if (
+        conv.toolPolicy === 'force_web_search' &&
+        toolIter === 1 &&
+        toolDefs.some((t) => t.function.name === 'web_search')
+      ) {
+        reqBody.tool_choice = { type: 'function', function: { name: 'web_search' } }
+      }
 
       const res = await fetch(`${target}/v1/chat/completions`, {
         method: 'POST',
