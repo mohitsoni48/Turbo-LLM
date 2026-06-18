@@ -167,6 +167,15 @@ export function ModelDetailDialog({
               />
             )}
 
+            {isMlx && (
+              <div className="rounded-md border border-border bg-panel-2 px-3 py-2.5 text-[12px] text-muted">
+                MLX (Apple Silicon, mlx-lm) manages context and KV cache automatically — there are no
+                context/GPU-layer/KV knobs to set. Only the <span className="text-ink">sampling defaults</span> below
+                apply at load; per-conversation overrides still work in chat.
+              </div>
+            )}
+
+            {!isMlx && (
             <Section>
               <Slider label="Context length" hint="Tokens of history the model can use." value={draft.ctx} min={512} max={Math.max(512, detail.nativeCtx || 8192)} step={512} onChange={(v) => set('ctx', v)} fmt={(v) => v.toLocaleString()} />
               {detail.gpu && (
@@ -188,6 +197,7 @@ export function ModelDetailDialog({
                 </Row>
               )}
             </Section>
+            )}
 
             {/* Multi-GPU split (ADR-054) — only when more than one GPU and a GPU engine. */}
             {detail.gpus && detail.gpus.length > 1 && (activeEngine?.kind === 'llama-server' || activeEngine?.kind === 'vllm') && (
@@ -205,6 +215,7 @@ export function ModelDetailDialog({
               </>
             )}
 
+            {!isMlx && (
             <Section>
               <Row label="Parallel slots">
                 <NumberInput value={draft.parallel} min={1} max={16} onChange={(v) => set('parallel', v)} />
@@ -226,6 +237,7 @@ export function ModelDetailDialog({
                 />
               )}
             </Section>
+            )}
 
             <SectionTitle>Sampling</SectionTitle>
             <Section>
@@ -233,6 +245,7 @@ export function ModelDetailDialog({
               <Slider label="Top P" value={draft.sampling.topP} min={0} max={1} step={0.01} onChange={(v) => setS('topP', v)} fmt={(v) => v.toFixed(2)} />
               <Slider label="Top K" value={draft.sampling.topK} min={0} max={200} step={1} onChange={(v) => setS('topK', v)} />
               <Slider label="Min P" value={draft.sampling.minP} min={0} max={1} step={0.01} onChange={(v) => setS('minP', v)} fmt={(v) => v.toFixed(2)} />
+              {!isMlx && (<>
               <Slider label="Repeat penalty" hint="Penalise tokens that appeared earlier. 1.0 = off." value={draft.sampling.repeatPenalty} min={1} max={2} step={0.05} onChange={(v) => setS('repeatPenalty', v)} fmt={(v) => v.toFixed(2)} />
               <Slider label="Presence penalty" hint="Flat penalty for any token that appeared. 0 = off." value={draft.sampling.presencePenalty} min={0} max={2} step={0.05} onChange={(v) => setS('presencePenalty', v)} fmt={(v) => v.toFixed(2)} />
               <Slider label="Frequency penalty" hint="Penalty proportional to how often a token appeared. 0 = off." value={draft.sampling.frequencyPenalty} min={0} max={2} step={0.05} onChange={(v) => setS('frequencyPenalty', v)} fmt={(v) => v.toFixed(2)} />
@@ -243,9 +256,10 @@ export function ModelDetailDialog({
                 value={draft.sampling.stop}
                 onChange={(v) => setDraft((d) => d ? { ...d, sampling: { ...d.sampling, stop: v } } : d)}
               />
+              </>)}
             </Section>
 
-            {specOptions.length > 1 && (
+            {!isMlx && specOptions.length > 1 && (
               <>
                 <SectionTitle>Speculative decoding</SectionTitle>
                 <Section>
@@ -277,6 +291,7 @@ export function ModelDetailDialog({
               </>
             )}
 
+            {!isMlx && (<>
             <button type="button" onClick={() => setAdvanced((a) => !a)} className="flex items-center gap-1 text-[13px] font-medium text-muted hover:text-ink">
               <ChevronDown size={14} className={advanced ? 'rotate-180 transition-transform' : 'transition-transform'} />
               Advanced
@@ -324,6 +339,7 @@ export function ModelDetailDialog({
                 )}
               </Section>
             )}
+            </>)}
 
             {loadError && <p className="text-[12px]" style={{ color: 'var(--err)' }}>{loadError}</p>}
 

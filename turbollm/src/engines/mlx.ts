@@ -104,10 +104,45 @@ export async function probeMlx(python: string): Promise<string> {
 /**
  * Command + args to launch the MLX OpenAI-compatible server for a model.
  * `model` is an MLX model dir or an HF repo id (mlx-lm can fetch the latter).
+ * `extraArgs` carries MLX's own CLI flags (e.g. sampling defaults from
+ * {@link mlxSamplingArgs}); llama.cpp profile flags never belong here.
+ *
+ * No alias flag is passed: mlx-lm already serves the `--model` under its built-in
+ * `default_model` key (verified live), which is the alias the gateway/chat layer
+ * sends — see engineModelAlias() in compat.ts.
  */
-export function mlxServerCommand(python: string, model: string, port: number, host: string): { cmd: string; args: string[] } {
+export function mlxServerCommand(
+  python: string,
+  model: string,
+  port: number,
+  host: string,
+  extraArgs: string[] = [],
+): { cmd: string; args: string[] } {
   return {
     cmd: python,
-    args: ['-m', 'mlx_lm', 'server', '--model', model, '--host', host, '--port', String(port)],
+    args: [
+      '-m', 'mlx_lm', 'server',
+      '--model', model,
+      '--host', host,
+      '--port', String(port),
+      ...extraArgs,
+    ],
   }
+}
+
+/**
+ * Map a sampling profile to the launch flags mlx_lm.server actually supports.
+ * Verified against mlx-lm 0.31.x: only `--temp` / `--top-p` / `--top-k` / `--min-p`
+ * exist as CLI defaults (there is no context/KV-size flag — mlx-lm grows the KV cache
+ * dynamically). Repeat/presence/frequency penalties and stop strings are per-request
+ * only, applied by the chat/gateway layer. Undefined values are skipped.
+ */
+export function mlxSamplingArgs(s?: { temp?: number; topP?: number; topK?: number; minP?: number }): string[] {
+  if (!s) return []
+  const a: string[] = []
+  if (typeof s.temp === 'number') a.push('--temp', String(s.temp))
+  if (typeof s.topP === 'number') a.push('--top-p', String(s.topP))
+  if (typeof s.topK === 'number') a.push('--top-k', String(s.topK))
+  if (typeof s.minP === 'number') a.push('--min-p', String(s.minP))
+  return a
 }

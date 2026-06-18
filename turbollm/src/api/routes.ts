@@ -20,7 +20,7 @@ import {
   provisionForkRelease,
   recommendBackendId,
 } from '../engines/download'
-import { ensureMlxEnv } from '../engines/mlx'
+import { ensureMlxEnv, mlxSamplingArgs } from '../engines/mlx'
 import { ensureVllmEnv } from '../engines/vllm'
 import { catalogForPlatform, catalogEngine } from '../engines/catalog'
 import { engineAcceptsFormat } from '../engines/compat'
@@ -431,13 +431,15 @@ export function registerApi(app: Hono, d: Deps): void {
         // vLLM still honors the per-model multi-GPU shard count (ADR-054) — read it
         // straight off any saved profile (GGUF-oriented resolveProfile doesn't apply
         // to safetensors); MLX ignores it. 1/absent = single GPU.
-        const savedGpu = (cfg.modelProfiles[entry.key] as Partial<LoadProfile> | undefined)?.gpu
+        const savedProfile = cfg.modelProfiles[entry.key] as Partial<LoadProfile> | undefined
         opts = {
           engine: active,
           model: { key: entry.key, name: entry.name, quant: entry.quant, ctx: entry.nativeCtx, vision: false },
           modelPath: entry.path,
-          extraArgs: [],
-          tensorParallelSize: savedGpu?.tensorParallelSize,
+          // MLX honors sampling as launch defaults; vLLM gets no extra flags here
+          // (its multi-GPU shard count maps to --tensor-parallel-size below).
+          extraArgs: active.kind === 'mlx' ? mlxSamplingArgs(savedProfile?.sampling) : [],
+          tensorParallelSize: savedProfile?.gpu?.tensorParallelSize,
         }
       } else {
         const saved = cfg.modelProfiles[entry.key] as Partial<LoadProfile> | undefined

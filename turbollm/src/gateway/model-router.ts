@@ -8,6 +8,7 @@ import type { Registry } from '../engines/registry'
 import type { Scanner, ModelEntry } from '../models/scanner'
 import type { ComfyGuard } from '../engines/comfy-guard'
 import { resolveProfile, profileToArgs, type LoadProfile } from '../models/profile'
+import { mlxSamplingArgs } from '../engines/mlx'
 import { engineAcceptsFormat } from '../engines/compat'
 import { getSysInfo } from '../sysinfo/sysinfo'
 
@@ -243,13 +244,14 @@ export class ModelRouter {
     const cfg = this.store.snapshot()
     const sys = getSysInfo()
     if (entry.format !== 'gguf') {
-      const savedGpu = (cfg.modelProfiles[entry.key] as Partial<LoadProfile> | undefined)?.gpu
+      const savedProfile = cfg.modelProfiles[entry.key] as Partial<LoadProfile> | undefined
       return {
         engine,
         model: { key: entry.key, name: entry.name, quant: entry.quant, ctx: entry.nativeCtx, vision: false },
         modelPath: entry.path,
-        extraArgs: [],
-        tensorParallelSize: savedGpu?.tensorParallelSize,
+        // MLX honors sampling as launch defaults; vLLM takes no extra flags here.
+        extraArgs: engine.kind === 'mlx' ? mlxSamplingArgs(savedProfile?.sampling) : [],
+        tensorParallelSize: savedProfile?.gpu?.tensorParallelSize,
       }
     }
     const saved = cfg.modelProfiles[entry.key] as Partial<LoadProfile> | undefined

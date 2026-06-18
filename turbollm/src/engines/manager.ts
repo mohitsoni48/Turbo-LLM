@@ -422,9 +422,10 @@ export class Manager {
  *  `slotSavePath` (F-014) is appended only for llama.cpp; mlx/vllm don't support it. */
 function engineCommand(opts: StartOpts, port: number, slotSavePath?: string): { cmd: string; args: string[] } {
   if (opts.engine.kind === 'mlx') {
-    // MLX: run the mlx-lm OpenAI server via the provisioned venv python. The
-    // llama.cpp LoadProfile flags in opts.extraArgs do not apply and are dropped.
-    return mlxServerCommand(opts.engine.binPath, opts.modelPath, port, '127.0.0.1')
+    // MLX: run the mlx-lm OpenAI server via the provisioned venv python. For MLX,
+    // opts.extraArgs carries mlx-lm's OWN flags (sampling defaults), built by the
+    // callers via mlxSamplingArgs — never llama.cpp profile flags.
+    return mlxServerCommand(opts.engine.binPath, opts.modelPath, port, '127.0.0.1', opts.extraArgs)
   }
   if (opts.engine.kind === 'vllm') {
     // vLLM: run the OpenAI server via the provisioned venv python. modelPath is an
