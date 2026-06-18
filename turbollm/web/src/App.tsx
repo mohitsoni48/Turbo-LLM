@@ -15,6 +15,7 @@ import { ChatScreen } from './screens/ChatScreen'
 import { ModelsScreen } from './screens/ModelsScreen'
 import { EnginesScreen } from './screens/EnginesScreen'
 import { DeveloperScreen } from './screens/DeveloperScreen'
+import { CustomizeScreen } from './screens/CustomizeScreen'
 import { SettingsScreen } from './screens/SettingsScreen'
 
 export function App() {
@@ -48,6 +49,7 @@ export function App() {
           <Route path="/models" element={<ModelsScreen />} />
           <Route path="/engines" element={<EnginesScreen />} />
           <Route path="/developer" element={<DeveloperScreen />} />
+          <Route path="/customize" element={<CustomizeScreen />} />
           <Route path="/settings" element={<SettingsScreen />} />
           <Route path="*" element={<Navigate to="/chat" replace />} />
         </Routes>
