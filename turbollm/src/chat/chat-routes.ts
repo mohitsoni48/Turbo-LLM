@@ -341,12 +341,13 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
       // Attach tools only when the engine kind supports them (llama.cpp + TurboQuant).
       // MLX/vLLM passthrough is fine too — they ignore unknown fields gracefully.
       if (toolDefs.length > 0) reqBody.tools = toolDefs
-      // Force web_search on the first iteration when the conversation has a
-      // force_web_search policy (e.g. Research persona). Subsequent iterations
-      // use the default "auto" so the model can compose its answer after searching.
+      // Force web_search on the first two iterations when the conversation has a
+      // force_web_search policy (e.g. Research persona). This guarantees at least
+      // two distinct searches before the model composes its answer. Iteration 3+
+      // use "auto" so the model can continue searching or finish as it sees fit.
       if (
         conv.toolPolicy === 'force_web_search' &&
-        toolIter === 1 &&
+        toolIter <= 2 &&
         toolDefs.some((t) => t.function.name === 'web_search')
       ) {
         reqBody.tool_choice = { type: 'function', function: { name: 'web_search' } }
