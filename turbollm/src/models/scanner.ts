@@ -377,6 +377,21 @@ function mlxEntryFor(dir: string): ModelEntry {
     /* best effort */
   }
 
+  let incomplete = false
+  try {
+    const indexPath = join(dir, 'model.safetensors.index.json')
+    if (existsSync(indexPath)) {
+      const index = JSON.parse(readFileSync(indexPath, 'utf8')) as { weight_map?: Record<string, string> }
+      const shards = new Set(Object.values(index.weight_map ?? {}))
+      for (const shard of shards) {
+        if (!existsSync(join(dir, shard))) {
+          incomplete = true
+          break
+        }
+      }
+    }
+  } catch { /* best effort */ }
+
   const expertCount = cfg.num_local_experts ?? cfg.num_experts ?? 0
   const bits = cfg.quantization?.bits
   const quant = bits ? `${bits}bit` : 'fp16'
@@ -403,7 +418,7 @@ function mlxEntryFor(dir: string): ModelEntry {
     mmprojPath: null,
     hasChatTemplate,
     embedding: isEmbeddingModel(arch, basename(dir)),
-    incomplete: false,
+    incomplete,
     parseError,
     loaded: false,
     hasProfile: false,

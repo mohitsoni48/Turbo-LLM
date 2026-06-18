@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
-import { Boxes, ChevronRight, CircleSlash, FolderPlus, Loader2, MoreHorizontal, PackageSearch, RefreshCw, SlidersHorizontal, Star, Trash2, X, Zap } from 'lucide-react'
+import { Boxes, ChevronRight, CircleSlash, Download, FolderPlus, Loader2, MoreHorizontal, PackageSearch, RefreshCw, SlidersHorizontal, Star, Trash2, X, Zap } from 'lucide-react'
 import { ApiError, deleteModel } from '../lib/api'
 import { queryKeys, useModelActions, useModelDirs, useModelMutations, useModels, useStatus } from '../lib/queries'
 import type { ModelEntry } from '../lib/types'
@@ -487,6 +487,12 @@ function ModelRow({
             {loadingThis ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />}
             {loadingThis ? 'Loading…' : m.loaded ? 'Reload' : 'Load'}
           </Button>
+          {m.incomplete && (
+            <Button size="sm" variant="outline" onClick={onDiscover} title="Download the missing shard files">
+              <Download size={14} />
+              Re-download
+            </Button>
+          )}
           {m.loaded && (
             <Button size="sm" variant="outline" onClick={onEject} disabled={ejecting} title="Eject model (stop the engine)">
               <CircleSlash size={14} />
