@@ -331,6 +331,17 @@ export function uninstallComfyGate(): Promise<{ ok: boolean }> {
   return request('/api/v1/comfyui/uninstall', { method: 'POST', json: {} })
 }
 
+export type McpServer = {
+  id: string
+  name: string
+  transport: 'stdio' | 'sse'
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  url?: string
+  enabled: boolean
+}
+
 export type DaemonSettings = {
   idleTtlMinutes: number
   /** Listen port (spec 08 §2). Takes effect on the next daemon restart. */
@@ -354,15 +365,21 @@ export type DaemonSettings = {
   hfTokenSet: boolean
   /** Gateway intelligence settings (ADR-06x): model auto-swap + keep-N pool. */
   gateway: { autoSwap: boolean; keepN: number }
+  /** Whether a Tavily API key is configured (the key itself is never echoed back). */
+  tavilyKeySet: boolean
+  /** MCP server list. */
+  mcp: { servers: McpServer[] }
 }
 
 /** Settings patch: the persisted {@link DaemonSettings} fields plus a write-only
  *  `hfToken` (spec 10 §4) that sets/clears the stored Hugging Face token. `comfyui`
  *  is patchable per-field (only `enabled` is set here; `gatePath` is owned by the
  *  install endpoints). */
-export type DaemonSettingsPatch = Partial<Omit<DaemonSettings, 'comfyui'>> & {
+export type DaemonSettingsPatch = Partial<Omit<DaemonSettings, 'comfyui' | 'tavilyKeySet' | 'mcp'>> & {
   comfyui?: Partial<ComfyUiSettings>
   hfToken?: string
+  /** Write-only: set or clear the Tavily API key. */
+  tavilyApiKey?: string
 }
 
 export function getSettings(): Promise<DaemonSettings> {
@@ -376,6 +393,18 @@ export type RebindInfo = { portChanged: boolean; port: number; lanBind: boolean 
 
 export function saveSettings(patch: DaemonSettingsPatch): Promise<DaemonSettings & { rebind?: RebindInfo }> {
   return request<DaemonSettings & { rebind?: RebindInfo }>('/api/v1/settings', { method: 'PATCH', json: patch })
+}
+
+export function addMcpServer(server: Omit<McpServer, 'id'>): Promise<McpServer> {
+  return request<McpServer>('/api/v1/mcp/servers', { method: 'POST', json: server })
+}
+
+export function updateMcpServer(id: string, patch: Partial<Omit<McpServer, 'id'>>): Promise<McpServer> {
+  return request<McpServer>(`/api/v1/mcp/servers/${id}`, { method: 'PUT', json: patch })
+}
+
+export function deleteMcpServer(id: string): Promise<{ ok: true }> {
+  return request<{ ok: true }>(`/api/v1/mcp/servers/${id}`, { method: 'DELETE' })
 }
 
 /** Re-exec the daemon so port / LAN-bind changes take effect (spec 08 §2). Returns

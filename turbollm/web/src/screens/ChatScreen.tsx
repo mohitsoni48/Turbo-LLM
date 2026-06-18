@@ -3,7 +3,7 @@ import { ArrowDown, Brain, Paperclip, SendHorizontal, SlidersHorizontal, Square,
 import { continueConversation, sendMessage } from '../lib/chat-api'
 import { useConversation, useConversationMutations } from '../lib/chat-queries'
 import { useModelActions, useModels, useStatus } from '../lib/queries'
-import type { ChatSseEvent, Message } from '../lib/chat-types'
+import type { ChatSseEvent, LiveToolCall, Message } from '../lib/chat-types'
 import { ApiError } from '../lib/api'
 import { Button } from '../components/ui/button'
 import { toast } from '../components/ui/sonner'
@@ -29,6 +29,7 @@ interface LiveState {
   progress: { phase: string; pct: number; tps: number } | null
   liveGenTps: number  // rolling 2s window estimate during generation phase
   genTokens: number   // running count of generated tokens (content + reasoning) for this reply
+  toolCalls: LiveToolCall[]
 }
 
 export function ChatScreen() {
@@ -215,7 +216,7 @@ export function ChatScreen() {
       for await (const evt of gen) {
         if (evt.event === 'meta') {
           deltaTimestamps.current = []
-          setLive({ assistantId: evt.data.assistantMessageId, content: '', reasoning: '', progress: null, liveGenTps: 0, genTokens: 0 })
+          setLive({ assistantId: evt.data.assistantMessageId, content: '', reasoning: '', progress: null, liveGenTps: 0, genTokens: 0, toolCalls: [] })
           // Optimistically reflect the new/last user msg in the UI by invalidating
           void qc.invalidateQueries({ queryKey: ['conversation', convId] })
         } else if (evt.event === 'progress') {
@@ -227,6 +228,18 @@ export function ChatScreen() {
         } else if (evt.event === 'delta') {
           const liveTps = pushGenToken()
           setLive((l) => l ? { ...l, content: l.content + evt.data.delta, progress: null, liveGenTps: liveTps, genTokens: l.genTokens + 1 } : l)
+        } else if (evt.event === 'tool_call') {
+          const tc = evt.data
+          setLive((l) => {
+            if (!l) return l
+            const existing = l.toolCalls.findIndex((x) => x.id === tc.id)
+            if (existing >= 0) {
+              const updated = [...l.toolCalls]
+              updated[existing] = { ...updated[existing], status: tc.status, result: tc.result }
+              return { ...l, toolCalls: updated }
+            }
+            return { ...l, toolCalls: [...l.toolCalls, { id: tc.id, name: tc.name, args: tc.args, status: tc.status, result: tc.result }] }
+          })
         } else if (evt.event === 'done') {
           setLive(null)
           void qc.invalidateQueries({ queryKey: ['conversation', convId] })
@@ -447,7 +460,7 @@ export function ChatScreen() {
 
             {/* Streaming bubble */}
             {live && (
-              <StreamingBubble content={live.content} reasoning={live.reasoning} progress={live.progress} liveGenTps={live.liveGenTps} genTokens={live.genTokens} />
+              <StreamingBubble content={live.content} reasoning={live.reasoning} progress={live.progress} liveGenTps={live.liveGenTps} genTokens={live.genTokens} toolCalls={live.toolCalls} />
             )}
 
             <div ref={bottomRef} />

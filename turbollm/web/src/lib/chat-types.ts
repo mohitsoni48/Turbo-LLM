@@ -15,6 +15,22 @@ export interface MessageStats {
   aborted: boolean
 }
 
+export interface ToolCallRecord {
+  id: string
+  name: string
+  args: Record<string, unknown>
+  result?: string
+  error?: string
+}
+
+export interface LiveToolCall {
+  id: string
+  name: string
+  args: Record<string, unknown>
+  status: 'pending' | 'done' | 'error'
+  result?: string
+}
+
 export interface Message {
   id: string
   convId: string
@@ -24,6 +40,7 @@ export interface Message {
   reasoning: string
   attachments: string[]
   textAttachments: string[]
+  toolCalls: ToolCallRecord[]
   stats: Partial<MessageStats>
   createdAt: string
 }
@@ -48,5 +65,6 @@ export type ChatSseEvent =
   | { event: 'progress';  data: { phase: string; processed: number; total: number; pct: number; tps: number } }
   | { event: 'reasoning'; data: { delta: string } }
   | { event: 'delta';     data: { delta: string } }
+  | { event: 'tool_call'; data: { id: string; name: string; args: Record<string, unknown>; status: 'pending' | 'done' | 'error'; result?: string } }
   | { event: 'done';      data: { message: Message } }
   | { event: 'error';     data: { code: string; message: string } }

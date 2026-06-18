@@ -65,6 +65,32 @@ export interface LastLoaded {
 export interface HF {
   token: string
 }
+/** Built-in tool configuration (v0.7.0). */
+export interface ToolsConfig {
+  tavily?: { apiKey: string }
+}
+
+/** One MCP server the daemon manages as a tool provider (v0.7.0). */
+export interface McpServer {
+  id: string
+  name: string
+  transport: 'stdio' | 'sse'
+  /** stdio only — command to spawn */
+  command?: string
+  /** stdio only — argv after command */
+  args?: string[]
+  /** stdio only — extra env vars for the child process */
+  env?: Record<string, string>
+  /** sse only — base URL of the MCP server */
+  url?: string
+  enabled: boolean
+}
+
+/** MCP host configuration (v0.7.0). */
+export interface McpConfig {
+  servers: McpServer[]
+}
+
 /** Gateway intelligence (v0.6.0): auto model-swap + keep-N pool. */
 export interface Gateway {
   /** When true, gateway requests that include a `model` field auto-load the named
@@ -140,6 +166,8 @@ export interface Config {
   featuredOverrideUrl: string
   comfyui: ComfyUI
   gateway: Gateway
+  tools: ToolsConfig
+  mcp: McpConfig
   devModel?: DevModel
 }
 
@@ -247,6 +275,8 @@ export function defaultConfig(): Config {
     featuredOverrideUrl: '',
     comfyui: { enabled: false, gatePath: '', url: '', reverseGate: false, cachePersist: false },
     gateway: { autoSwap: true, keepN: 1 },
+    tools: {},
+    mcp: { servers: [] },
   }
 }
 
@@ -412,6 +442,22 @@ function normalize(c: Config): void {
   c.gateway = {
     autoSwap: gw.autoSwap !== false,
     keepN: typeof gw.keepN === 'number' && gw.keepN >= 1 ? Math.min(Math.floor(gw.keepN), 4) : 1,
+  }
+  // Built-in tools (v0.7.0): absent in pre-v0.7.0 configs → empty defaults.
+  const tl = (c.tools ?? {}) as Partial<ToolsConfig>
+  c.tools = {}
+  if (tl.tavily && typeof tl.tavily.apiKey === 'string') {
+    c.tools.tavily = { apiKey: tl.tavily.apiKey }
+  }
+  // MCP host (v0.7.0): absent in pre-v0.7.0 configs → empty server list.
+  const mc = (c.mcp ?? {}) as Partial<McpConfig>
+  c.mcp = {
+    servers: Array.isArray(mc.servers)
+      ? mc.servers.filter((s): s is McpServer =>
+          typeof s === 'object' && s !== null &&
+          typeof s.id === 'string' && typeof s.name === 'string' &&
+          (s.transport === 'stdio' || s.transport === 'sse'))
+      : [],
   }
   // Telemetry level (spec 09 §3): the UI exposes 'off' | 'anon' | 'full'. Migrate
   // legacy/unknown values safely → 'off' (the conservative, opt-in default).

@@ -6,7 +6,7 @@ import { basename, dirname, join, resolve, sep } from 'node:path'
 import { GATE_VERSION, gateNodeSource } from '../comfyui/gate-template'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { homedir, networkInterfaces } from 'node:os'
-import { ValueError, type ApiKey } from '../config/config'
+import { ValueError, type ApiKey, type McpServer } from '../config/config'
 import type { Deps } from '../deps'
 import { BusyError, type ModelInfo, type StartOpts } from '../engines/manager'
 import { NameTakenError, NotFoundError } from '../engines/registry'
@@ -742,6 +742,7 @@ export function registerApi(app: Hono, d: Deps): void {
       hfToken?: string
       comfyui?: { enabled?: boolean; url?: string; reverseGate?: boolean }
       gateway?: { autoSwap?: boolean; keepN?: number }
+      tavilyApiKey?: string
     }>(c)
 
     const updates: Record<string, unknown> = {}
@@ -845,7 +846,16 @@ export function registerApi(app: Hono, d: Deps): void {
       if (telemetryLevel !== undefined) cfg.telemetry.level = telemetryLevel
       // HF token (spec 10 §4): write-only. An explicit '' clears it. Never logged.
       if (b.hfToken !== undefined) cfg.hf.token = String(b.hfToken).trim()
+      // Tavily API key (v0.7.0): write-only. An explicit '' clears it.
+      if (b.tavilyApiKey !== undefined) {
+        const key = String(b.tavilyApiKey).trim()
+        cfg.tools.tavily = key ? { apiKey: key } : undefined
+      }
     })
+    // Keep ToolRegistry in sync when tools config changes.
+    if (b.tavilyApiKey !== undefined) {
+      d.tools?.updateConfig(d.store.snapshot().tools)
+    }
     const after = d.store.snapshot().daemon
 
     // A LAN-bind or port change re-points the HTTP listener. Rather than a full daemon
@@ -862,6 +872,58 @@ export function registerApi(app: Hono, d: Deps): void {
       rebind = { portChanged, port: after.port, lanBind: after.lanBind }
     }
     return c.json({ ...settingsPayload(d), rebind })
+  })
+
+  // ── MCP server management (v0.7.0) ────────────────────────────────────────
+
+  app.post('/api/v1/mcp/servers', async (c) => {
+    const b = await body<Partial<McpServer>>(c)
+    const transport = b.transport === 'sse' ? 'sse' : 'stdio'
+    if (!b.name?.trim()) return err(c, 400, 'invalid_config_value', 'name is required.')
+    if (transport === 'stdio' && !b.command?.trim()) return err(c, 400, 'invalid_config_value', 'command is required for stdio transport.')
+    if (transport === 'sse' && !b.url?.trim()) return err(c, 400, 'invalid_config_value', 'url is required for sse transport.')
+    if (transport === 'sse' && !/^https?:\/\//i.test(b.url ?? '')) return err(c, 400, 'invalid_config_value', 'url must be an http(s):// address.')
+    const { randomUUID } = await import('node:crypto')
+    const server: McpServer = {
+      id: randomUUID(),
+      name: b.name.trim(),
+      transport,
+      enabled: b.enabled !== false,
+      ...(transport === 'stdio' ? { command: b.command!.trim(), args: b.args ?? [], env: b.env ?? {} } : { url: b.url!.trim() }),
+    }
+    d.store.update((cfg) => { cfg.mcp.servers.push(server) })
+    if (server.enabled) await d.tools?.syncMcpServers(d.store.snapshot().mcp.servers).catch(() => {})
+    return c.json(server, 201)
+  })
+
+  app.put('/api/v1/mcp/servers/:id', async (c) => {
+    const id = c.req.param('id')
+    const b = await body<Partial<McpServer>>(c)
+    const cfg = d.store.snapshot()
+    if (!cfg.mcp.servers.some((s) => s.id === id)) return err(c, 404, 'not_found', 'MCP server not found.')
+    if (b.transport && b.transport !== 'stdio' && b.transport !== 'sse') return err(c, 400, 'invalid_config_value', 'transport must be stdio or sse.')
+    if (b.url && !/^https?:\/\//i.test(b.url)) return err(c, 400, 'invalid_config_value', 'url must be an http(s):// address.')
+    d.store.update((c2) => {
+      const s = c2.mcp.servers.find((x) => x.id === id)!
+      if (b.name !== undefined) s.name = b.name.trim()
+      if (b.transport !== undefined) s.transport = b.transport
+      if (b.enabled !== undefined) s.enabled = !!b.enabled
+      if (b.command !== undefined) s.command = b.command
+      if (b.args !== undefined) s.args = b.args
+      if (b.env !== undefined) s.env = b.env
+      if (b.url !== undefined) s.url = b.url
+    })
+    await d.tools?.syncMcpServers(d.store.snapshot().mcp.servers).catch(() => {})
+    return c.json(d.store.snapshot().mcp.servers.find((s) => s.id === id))
+  })
+
+  app.delete('/api/v1/mcp/servers/:id', (c) => {
+    const id = c.req.param('id')
+    const cfg = d.store.snapshot()
+    if (!cfg.mcp.servers.some((s) => s.id === id)) return err(c, 404, 'not_found', 'MCP server not found.')
+    d.store.update((c2) => { c2.mcp.servers = c2.mcp.servers.filter((s) => s.id !== id) })
+    void d.tools?.syncMcpServers(d.store.snapshot().mcp.servers)
+    return c.json({ ok: true })
   })
 
   // ── telemetry preview (spec 09 §4): a representative example of exactly what
@@ -1212,6 +1274,9 @@ function settingsPayload(d: Deps) {
     // The HF token is write-only over the wire (spec 10 §4): we never echo it back,
     // only whether one is set, so the UI can show "configured" without leaking it.
     hfTokenSet: cfg.hf.token.length > 0,
+    // Tavily API key is write-only: expose only whether it is set.
+    tavilyKeySet: !!(cfg.tools.tavily?.apiKey),
+    mcp: cfg.mcp,
   }
 }
 

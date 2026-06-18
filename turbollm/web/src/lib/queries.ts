@@ -52,6 +52,9 @@ import {
   reprobeEngine,
   rescanModels,
   resetModelProfile,
+  addMcpServer,
+  updateMcpServer,
+  deleteMcpServer,
   restartDaemon,
   restartEngine,
   saveModelProfile,
@@ -59,6 +62,7 @@ import {
   startEngine,
   stopEngine,
   type DaemonSettingsPatch,
+  type McpServer,
   type SysInfo,
   type TelemetryLevel,
 } from './api'
@@ -380,6 +384,16 @@ export function useModelActions() {
       mutationFn: () => stopEngine(),
       onSuccess: invalidate,
     }),
+  }
+}
+
+export function useMcpMutations() {
+  const qc = useQueryClient()
+  const refresh = () => void qc.invalidateQueries({ queryKey: ['settings'] })
+  return {
+    add: useMutation({ mutationFn: (s: Omit<McpServer, 'id'>) => addMcpServer(s), onSuccess: refresh }),
+    update: useMutation({ mutationFn: ({ id, patch }: { id: string; patch: Partial<Omit<McpServer, 'id'>> }) => updateMcpServer(id, patch), onSuccess: refresh }),
+    remove: useMutation({ mutationFn: (id: string) => deleteMcpServer(id), onSuccess: refresh }),
   }
 }
 

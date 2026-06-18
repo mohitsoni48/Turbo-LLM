@@ -5,7 +5,7 @@ import type { Deps } from '../deps'
 import { clampMaxTokens } from '../config/config'
 import { engineModelAlias } from '../engines/compat'
 import { getSysInfo } from '../sysinfo/sysinfo'
-import type { MessageStats } from './db'
+import type { MessageStats, ToolCallRecord } from './db'
 
 // Track in-flight abort controllers per conversation id.
 const inflight = new Map<string, AbortController>()
@@ -263,314 +263,384 @@ interface GenerationCtx {
 }
 
 /**
- * Streams a single assistant completion: posts to the engine, relays delta/reasoning/
- * progress SSE events, parses inline <think> tags, persists the final message + stats,
- * and fires auto-title. Shared by the messages and continue endpoints.
+ * Streams an assistant turn with optional agentic tool-calling loop. Posts to the
+ * engine, relays delta/reasoning/progress/tool_call SSE events, parses inline <think>
+ * tags, executes tool calls and loops (up to MAX_TOOL_ITER rounds), persists the final
+ * message + stats, and fires auto-title. Shared by the messages and continue endpoints.
  */
 async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx): Promise<void> {
   const { db } = d
-  const { convId, conv, engineMessages, assistantMsg, ms, target, ac, disableThinking } = ctx
+  const { convId, conv, assistantMsg, ms, target, ac, disableThinking } = ctx
 
-      // Map conversation sampling overrides (camelCase) to the engine's snake_case
-      // parameter names. Only keys present in conv.sampling are forwarded — absent
-      // keys let the engine use the startup-flag defaults set by profileToArgs.
-      const convS = conv.sampling ?? {}
-      const SAMPLING_KEYS: Record<string, string> = {
-        temp: 'temperature', topP: 'top_p', topK: 'top_k', minP: 'min_p',
-        repeatPenalty: 'repeat_penalty', presencePenalty: 'presence_penalty',
-        frequencyPenalty: 'frequency_penalty',
-      }
-      const samplingOverride: Record<string, unknown> = {}
-      for (const [camel, snake] of Object.entries(SAMPLING_KEYS)) {
-        if (camel in convS) samplingOverride[snake] = convS[camel]
-      }
-      // Pass through any already-snake_case keys the client may have stored directly.
-      for (const [k, v] of Object.entries(convS)) {
-        if (!(k in SAMPLING_KEYS) && k !== 'stop') samplingOverride[k] = v
-      }
+  // Map conversation sampling overrides (camelCase) to the engine's snake_case names.
+  const convS = conv.sampling ?? {}
+  const SAMPLING_KEYS: Record<string, string> = {
+    temp: 'temperature', topP: 'top_p', topK: 'top_k', minP: 'min_p',
+    repeatPenalty: 'repeat_penalty', presencePenalty: 'presence_penalty',
+    frequencyPenalty: 'frequency_penalty',
+  }
+  const samplingOverride: Record<string, unknown> = {}
+  for (const [camel, snake] of Object.entries(SAMPLING_KEYS)) {
+    if (camel in convS) samplingOverride[snake] = convS[camel]
+  }
+  for (const [k, v] of Object.entries(convS)) {
+    if (!(k in SAMPLING_KEYS) && k !== 'stop') samplingOverride[k] = v
+  }
+  const stopStrings = convS.stop as string[] | undefined
+
+  const maxLimit = d.store.snapshot().modelDefaults.maxTokens ?? 0
+
+  // ── Agentic tool loop ──────────────────────────────────────────────────────
+  // engineMessages is extended each round with tool results. Start from ctx copy
+  // so the original array is never mutated (continue endpoint reuses it).
+  const iterMessages: { role: string; content: unknown; tool_calls?: unknown; tool_call_id?: string }[] =
+    ctx.engineMessages.map((m) => ({ role: m.role, content: m.content }))
+
+  const MAX_TOOL_ITER = 10
+  let toolIter = 0
+
+  // Accumulated across all tool iterations for persistence
+  let fullContent = ''
+  let fullReasoning = ''
+  const allToolCalls: ToolCallRecord[] = []
+
+  // Stats from the final (non-tool) round
+  const requestStart = Date.now()
+  let ttftMs = 0
+  let thinkStart = 0
+  let thinkEnd = 0
+  let finalUsage: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } } = {}
+  let finalTimings: Record<string, number> = {}
+  let aborted = false
+  let liveOut = 0
+
+  d.manager.generationStart()
+  try {
+    // Get tool definitions once (or empty for engines that don't support tools)
+    const toolDefs = d.tools ? await d.tools.buildToolDefinitions() : []
+
+    outerLoop: while (toolIter <= MAX_TOOL_ITER) {
+      toolIter++
 
       const reqBody: Record<string, unknown> = {
-        // mlx-lm / vLLM serve under a fixed alias and 404 on TurboLLM's internal key;
-        // llama.cpp ignores the field. engineModelAlias() returns the right value per kind.
         model: engineModelAlias(d.registry.active()?.kind ?? '') ?? ms.model!.key,
-        messages: engineMessages,
+        messages: iterMessages,
         stream: true,
         stream_options: { include_usage: true },
         return_progress: true,
         ...samplingOverride,
       }
-      // Stop strings are string[], so they live outside the numeric sampling map.
-      const stopStrings = convS.stop as string[] | undefined
       if (stopStrings?.length) reqBody.stop = stopStrings
-      // Apply the global "max response tokens" cap (0 = unlimited). Honors a smaller
-      // per-conversation value if one was set, but never lets it exceed the cap.
-      const maxLimit = d.store.snapshot().modelDefaults.maxTokens ?? 0
       const cappedMax = clampMaxTokens(reqBody.max_tokens as number | undefined, maxLimit)
       if (cappedMax != null) reqBody.max_tokens = cappedMax
       else delete reqBody.max_tokens
-      // Disable thinking at the engine level when requested: the model answers
-      // directly with no reasoning pass. `reasoning_budget: 0` covers llama-server's
-      // native reasoning control; `enable_thinking: false` covers Qwen-style chat
-      // templates. Both are no-ops on engines/models that don't reason (same pair
-      // autoTitle relies on).
       if (disableThinking) {
         reqBody.reasoning_budget = 0
         reqBody.chat_template_kwargs = { enable_thinking: false }
       }
+      // Attach tools only when the engine kind supports them (llama.cpp + TurboQuant).
+      // MLX/vLLM passthrough is fine too — they ignore unknown fields gracefully.
+      if (toolDefs.length > 0) reqBody.tools = toolDefs
 
-      const requestStart = Date.now()
-      let ttftMs = 0
-      let firstDelta = false
-      let thinkStart = 0
-      let thinkEnd = 0
-      let fullContent = ''
-      let fullReasoning = ''
+      const res = await fetch(`${target}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(reqBody),
+        signal: ac.signal,
+        duplex: 'half',
+      })
+
+      if (!res.ok || !res.body) {
+        await stream.writeSSE({ event: 'error', data: JSON.stringify({ code: 'engine_error', message: `Engine returned ${res.status}` }) })
+        return
+      }
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+
+      const cancelReader = () => void reader.cancel()
+      if (ac.signal.aborted) {
+        cancelReader()
+      } else {
+        ac.signal.addEventListener('abort', cancelReader, { once: true })
+      }
+
+      // Per-round state
+      let roundContent = ''
       let inThink = false
       let pendingThinkBuf = ''
-      let finalUsage: {
-        prompt_tokens?: number
-        completion_tokens?: number
-        prompt_tokens_details?: { cached_tokens?: number }
-      } = {}
-      let finalTimings: Record<string, number> = {}
-      let aborted = false
-      let liveOut = 0 // approximate output-token count for the live engine-card row
+      let firstDelta = false
+      let finishReason = ''
+      // Accumulate streaming tool_calls by index (OpenAI format: fragmented across chunks)
+      const pendingToolCalls = new Map<number, { id: string; name: string; argsBuffer: string }>()
 
-      // Mark this completion as in-flight so the engine card's live "Generating…"
-      // indicator (and the idle watchdog) can see it. Paired with generationEnd in
-      // the finally below so a thrown/aborted stream can never leak the counter.
-      d.manager.generationStart()
-      try {
-        const res = await fetch(`${target}/v1/chat/completions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(reqBody),
-          signal: ac.signal,
-          duplex: 'half',
-        })
+      roundLoop: while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split('\n')
+        buf = lines.pop() ?? ''
 
-        if (!res.ok || !res.body) {
-          await stream.writeSSE({ event: 'error', data: JSON.stringify({ code: 'engine_error', message: `Engine returned ${res.status}` }) })
-          return
-        }
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const raw = line.slice(6).trim()
+          if (raw === '[DONE]') break roundLoop
 
-        const reader = res.body.getReader()
-        const decoder = new TextDecoder()
-        let buf = ''
+          let chunk: Record<string, unknown>
+          try { chunk = JSON.parse(raw) as Record<string, unknown> } catch { continue }
 
-        // When the abort signal fires during body streaming, explicitly cancel the
-        // reader so undici closes the TCP socket to TurboQuant immediately. Without
-        // this, undici may drain the buffered response rather than cutting the wire,
-        // which lets TurboQuant run to completion instead of stopping mid-generation.
-        const cancelReader = () => void reader.cancel()
-        if (ac.signal.aborted) {
-          cancelReader()
-        } else {
-          ac.signal.addEventListener('abort', cancelReader, { once: true })
-        }
+          // Prompt progress
+          const pp = chunk.prompt_progress as { processed?: number; total?: number; tps?: number } | undefined
+          if (pp && pp.total) {
+            const pct = Math.round((pp.processed ?? 0) / pp.total * 100)
+            d.manager.setLiveGen({ phase: 'prompt', pct, outputTokens: 0 })
+            await stream.writeSSE({ event: 'progress', data: JSON.stringify({ phase: 'prompt', processed: pp.processed, total: pp.total, pct, tps: pp.tps ?? 0 }) })
+            continue
+          }
 
-        outer: while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buf += decoder.decode(value, { stream: true })
-          const lines = buf.split('\n')
-          buf = lines.pop() ?? ''
+          if (chunk.usage) finalUsage = chunk.usage as typeof finalUsage
+          if (chunk.timings) finalTimings = chunk.timings as typeof finalTimings
 
-          for (const line of lines) {
-            if (!line.startsWith('data: ')) continue
-            const raw = line.slice(6).trim()
-            if (raw === '[DONE]') break outer
+          const choices = chunk.choices as Array<{
+            delta?: { content?: string; reasoning_content?: string; tool_calls?: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }> }
+            finish_reason?: string
+          }> | undefined
+          if (!choices?.length) continue
 
-            let chunk: Record<string, unknown>
-            try { chunk = JSON.parse(raw) as Record<string, unknown> } catch { continue }
+          if (choices[0].finish_reason) finishReason = choices[0].finish_reason
+          const delta = choices[0].delta ?? {}
 
-            // Prompt progress
-            const pp = chunk.prompt_progress as { processed?: number; total?: number; tps?: number } | undefined
-            if (pp && pp.total) {
-              const pct = Math.round((pp.processed ?? 0) / pp.total * 100)
-              d.manager.setLiveGen({ phase: 'prompt', pct, outputTokens: 0 })
-              await stream.writeSSE({ event: 'progress', data: JSON.stringify({ phase: 'prompt', processed: pp.processed, total: pp.total, pct, tps: pp.tps ?? 0 }) })
-              continue
+          // Accumulate streaming tool_call fragments (OpenAI: id+name only in first chunk,
+          // arguments fragment across all chunks for that index).
+          if (delta.tool_calls?.length) {
+            for (const tc of delta.tool_calls) {
+              if (!pendingToolCalls.has(tc.index)) {
+                pendingToolCalls.set(tc.index, { id: '', name: '', argsBuffer: '' })
+              }
+              const entry = pendingToolCalls.get(tc.index)!
+              if (tc.id && !entry.id) entry.id = tc.id
+              if (tc.function?.name && !entry.name) entry.name = tc.function.name
+              if (tc.function?.arguments) entry.argsBuffer += tc.function.arguments
             }
+            continue
+          }
 
-            // Usage / timings (may appear on a final empty delta chunk)
-            if (chunk.usage) finalUsage = chunk.usage as typeof finalUsage
-            if (chunk.timings) finalTimings = chunk.timings as typeof finalTimings
+          // Reasoning content (explicit field — newer llama-server)
+          if (delta.reasoning_content) {
+            const rc = delta.reasoning_content
+            if (!thinkStart) thinkStart = Date.now()
+            thinkEnd = Date.now()
+            fullReasoning += rc
+            await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: rc }) })
+            continue
+          }
 
-            const choices = chunk.choices as Array<{ delta?: { content?: string; reasoning_content?: string }; finish_reason?: string }> | undefined
-            if (!choices?.length) continue
-            const delta = choices[0].delta ?? {}
+          const raw_content = delta.content ?? ''
+          if (!raw_content) continue
 
-            // Reasoning content (explicit field — newer llama-server with reasoning model)
-            if (delta.reasoning_content) {
-              const rc = delta.reasoning_content
-              if (!thinkStart) thinkStart = Date.now()
-              thinkEnd = Date.now()
-              fullReasoning += rc
-              await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: rc }) })
-              continue
-            }
-
-            const raw_content = delta.content ?? ''
-            if (!raw_content) continue
-
-            // Detect <think>...</think> tags inline (older llama-server with --jinja)
-            let toProcess = raw_content
-            while (toProcess.length > 0) {
-              if (!inThink && !firstDelta) {
-                // Haven't seen any real content yet — might start with <think>
-                pendingThinkBuf += toProcess
-                const openIdx = pendingThinkBuf.indexOf('<think>')
-                if (openIdx === 0) {
-                  inThink = true
-                  if (!thinkStart) thinkStart = Date.now()
-                  pendingThinkBuf = pendingThinkBuf.slice(7)
-                  toProcess = ''
-                } else if (openIdx > 0) {
-                  // Content before <think>
-                  const before = pendingThinkBuf.slice(0, openIdx)
-                  fullContent += before
-                  firstDelta = true
-                  if (!ttftMs) { ttftMs = Date.now() - requestStart; firstDelta = true }
-                  await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: before }) })
-                  inThink = true
-                  if (!thinkStart) thinkStart = Date.now()
-                  pendingThinkBuf = pendingThinkBuf.slice(openIdx + 7)
-                  toProcess = ''
-                } else if (pendingThinkBuf.length > 20) {
-                  // No <think> tag coming — flush as content
-                  const flush = pendingThinkBuf
-                  pendingThinkBuf = ''
-                  fullContent += flush
-                  firstDelta = true
-                  if (!ttftMs) ttftMs = Date.now() - requestStart
-                  await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: flush }) })
-                  toProcess = ''
-                } else {
-                  toProcess = ''
-                }
-              } else if (inThink) {
-                pendingThinkBuf += toProcess
-                const closeIdx = pendingThinkBuf.indexOf('</think>')
-                if (closeIdx >= 0) {
-                  const thinkChunk = pendingThinkBuf.slice(0, closeIdx)
-                  if (thinkChunk) {
-                    thinkEnd = Date.now()
-                    fullReasoning += thinkChunk
-                    await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: thinkChunk }) })
-                  }
-                  inThink = false
-                  thinkEnd = Date.now()
-                  pendingThinkBuf = pendingThinkBuf.slice(closeIdx + 8)
-                  toProcess = ''
-                  // Remaining after </think> will be emitted as content next iteration
-                  if (pendingThinkBuf) {
-                    fullContent += pendingThinkBuf
-                    firstDelta = true
-                    if (!ttftMs) ttftMs = Date.now() - requestStart
-                    await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: pendingThinkBuf }) })
-                    pendingThinkBuf = ''
-                  }
-                } else {
-                  thinkEnd = Date.now()
-                  fullReasoning += pendingThinkBuf
-                  await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: pendingThinkBuf }) })
-                  pendingThinkBuf = ''
-                  toProcess = ''
-                }
-              } else {
-                // Normal content
-                if (!ttftMs) ttftMs = Date.now() - requestStart
+          // Detect <think>...</think> tags inline (older llama-server with --jinja)
+          let toProcess = raw_content
+          while (toProcess.length > 0) {
+            if (!inThink && !firstDelta) {
+              pendingThinkBuf += toProcess
+              const openIdx = pendingThinkBuf.indexOf('<think>')
+              if (openIdx === 0) {
+                inThink = true
+                if (!thinkStart) thinkStart = Date.now()
+                pendingThinkBuf = pendingThinkBuf.slice(7)
+                toProcess = ''
+              } else if (openIdx > 0) {
+                const before = pendingThinkBuf.slice(0, openIdx)
+                fullContent += before
+                roundContent += before
                 firstDelta = true
-                fullContent += toProcess
-                // Each llama-server content chunk is ~one token — a good-enough live count.
-                d.manager.setLiveGen({ phase: 'gen', pct: 0, outputTokens: ++liveOut })
-                await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: toProcess }) })
+                if (!ttftMs) ttftMs = Date.now() - requestStart
+                await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: before }) })
+                inThink = true
+                if (!thinkStart) thinkStart = Date.now()
+                pendingThinkBuf = pendingThinkBuf.slice(openIdx + 7)
+                toProcess = ''
+              } else if (pendingThinkBuf.length > 20) {
+                const flush = pendingThinkBuf
+                pendingThinkBuf = ''
+                fullContent += flush
+                roundContent += flush
+                firstDelta = true
+                if (!ttftMs) ttftMs = Date.now() - requestStart
+                await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: flush }) })
+                toProcess = ''
+              } else {
                 toProcess = ''
               }
+            } else if (inThink) {
+              pendingThinkBuf += toProcess
+              const closeIdx = pendingThinkBuf.indexOf('</think>')
+              if (closeIdx >= 0) {
+                const thinkChunk = pendingThinkBuf.slice(0, closeIdx)
+                if (thinkChunk) {
+                  thinkEnd = Date.now()
+                  fullReasoning += thinkChunk
+                  await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: thinkChunk }) })
+                }
+                inThink = false
+                thinkEnd = Date.now()
+                pendingThinkBuf = pendingThinkBuf.slice(closeIdx + 8)
+                toProcess = ''
+                if (pendingThinkBuf) {
+                  fullContent += pendingThinkBuf
+                  roundContent += pendingThinkBuf
+                  firstDelta = true
+                  if (!ttftMs) ttftMs = Date.now() - requestStart
+                  await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: pendingThinkBuf }) })
+                  pendingThinkBuf = ''
+                }
+              } else {
+                thinkEnd = Date.now()
+                fullReasoning += pendingThinkBuf
+                await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: pendingThinkBuf }) })
+                pendingThinkBuf = ''
+                toProcess = ''
+              }
+            } else {
+              if (!ttftMs) ttftMs = Date.now() - requestStart
+              firstDelta = true
+              fullContent += toProcess
+              roundContent += toProcess
+              d.manager.setLiveGen({ phase: 'gen', pct: 0, outputTokens: ++liveOut })
+              await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: toProcess }) })
+              toProcess = ''
             }
           }
         }
-        ac.signal.removeEventListener('abort', cancelReader)
+      }
+      ac.signal.removeEventListener('abort', cancelReader)
 
-        // Flush any pending think buf as reasoning if we're still in think at end
-        if (pendingThinkBuf && inThink) {
-          fullReasoning += pendingThinkBuf
-          await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: pendingThinkBuf }) })
-        } else if (pendingThinkBuf) {
-          fullContent += pendingThinkBuf
-          await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: pendingThinkBuf }) })
-        }
-
-      } catch (e: unknown) {
-        const isAbort = (e as Error)?.name === 'AbortError'
-        aborted = isAbort
-        if (!isAbort) {
-          await stream.writeSSE({ event: 'error', data: JSON.stringify({ code: 'engine_stopped', message: (e as Error).message }) })
-        }
-      } finally {
-        d.manager.generationEnd()
-        inflight.delete(convId)
+      // Flush pending think buf
+      if (pendingThinkBuf && inThink) {
+        fullReasoning += pendingThinkBuf
+        await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: pendingThinkBuf }) })
+      } else if (pendingThinkBuf) {
+        fullContent += pendingThinkBuf
+        roundContent += pendingThinkBuf
+        await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: pendingThinkBuf }) })
       }
 
-      const totalMs = Date.now() - requestStart
-      const thinkMs = thinkStart && thinkEnd ? thinkEnd - thinkStart : 0
-      const ctxMax = ms.model?.ctx ?? 4096
+      // ── Tool call execution ──────────────────────────────────────────────
+      if ((finishReason === 'tool_calls' || pendingToolCalls.size > 0) && d.tools && toolIter <= MAX_TOOL_ITER) {
+        const roundToolCalls = Array.from(pendingToolCalls.values())
 
-      // Build stats: prefer engine-reported timings, fall back to wall-clock
-      const stats: Partial<MessageStats> = {
-        ttftMs,
-        totalMs,
-        thinkMs,
-        ctxUsed: (finalUsage.prompt_tokens ?? 0) + (finalUsage.completion_tokens ?? 0),
-        ctxMax,
-        model: ms.model?.name ?? '',
-        aborted,
-      }
-      // cached prompt tokens: prefer the engine's explicit count, else infer it
-      // as (full prompt − tokens it actually had to process).
-      const fullPrompt = finalUsage.prompt_tokens ?? 0
-      const cachedExplicit = finalUsage.prompt_tokens_details?.cached_tokens
-      if (finalTimings.prompt_n) {
-        const processed = finalTimings.prompt_n
-        stats.promptTokens = fullPrompt || processed
-        stats.promptMs     = finalTimings.prompt_ms
-        stats.promptTps    = finalTimings.prompt_per_second
-        stats.genTokens    = finalTimings.predicted_n
-        stats.genMs        = finalTimings.predicted_ms
-        stats.tps          = finalTimings.predicted_per_second
-        stats.cachedTokens = cachedExplicit ?? Math.max(0, (fullPrompt || processed) - processed)
-      } else {
-        // Fallback: wall clock
-        stats.promptTokens = fullPrompt
-        stats.genTokens    = finalUsage.completion_tokens ?? 0
-        stats.genMs        = totalMs - ttftMs
-        stats.tps          = stats.genMs > 0 ? Math.round((stats.genTokens / stats.genMs) * 1000 * 10) / 10 : 0
-        stats.cachedTokens = cachedExplicit ?? 0
-      }
-
-      // Persist final assistant message
-      db.updateMessage(assistantMsg.id, { content: fullContent, reasoning: fullReasoning, stats })
-      db.touchConversation(convId)
-
-      // Feed the running-session stats accumulator (B4). Fail-safe: a recording
-      // error must never affect the completion response.
-      try {
-        d.manager.recordCompletion({
-          inputTokens: stats.promptTokens,
-          outputTokens: stats.genTokens,
-          promptTps: stats.promptTps,
-          genTps: stats.tps,
+        // Add the assistant message (with tool_calls) to iterMessages for the next round
+        iterMessages.push({
+          role: 'assistant',
+          content: roundContent || null,
+          tool_calls: roundToolCalls.map((tc) => ({
+            id: tc.id,
+            type: 'function',
+            function: { name: tc.name, arguments: tc.argsBuffer },
+          })),
         })
-      } catch { /* swallow — stats are best-effort */ }
 
-      const finalMsg = db.getMessage(assistantMsg.id)!
-      await stream.writeSSE({ event: 'done', data: JSON.stringify({ message: finalMsg }) })
+        for (const tc of roundToolCalls) {
+          let parsedArgs: Record<string, unknown>
+          try { parsedArgs = JSON.parse(tc.argsBuffer || '{}') as Record<string, unknown> }
+          catch { parsedArgs = {} }
 
-      // Auto-title: fire 1s after first completed exchange (spec 07 §6)
-      if (!aborted && conv.title === 'New chat' && d.store.snapshot().daemon.autoGenerateTitles) {
-        setTimeout(() => { void autoTitle(d, convId, engineMessages, fullContent, target) }, 1000)
+          // Emit pending event so the frontend can show "calling..."
+          await stream.writeSSE({
+            event: 'tool_call',
+            data: JSON.stringify({ id: tc.id, name: tc.name, args: parsedArgs, status: 'pending' }),
+          })
+
+          let result = ''
+          let callError: string | undefined
+          try {
+            result = await d.tools.executeTool({ id: tc.id, name: tc.name, args: parsedArgs })
+          } catch (e) {
+            callError = (e as Error).message
+            result = `Error: ${callError}`
+          }
+
+          allToolCalls.push({ id: tc.id, name: tc.name, args: parsedArgs, result: callError ? undefined : result, error: callError })
+
+          // Emit done event with result
+          await stream.writeSSE({
+            event: 'tool_call',
+            data: JSON.stringify({ id: tc.id, name: tc.name, args: parsedArgs, status: callError ? 'error' : 'done', result }),
+          })
+
+          // Inject tool result into iterMessages
+          iterMessages.push({ role: 'tool', content: result, tool_call_id: tc.id })
+        }
+
+        // Continue to next round
+        continue outerLoop
       }
+
+      // No tool calls (or tools not available) — done
+      break outerLoop
+    }
+  } catch (e: unknown) {
+    const isAbort = (e as Error)?.name === 'AbortError'
+    aborted = isAbort
+    if (!isAbort) {
+      await stream.writeSSE({ event: 'error', data: JSON.stringify({ code: 'engine_stopped', message: (e as Error).message }) })
+    }
+  } finally {
+    d.manager.generationEnd()
+    inflight.delete(convId)
+  }
+
+  const totalMs = Date.now() - requestStart
+  const thinkMs = thinkStart && thinkEnd ? thinkEnd - thinkStart : 0
+  const ctxMax = ms.model?.ctx ?? 4096
+
+  const stats: Partial<MessageStats> = {
+    ttftMs,
+    totalMs,
+    thinkMs,
+    ctxUsed: (finalUsage.prompt_tokens ?? 0) + (finalUsage.completion_tokens ?? 0),
+    ctxMax,
+    model: ms.model?.name ?? '',
+    aborted,
+  }
+  const fullPrompt = finalUsage.prompt_tokens ?? 0
+  const cachedExplicit = finalUsage.prompt_tokens_details?.cached_tokens
+  if (finalTimings.prompt_n) {
+    const processed = finalTimings.prompt_n
+    stats.promptTokens = fullPrompt || processed
+    stats.promptMs     = finalTimings.prompt_ms
+    stats.promptTps    = finalTimings.prompt_per_second
+    stats.genTokens    = finalTimings.predicted_n
+    stats.genMs        = finalTimings.predicted_ms
+    stats.tps          = finalTimings.predicted_per_second
+    stats.cachedTokens = cachedExplicit ?? Math.max(0, (fullPrompt || processed) - processed)
+  } else {
+    stats.promptTokens = fullPrompt
+    stats.genTokens    = finalUsage.completion_tokens ?? 0
+    stats.genMs        = totalMs - ttftMs
+    stats.tps          = stats.genMs > 0 ? Math.round((stats.genTokens / stats.genMs) * 1000 * 10) / 10 : 0
+    stats.cachedTokens = cachedExplicit ?? 0
+  }
+
+  db.updateMessage(assistantMsg.id, { content: fullContent, reasoning: fullReasoning, toolCalls: allToolCalls, stats })
+  db.touchConversation(convId)
+
+  try {
+    d.manager.recordCompletion({
+      inputTokens: stats.promptTokens,
+      outputTokens: stats.genTokens,
+      promptTps: stats.promptTps,
+      genTps: stats.tps,
+    })
+  } catch { /* swallow — stats are best-effort */ }
+
+  const finalMsg = db.getMessage(assistantMsg.id)!
+  await stream.writeSSE({ event: 'done', data: JSON.stringify({ message: finalMsg }) })
+
+  if (!aborted && conv.title === 'New chat' && d.store.snapshot().daemon.autoGenerateTitles) {
+    setTimeout(() => { void autoTitle(d, convId, ctx.engineMessages, fullContent, target) }, 1000)
+  }
 }
 
 // ── auto title generation ──────────────────────────────────────────────────
