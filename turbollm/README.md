@@ -107,9 +107,15 @@ TurboLLM does the opposite:
 
 **Chat**
 - Streaming chat with live t/s, TTFT, context meter, and reasoning/thinking support
-- **Persona picker** (7 styles) + per-chat system prompt and full sampling controls
+- **Persona picker** (8 styles, including Research) + per-chat system prompt and full sampling controls
 - **Inline Unicode charts** when a comparison or trend genuinely warrants a visual
 - Image and document attachments — including **send an image or file with no text**
+
+**Agentic tools**
+- **Built-in tools** — `web_search` (Tavily, advanced depth), `fetch_url`, and sandboxed `run_code`
+- **MCP server support** — connect any MCP server (stdio or SSE) from the Customize screen; tools appear automatically in every chat
+- **Research persona** — forces multi-step web search before every reply, cites sources inline
+- Agentic tool loop with live tool-call cards (pending → done/error) streamed in the UI
 
 **Integrations**
 - OpenAI- **and** Anthropic-compatible APIs — run Claude Code on your own GPU

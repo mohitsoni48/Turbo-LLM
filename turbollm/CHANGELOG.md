@@ -25,6 +25,29 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
+## [0.7.0] - 2026-06-18
+
+### Added
+- **Agentic tool loop** — native `finish_reason: tool_calls` detection with up to 10 iterations;
+  streams live tool-call cards (pending → done/error) in the chat UI as tools execute.
+- **Built-in tools** — `web_search` (Tavily REST API, `search_depth: advanced`), `fetch_url`
+  (HTML-stripped page text), and `run_code` (sandboxed Node.js `vm` — no network/file access).
+- **MCP host client** — connect any MCP server via stdio subprocess or SSE HTTP transport;
+  tools from all connected servers appear automatically in the tool list.
+- **Customize screen** — new `/customize` nav item (Puzzle icon) for Tavily API key management
+  and MCP server add/edit/delete. Settings is now focused on engine/model/network/startup/persona.
+- **Research persona** — always fires `web_search` before composing a reply; `tool_choice` is
+  forced at the protocol level for the first two iterations, guaranteeing at least two distinct
+  searches; system prompt mandates a 3–5 query strategy with source citation.
+- **Current-date injection** — today's date is baked into every new conversation's system prompt
+  so temporal queries use the correct year without extra user instruction.
+- **DB migration v5+v6** — `tool_calls` column on messages (persists tool invocation history);
+  `tool_policy` column on conversations (drives per-conversation tool-choice enforcement).
+
+### Changed
+- Settings screen no longer contains Tools or MCP sections — both moved to the new Customize screen.
+- Persona count increased to 8 (added Research); persona descriptions updated.
+
 ## [0.3.0] - 2026-06-17
 
 ### Added
