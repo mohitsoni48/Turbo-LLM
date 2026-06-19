@@ -38,8 +38,9 @@ function venvPython(envDir: string): string {
  * Provision an isolated vLLM runtime: uv → venv (pinned python) → `uv pip
  * install vllm`. The install pulls torch + CUDA wheels and is multi-GB, so the
  * caller should surface indeterminate progress. Returns the venv python + version.
+ * When `upgrade` is true, passes `-U` to force an upgrade to the latest release.
  */
-export async function ensureVllmEnv(root: string, onProgress?: (p: ProvisionProgress) => void): Promise<VllmRuntime> {
+export async function ensureVllmEnv(root: string, onProgress?: (p: ProvisionProgress) => void, upgrade = false): Promise<VllmRuntime> {
   const uv = await ensureUv(root, onProgress)
   const envDir = join(root, 'vllm', 'venv')
   const py = venvPython(envDir)
@@ -52,8 +53,10 @@ export async function ensureVllmEnv(root: string, onProgress?: (p: ProvisionProg
   }
   // Install (or no-op if already satisfied) vllm into the venv. Large download;
   // generous buffer + no timeout (pip resolves + compiles for minutes).
+  // `-U` forces an upgrade to the latest release when requested.
   onProgress?.({ phase: 'extracting', pct: -1 })
-  await execFileP(uv, ['pip', 'install', '--python', py, 'vllm'], {
+  const installArgs = ['pip', 'install', '--python', py, ...(upgrade ? ['-U'] : []), 'vllm']
+  await execFileP(uv, installArgs, {
     cwd: root,
     maxBuffer: 64 * 1024 * 1024,
   })
