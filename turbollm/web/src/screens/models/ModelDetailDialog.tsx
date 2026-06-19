@@ -101,7 +101,15 @@ export function ModelDetailDialog({
   const benchRunning = !!benchState?.running && benchHere
   const benchDone = !!benchState?.done && benchHere && !benchState.running
   const benchErr = bench.start.error instanceof ApiError ? bench.start.error.message : null
-  const isMlx = detail?.format === 'mlx'
+  // Which engine will load this model decides which knobs apply (BUG-004). GGUF is always
+  // loaded by a llama.cpp-family engine → full knobs + auto-tune. Safetensors models report
+  // format 'mlx', but they load on whichever safetensors engine is active: vLLM (tensor-parallel
+  // + sampling) or MLX (sampling only). vLLM must be told apart by the active engine kind, not
+  // the model format — otherwise a vLLM load shows MLX (Apple Silicon) copy.
+  const isGguf = detail?.format === 'gguf'
+  const isLlamaCpp = isGguf
+  const isVllm = !isGguf && activeEngine?.kind === 'vllm'
+  const isMlx = !isGguf && !isVllm
   // The runner requires a free engine (409 otherwise). When this model is loaded,
   // stop it first, then start the sweep once the engine has settled.
   const startBenchRun = () => {
@@ -150,7 +158,7 @@ export function ModelDetailDialog({
           <div className="flex flex-col gap-4">
             {fit && <VramBar estMb={fit.estMb} totalMb={fit.totalVramMb} verdict={fit.verdict} />}
 
-            {!isMlx && detail.gpu && (
+            {isLlamaCpp && detail.gpu && (
               <AutoTune
                 running={benchRunning}
                 done={benchDone}
@@ -175,7 +183,16 @@ export function ModelDetailDialog({
               </div>
             )}
 
-            {!isMlx && (
+            {isVllm && (
+              <div className="rounded-md border border-border bg-panel-2 px-3 py-2.5 text-[12px] text-muted">
+                vLLM manages context length and KV cache automatically — there are no context/GPU-layer/KV
+                knobs to set here. Use <span className="text-ink">tensor parallel size</span> (below, on multi-GPU
+                hosts) to shard the model; <span className="text-ink">sampling defaults</span> apply at load and
+                per-conversation overrides still work in chat.
+              </div>
+            )}
+
+            {isLlamaCpp && (
             <Section>
               <Slider label="Context length" hint="Tokens of history the model can use." value={draft.ctx} min={512} max={Math.max(512, detail.nativeCtx || 8192)} step={512} onChange={(v) => set('ctx', v)} fmt={(v) => v.toLocaleString()} />
               {detail.gpu && (
@@ -215,7 +232,7 @@ export function ModelDetailDialog({
               </>
             )}
 
-            {!isMlx && (
+            {isLlamaCpp && (
             <Section>
               <Row label="Parallel slots">
                 <NumberInput value={draft.parallel} min={1} max={16} onChange={(v) => set('parallel', v)} />
@@ -245,7 +262,7 @@ export function ModelDetailDialog({
               <Slider label="Top P" value={draft.sampling.topP} min={0} max={1} step={0.01} onChange={(v) => setS('topP', v)} fmt={(v) => v.toFixed(2)} />
               <Slider label="Top K" value={draft.sampling.topK} min={0} max={200} step={1} onChange={(v) => setS('topK', v)} />
               <Slider label="Min P" value={draft.sampling.minP} min={0} max={1} step={0.01} onChange={(v) => setS('minP', v)} fmt={(v) => v.toFixed(2)} />
-              {!isMlx && (<>
+              {isLlamaCpp && (<>
               <Slider label="Repeat penalty" hint="Penalise tokens that appeared earlier. 1.0 = off." value={draft.sampling.repeatPenalty} min={1} max={2} step={0.05} onChange={(v) => setS('repeatPenalty', v)} fmt={(v) => v.toFixed(2)} />
               <Slider label="Presence penalty" hint="Flat penalty for any token that appeared. 0 = off." value={draft.sampling.presencePenalty} min={0} max={2} step={0.05} onChange={(v) => setS('presencePenalty', v)} fmt={(v) => v.toFixed(2)} />
               <Slider label="Frequency penalty" hint="Penalty proportional to how often a token appeared. 0 = off." value={draft.sampling.frequencyPenalty} min={0} max={2} step={0.05} onChange={(v) => setS('frequencyPenalty', v)} fmt={(v) => v.toFixed(2)} />
@@ -259,7 +276,7 @@ export function ModelDetailDialog({
               </>)}
             </Section>
 
-            {!isMlx && specOptions.length > 1 && (
+            {isLlamaCpp && specOptions.length > 1 && (
               <>
                 <SectionTitle>Speculative decoding</SectionTitle>
                 <Section>
@@ -291,7 +308,7 @@ export function ModelDetailDialog({
               </>
             )}
 
-            {!isMlx && (<>
+            {isLlamaCpp && (<>
             <button type="button" onClick={() => setAdvanced((a) => !a)} className="flex items-center gap-1 text-[13px] font-medium text-muted hover:text-ink">
               <ChevronDown size={14} className={advanced ? 'rotate-180 transition-transform' : 'transition-transform'} />
               Advanced
