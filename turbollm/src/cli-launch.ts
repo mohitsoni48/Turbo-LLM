@@ -22,10 +22,25 @@ interface DaemonStatus {
   model?: { name?: string }
 }
 
+// Type-safe subset of spawn's return value that launchCli actually uses.
+type SpawnLike = (
+  cmd: string,
+  args: string[],
+  opts: Parameters<typeof spawn>[2],
+) => Pick<ReturnType<typeof spawn>, 'on'>
+
 /** Launch `target` CLI wired to the TurboLLM gateway on 127.0.0.1:<port>. Returns
  *  the child's exit code (or a non-zero code on a setup failure). Pure launcher —
- *  it never starts the daemon itself. */
-export async function launchCli(target: string, port: number, passthrough: string[]): Promise<number> {
+ *  it never starts the daemon itself.
+ *
+ *  `_spawn` is an optional injection point used by unit tests to capture the env
+ *  passed to the child process without actually launching Claude Code. */
+export async function launchCli(
+  target: string,
+  port: number,
+  passthrough: string[],
+  _spawn: SpawnLike = spawn,
+): Promise<number> {
   const spec = SUPPORTED[target]
   if (!target || !spec) {
     const list = Object.keys(SUPPORTED).join(', ')
@@ -60,7 +75,7 @@ export async function launchCli(target: string, port: number, passthrough: strin
 
   process.stdout.write(`▸ Launching ${spec.label} → TurboLLM  (model: ${model}, ${base})\n`)
 
-  const child = spawn(spec.bin, passthrough, {
+  const child = _spawn(spec.bin, passthrough, {
     stdio: 'inherit',
     // On Windows the CLI is usually a `.cmd`/`.ps1` shim; a shell resolves it via PATHEXT.
     shell: process.platform === 'win32',
@@ -70,6 +85,11 @@ export async function launchCli(target: string, port: number, passthrough: strin
       // No auth is enforced on the local gateway; the CLI just needs a non-empty token.
       ANTHROPIC_AUTH_TOKEN: 'turbollm-local',
       ANTHROPIC_MODEL: model,
+      // Local LLMs are 30–120 s per response — raise Claude Code's request timeout so it
+      // doesn't abort mid-generation. 300 s (5 min) covers even the slowest local model.
+      // Zero retries: retrying a slow local model cold-starts it again and makes things worse.
+      ANTHROPIC_TIMEOUT: '300000',
+      ANTHROPIC_MAX_RETRIES: '0',
     },
   })
 
