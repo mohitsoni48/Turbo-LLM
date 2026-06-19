@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ChevronLeft, ChevronRight, MessageSquarePlus, Pencil, Search, Trash2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Download, MessageSquarePlus, Pencil, Search, Trash2 } from 'lucide-react'
 import type { Conversation } from '../../lib/chat-types'
 import { useConversationMutations, useConversations } from '../../lib/chat-queries'
 import { Button } from '../../components/ui/button'
@@ -18,12 +18,15 @@ export function ConversationSidebar({
   activeId,
   onSelect,
   onNew,
+  onImport,
   collapsed,
   onToggle,
 }: {
   activeId: string | null
   onSelect: (id: string) => void
   onNew: () => void
+  /** Called when the user clicks "Import chat" — opens the file picker in the parent. */
+  onImport?: () => void
   collapsed?: boolean
   onToggle?: () => void
 }) {
@@ -65,6 +68,11 @@ export function ConversationSidebar({
         <Button size="icon" variant="ghost" onClick={onNew} title="New chat (Ctrl+N)" className="h-7 w-7">
           <MessageSquarePlus size={15} />
         </Button>
+        {onImport && (
+          <Button size="icon" variant="ghost" onClick={onImport} title="Import chat" className="h-7 w-7">
+            <Download size={15} />
+          </Button>
+        )}
       </div>
     )
   }
@@ -90,6 +98,11 @@ export function ConversationSidebar({
         <Button size="icon" variant="ghost" onClick={onNew} title="New chat (Ctrl+N)" className="h-7 w-7 shrink-0">
           <MessageSquarePlus size={15} />
         </Button>
+        {onImport && (
+          <Button size="icon" variant="ghost" onClick={onImport} title="Import chat" className="h-7 w-7 shrink-0">
+            <Download size={15} />
+          </Button>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto px-1 pb-2">

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowDown, Brain, Paperclip, SendHorizontal, SlidersHorizontal, Square, UserRound, X } from 'lucide-react'
+import { useParams, useSearchParams } from 'react-router-dom'
+import { ArrowDown, Brain, Copy, Download, Paperclip, SendHorizontal, Share2, SlidersHorizontal, Square, UserRound, X } from 'lucide-react'
 import { continueConversation, sendMessage } from '../lib/chat-api'
 import { useConversation, useConversationMutations } from '../lib/chat-queries'
 import { useModelActions, useModels, useStatus } from '../lib/queries'
 import type { ChatSseEvent, LiveToolCall, Message } from '../lib/chat-types'
-import { ApiError } from '../lib/api'
+import { ApiError, downloadChatExport, getDebugSnapshot, getShareUrl, importChat } from '../lib/api'
 import { Button } from '../components/ui/button'
 import { toast } from '../components/ui/sonner'
 import { useQueryClient } from '@tanstack/react-query'
@@ -37,7 +38,12 @@ export function ChatScreen() {
   const model = status?.model
   const engineState = status?.engine.state
 
-  const [activeId, setActiveId] = useState<string | null>(null)
+  // Route params: /chat/:convId?readonly=1
+  const { convId: routeConvId } = useParams<{ convId?: string }>()
+  const [searchParams] = useSearchParams()
+  const readonly = searchParams.get('readonly') === '1'
+
+  const [activeId, setActiveId] = useState<string | null>(routeConvId ?? null)
   const [live, setLive] = useState<LiveState | null>(null)
   const [input, setInput] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -45,6 +51,14 @@ export function ChatScreen() {
   const [showScrollBtn, setShowScrollBtn] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [attachments, setAttachments] = useState<{ file: File; dataUrl: string }[]>([])
+  // Share menu state
+  const [shareMenuOpen, setShareMenuOpen] = useState(false)
+  const [clipboardFallback, setClipboardFallback] = useState<{ text: string; title: string } | null>(null)
+  const shareMenuRef = useRef<HTMLDivElement>(null)
+  // Import state (F-024)
+  const importFileRef = useRef<HTMLInputElement>(null)
+  const [importError, setImportError] = useState<string | null>(null)
+  const [importModelMismatch, setImportModelMismatch] = useState<string | null>(null)
 
   // Thinking toggle — per-conversation, persisted in localStorage. When OFF the
   // model is told to skip reasoning entirely (answers directly), not merely to
@@ -164,6 +178,90 @@ export function ChatScreen() {
     setThinkingEnabledState(readThinkingEnabled(activeId))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId])
+
+  // Close share menu on outside click
+  useEffect(() => {
+    if (!shareMenuOpen) return
+    const handler = (e: MouseEvent) => {
+      if (shareMenuRef.current && !shareMenuRef.current.contains(e.target as Node)) {
+        setShareMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [shareMenuOpen])
+
+  // ── Share handlers (F-023) ────────────────────────────────────────────────
+
+  const copyText = async (text: string, successMsg: string, title: string) => {
+    setShareMenuOpen(false)
+    try {
+      await navigator.clipboard.writeText(text)
+      toast.success(successMsg)
+    } catch {
+      // Clipboard API unavailable — show fallback modal with pre-selected text
+      setClipboardFallback({ text, title })
+    }
+  }
+
+  const handleCopyLink = async () => {
+    if (!activeId) return
+    try {
+      const { url } = await getShareUrl(activeId)
+      await copyText(url, 'Link copied', 'Share link')
+    } catch {
+      toast.error('Could not get share URL.')
+    }
+  }
+
+  const handleCopyDebugInfo = async () => {
+    if (!activeId) return
+    try {
+      const json = await getDebugSnapshot(activeId)
+      await copyText(json, 'Debug info copied', 'Debug snapshot')
+    } catch {
+      toast.error('Could not get debug info.')
+    }
+  }
+
+  const handleExportChat = () => {
+    if (!activeId) return
+    setShareMenuOpen(false)
+    downloadChatExport(activeId)
+  }
+
+  // ── Import handler (F-024) ────────────────────────────────────────────────
+
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    setImportError(null)
+    setImportModelMismatch(null)
+    let payload: unknown
+    try {
+      const text = await file.text()
+      payload = JSON.parse(text)
+    } catch {
+      setImportError('Invalid file — could not parse JSON.')
+      return
+    }
+    // Check model mismatch before importing
+    const exportModel = (payload as Record<string, unknown>)?.model as string | undefined
+    if (exportModel) {
+      const models = modelsQ.data?.models ?? []
+      const found = models.some((m) => m.key === exportModel)
+      if (!found) setImportModelMismatch(exportModel)
+    }
+    try {
+      const { id } = await importChat(payload)
+      void qc.invalidateQueries({ queryKey: ['conversations'] })
+      handleSelect(id)
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Import failed. Check the file is a valid .turbollm-chat.json.'
+      setImportError(msg)
+    }
+  }
 
   const handleNew = () => {
     setActiveId(null)
@@ -356,6 +454,7 @@ export function ChatScreen() {
           activeId={activeId}
           onSelect={handleSelect}
           onNew={handleNew}
+          onImport={readonly ? undefined : () => importFileRef.current?.click()}
           collapsed={!sidebarOpen}
           onToggle={() => setSidebarOpen((o) => !o)}
         />
@@ -363,6 +462,15 @@ export function ChatScreen() {
 
       {/* Thread */}
       <div className="relative flex min-w-0 flex-1 flex-col">
+        {/* Read-only banner (F-023: shown when ?readonly=1) */}
+        {readonly && (
+          <div className="flex shrink-0 items-center gap-2 border-b border-border bg-panel-2 px-4 py-1.5 text-[12px] text-muted">
+            <span className="font-medium text-ink">Shared view</span>
+            <span className="text-faint">—</span>
+            <span>read only</span>
+          </div>
+        )}
+
         {/* Chat header: model load/switch/eject (always available) */}
         <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-4">
           <ModelLoadMenu
@@ -416,11 +524,85 @@ export function ChatScreen() {
           {ready && (
             <ContextMeter ctxUsed={ctxUsed} ctxMax={ctxMax} />
           )}
+
+          {/* Share / Export menu (F-023, F-024) — only when a conversation is active */}
+          {activeId && (
+            <div ref={shareMenuRef} className="relative ml-auto">
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-8 w-8"
+                onClick={() => setShareMenuOpen((o) => !o)}
+                title="Share or export this chat"
+              >
+                <Share2 size={15} />
+              </Button>
+              {shareMenuOpen && (
+                <div className="absolute right-0 top-9 z-50 min-w-[180px] rounded-md border border-border bg-panel shadow-[var(--shadow-2)] py-1">
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyLink()}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-[13px] text-ink hover:bg-panel-2"
+                  >
+                    <Copy size={13} className="text-muted" />
+                    Copy link (LAN)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyDebugInfo()}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-[13px] text-ink hover:bg-panel-2"
+                  >
+                    <Copy size={13} className="text-muted" />
+                    Copy debug info
+                  </button>
+                  <div className="my-1 border-t border-border" />
+                  <button
+                    type="button"
+                    onClick={handleExportChat}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-[13px] text-ink hover:bg-panel-2"
+                  >
+                    <Download size={13} className="text-muted" />
+                    Export chat
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Message list — always visible; empty state shown only when no messages */}
         <div ref={scrollerRef} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
           <div className="flex w-full flex-col gap-6 px-8 py-6">
+            {/* Hidden import file input (F-024) */}
+            <input
+              ref={importFileRef}
+              type="file"
+              accept=".json,.turbollm-chat.json"
+              hidden
+              onChange={(e) => void handleImportFile(e)}
+            />
+
+            {/* Model mismatch banner (F-024): shown after a successful import when the
+                exported model isn't available on this machine. Inline, not a toast. */}
+            {importModelMismatch && (
+              <div className="mb-2 flex items-start gap-2 rounded-md border border-[color:var(--warn,#ca8a04)] bg-[color-mix(in_srgb,var(--warn,#ca8a04)_8%,transparent)] px-3 py-2 text-[13px]">
+                <span className="flex-1">
+                  <span className="font-medium">Model not found:</span>{' '}
+                  <span className="font-mono">{importModelMismatch}</span> is not available on this machine.
+                  The chat was imported — select a different model to continue.
+                </span>
+                <button type="button" onClick={() => setImportModelMismatch(null)} className="shrink-0 text-faint hover:text-ink"><X size={13} /></button>
+              </div>
+            )}
+
+            {/* Import error (F-024): inline, not toast */}
+            {importError && (
+              <div className="mb-2 flex items-start gap-2 rounded-md border border-[color:var(--err)] bg-[color-mix(in_srgb,var(--err)_8%,transparent)] px-3 py-2 text-[13px]">
+                <span className="flex-1 text-[color:var(--err)]">{importError}</span>
+                <button type="button" onClick={() => setImportError(null)} className="shrink-0 text-faint hover:text-ink"><X size={13} /></button>
+              </div>
+            )}
+
             {/* Empty state */}
             {messages.length === 0 && !live && (
               <div className="flex flex-col items-center gap-4 py-16">
@@ -444,6 +626,17 @@ export function ChatScreen() {
                 ) : (
                   <p className="text-[14px] text-muted">Select a model above to begin</p>
                 )}
+                {/* Import chat button — always shown on new-chat empty state */}
+                {!readonly && (
+                  <button
+                    type="button"
+                    onClick={() => importFileRef.current?.click()}
+                    className="mt-2 flex items-center gap-1.5 rounded-full border border-border px-4 py-1.5 text-[13px] text-muted hover:border-accent hover:text-ink transition-colors"
+                  >
+                    <Download size={13} />
+                    Import chat
+                  </button>
+                )}
               </div>
             )}
 
@@ -453,9 +646,9 @@ export function ChatScreen() {
                 key={m.id}
                 message={m}
                 isLast={i === messages.length - 1 && !live}
-                onEdit={(msg) => setEditingId(msg.id)}
-                onDelete={handleDelete}
-                onRegenerate={handleRegenerate}
+                onEdit={readonly ? undefined : (msg) => setEditingId(msg.id)}
+                onDelete={readonly ? undefined : handleDelete}
+                onRegenerate={readonly ? undefined : handleRegenerate}
                 editingId={editingId}
                 onEditSave={(content) => handleEditSave(m.id, content)}
                 onEditCancel={() => setEditingId(null)}
@@ -482,8 +675,28 @@ export function ChatScreen() {
           </button>
         )}
 
-        {/* Composer area (always visible; disabled when no model) */}
-        <div className="px-8 pb-5">
+        {/* Clipboard fallback modal (F-023): shown when navigator.clipboard is unavailable */}
+        {clipboardFallback && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setClipboardFallback(null)}>
+            <div className="mx-4 w-full max-w-lg rounded-lg border border-border bg-panel p-4 shadow-[var(--shadow-2)]" onClick={(e) => e.stopPropagation()}>
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-[13px] font-medium text-ink">{clipboardFallback.title}</span>
+                <button type="button" onClick={() => setClipboardFallback(null)} className="text-faint hover:text-ink"><X size={14} /></button>
+              </div>
+              <textarea
+                readOnly
+                autoFocus
+                className="h-48 w-full resize-none rounded border border-border bg-panel-2 p-2 text-[12px] font-mono text-ink outline-none"
+                value={clipboardFallback.text}
+                onFocus={(e) => e.target.select()}
+              />
+              <p className="mt-1 text-[11px] text-faint">Select all and copy (Ctrl+C / Cmd+C)</p>
+            </div>
+          </div>
+        )}
+
+        {/* Composer area (always visible; disabled when no model; hidden in readonly) */}
+        {readonly ? null : <div className="px-8 pb-5">
           <div className="w-full">
             <div className="rounded-[var(--radius-lg)] border border-border bg-panel shadow-[var(--shadow-2)] focus-within:border-[color:var(--accent)]">
               {/* Attachment previews */}
@@ -552,7 +765,7 @@ export function ChatScreen() {
               {model ? `${model.name} · Enter to send · Shift+Enter for newline` : 'Load a model above to start chatting'}
             </p>
           </div>
-        </div>
+        </div>}
       </div>
 
       <ModelDetailDialog modelKey={settingsKey} onClose={() => setSettingsKey(null)} />

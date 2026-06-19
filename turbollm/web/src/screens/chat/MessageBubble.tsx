@@ -394,9 +394,10 @@ export function MessageBubble({
 }: {
   message: Message
   isLast: boolean
-  onEdit: (m: Message) => void
-  onDelete: (m: Message) => void
-  onRegenerate: () => void
+  /** When undefined, edit/delete/regenerate action buttons are hidden (read-only mode). */
+  onEdit?: (m: Message) => void
+  onDelete?: (m: Message) => void
+  onRegenerate?: () => void
   editingId: string | null
   onEditSave: (content: string) => void
   onEditCancel: () => void
@@ -450,8 +451,8 @@ export function MessageBubble({
           {!isEditing && (
             <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
               <CopyButton text={message.content} className="rounded p-1 hover:bg-panel-2" />
-              <ActionBtn icon={<Pencil size={12} />}        label="Edit"   onClick={() => { setEditDraft(message.content); onEdit(message) }} />
-              <ActionBtn icon={<Trash2 size={12} />}        label="Delete" onClick={() => onDelete(message)} destructive />
+              {onEdit && <ActionBtn icon={<Pencil size={12} />}  label="Edit"   onClick={() => { setEditDraft(message.content); onEdit(message) }} />}
+              {onDelete && <ActionBtn icon={<Trash2 size={12} />} label="Delete" onClick={() => onDelete(message)} destructive />}
             </div>
           )}
         </div>
@@ -480,7 +481,7 @@ export function MessageBubble({
         {hasError ? (
           <div className="rounded-lg border px-4 py-3 text-[14px]" style={{ borderColor: 'var(--err)', color: 'var(--err)', background: 'color-mix(in srgb, var(--err) 8%, transparent)' }}>
             Generation failed or was stopped.
-            {isLast && <button type="button" className="ml-3 underline" onClick={onRegenerate}>Regenerate</button>}
+            {isLast && onRegenerate && <button type="button" className="ml-3 underline" onClick={onRegenerate}>Regenerate</button>}
           </div>
         ) : (
           <div className="prose-tllm text-[15px] leading-[1.7] text-ink">
@@ -501,8 +502,8 @@ export function MessageBubble({
         <StatsRow stats={message.stats} />
         <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
           <CopyButton text={message.content} className="rounded p-1 hover:bg-panel-2" />
-          {isLast && <ActionBtn icon={<RefreshCw size={12} />} label="Regenerate" onClick={onRegenerate} />}
-          <ActionBtn icon={<Trash2 size={12} />}        label="Delete"     onClick={() => onDelete(message)} destructive />
+          {isLast && onRegenerate && <ActionBtn icon={<RefreshCw size={12} />} label="Regenerate" onClick={onRegenerate} />}
+          {onDelete && <ActionBtn icon={<Trash2 size={12} />} label="Delete" onClick={() => onDelete(message)} destructive />}
         </div>
       </div>
     </div>
