@@ -149,11 +149,15 @@ export type EnginesList = {
 }
 
 /** A selectable llama.cpp backend variant (ADR-025). A "build" of the official
- *  engine. `engineId` is the registered engine to activate once installed. */
+ *  engine. `engineId` is the registered engine to activate once installed.
+ *  `enabled` = a registry engine entry exists for this binary (files on disk + registered).
+ *  `installed` = binary files exist on disk (superset of `enabled`). */
 export type BackendInfo = {
   id: string
   label: string
   installed: boolean
+  /** True when the binary is registered in the engine registry (installed + enabled). */
+  enabled: boolean
   recommended: boolean
   active: boolean
   engineId: string
@@ -162,6 +166,8 @@ export type BackendInfo = {
 export type MlxInfo = {
   supported: boolean
   installed: boolean
+  /** True when the MLX engine is registered in the engine registry. */
+  enabled: boolean
   active: boolean
   engineId: string
 }
@@ -194,8 +200,10 @@ export type CatalogEngine = {
   note?: string
   /** Whether this engine can run on the current OS. */
   supportedHere: boolean
-  /** For pip engines: whether one of this kind is already registered. */
+  /** Whether the engine's files exist on disk (disk-based check). */
   installed?: boolean
+  /** Whether a registry engine entry exists for this engine (files installed AND registered). */
+  enabled?: boolean
 }
 
 export type EngineCatalog = {

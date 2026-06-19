@@ -159,6 +159,37 @@ export function removeEngine(id: string): Promise<{ ok: true }> {
   })
 }
 
+/** Unregister a catalog engine AND delete its installed files from disk.
+ *  Models are never touched — only the engine's install dir under engines/. */
+export function purgeEngine(id: string): Promise<{ ok: true }> {
+  return request<{ ok: true }>(`/api/v1/engines/${encodeURIComponent(id)}?purge=1`, {
+    method: 'DELETE',
+  })
+}
+
+/** Enable an installed llama.cpp backend without re-downloading (register + activate). */
+export function enableBackend(id: string): Promise<{ ok: true; engineId: string }> {
+  return request<{ ok: true; engineId: string }>(
+    `/api/v1/engines/backends/${encodeURIComponent(id)}/enable`,
+    { method: 'POST' },
+  )
+}
+
+/** Update (upgrade) the vLLM engine to the latest release (passes -U to uv pip install). */
+export function updateVllm(): Promise<{ accepted: true; engine: 'vllm' }> {
+  return request('/api/v1/engines/vllm?update=1', { method: 'POST', json: {} })
+}
+
+/** Update (upgrade) the MLX engine to the latest release (passes --upgrade to uv pip install). */
+export function updateMlx(): Promise<{ accepted: true; engine: 'mlx' }> {
+  return request('/api/v1/engines/mlx?update=1', { method: 'POST', json: {} })
+}
+
+/** Update (re-download latest release) the TurboQuant engine. */
+export function updateTurboquant(): Promise<{ accepted: true; engine: 'turboquant' }> {
+  return request('/api/v1/engines/turboquant?update=1', { method: 'POST', json: {} })
+}
+
 export function activateEngine(id: string): Promise<{ ok: true }> {
   return request<{ ok: true }>(
     `/api/v1/engines/${encodeURIComponent(id)}/activate`,
