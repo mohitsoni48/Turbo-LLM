@@ -2,8 +2,8 @@ import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
-import { CheckCircle2, ChevronDown, FileText, Loader2, Pencil, RefreshCw, Trash2, XCircle } from 'lucide-react'
-import type { LiveToolCall, Message, MessageStats, ToolCallRecord } from '../../lib/chat-types'
+import { CheckCircle2, ChevronDown, ChevronRight, FileText, Loader2, Pencil, RefreshCw, Trash2, XCircle } from 'lucide-react'
+import type { ClaimVerdict, LiveToolCall, Message, MessageStats, ResearchMeta, ResearchSource, ToolCallRecord } from '../../lib/chat-types'
 import { Button } from '../../components/ui/button'
 import { CopyButton } from '../../components/ui/copy-button'
 
@@ -178,6 +178,141 @@ function ToolCallsPanel({ calls }: { calls: CardCall[] }) {
   )
 }
 
+// ── F-021: Confidence badge ───────────────────────────────────────────────────
+
+function ConfidenceBadge({ confidence }: { confidence: number }) {
+  const pct = Math.round(confidence * 100)
+  const isHigh = confidence >= 0.8
+  return (
+    <span
+      title="Model's self-assessed confidence. A local LLM never reaches 1.0 — that's expected."
+      className="inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium"
+      style={{
+        background: isHigh ? 'color-mix(in srgb, var(--accent) 15%, transparent)' : 'color-mix(in srgb, var(--warn) 15%, transparent)',
+        color: isHigh ? 'var(--accent)' : 'var(--warn)',
+        border: `1px solid ${isHigh ? 'color-mix(in srgb, var(--accent) 30%, transparent)' : 'color-mix(in srgb, var(--warn) 30%, transparent)'}`,
+      }}
+    >
+      Confidence {pct}%
+    </span>
+  )
+}
+
+// ── F-021: Sources panel ──────────────────────────────────────────────────────
+
+function SourceRow({ source, idx }: { source: ResearchSource; idx: number }) {
+  const [open, setOpen] = useState(false)
+  const scoreColor = source.relevanceScore >= 0.7 ? 'var(--accent)' : source.relevanceScore >= 0.5 ? 'var(--warn)' : 'var(--faint)'
+  return (
+    <div className="rounded border border-border bg-panel-2 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-start gap-2 px-3 py-1.5 text-left text-[12px]"
+      >
+        <span className="shrink-0 font-mono text-faint">{idx + 1}.</span>
+        <span className="min-w-0 flex-1">
+          <span className="font-medium text-ink truncate block">{source.title || source.domain}</span>
+          <a
+            href={source.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-faint hover:text-accent truncate block"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {source.domain}
+          </a>
+        </span>
+        <span
+          className="shrink-0 rounded px-1 py-0.5 text-[10px] font-medium"
+          style={{ background: 'color-mix(in srgb, currentColor 12%, transparent)', color: scoreColor }}
+        >
+          {Math.round(source.relevanceScore * 100)}%
+        </span>
+        {open ? <ChevronDown size={11} className="shrink-0 text-faint mt-0.5" /> : <ChevronRight size={11} className="shrink-0 text-faint mt-0.5" />}
+      </button>
+      {open && (
+        <p className="border-t border-border px-3 pb-2 pt-1.5 text-[11px] leading-relaxed text-muted">
+          {source.passage || '(no passage)'}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function SourcesPanel({ meta }: { meta: ResearchMeta }) {
+  const [open, setOpen] = useState(false)
+  const sources = meta.sources ?? []
+  if (sources.length === 0) return null
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-1 text-[12px] text-muted hover:text-ink"
+      >
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <span>Sources [{sources.length}]</span>
+      </button>
+      {open && (
+        <div className="mt-1.5 space-y-1">
+          {sources.map((s, i) => (
+            <SourceRow key={s.url} source={s} idx={i} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── F-022: Annotated reply with inline referee badges ─────────────────────────
+
+function AnnotatedReply({ content, verdicts }: { content: string; verdicts: ClaimVerdict[] }) {
+  if (!verdicts.length) return <Markdown>{content}</Markdown>
+
+  // Build a lookup: sentence → verdict
+  const verdictMap = new Map<string, ClaimVerdict>()
+  for (const v of verdicts) {
+    verdictMap.set(v.sentence.trim(), v)
+  }
+
+  // Split content into sentences preserving delimiters, then annotate verified/unverified
+  const parts: Array<{ text: string; verdict?: 'verified' | 'unverified' }> = []
+  let remaining = content
+  for (const [sentence, v] of verdictMap) {
+    const idx = remaining.indexOf(sentence)
+    if (idx === -1) continue
+    if (idx > 0) parts.push({ text: remaining.slice(0, idx) })
+    parts.push({ text: sentence, verdict: v.verdict === 'uncited' ? undefined : v.verdict })
+    remaining = remaining.slice(idx + sentence.length)
+  }
+  if (remaining) parts.push({ text: remaining })
+
+  return (
+    <>
+      {parts.map((p, i) => (
+        <span key={i} className="relative">
+          {p.verdict === 'verified' && (
+            <span
+              title="Claim found in cited source"
+              className="inline-block text-[9px] font-bold ml-0.5 mr-0.5 align-super"
+              style={{ color: 'var(--ok)' }}
+            >✓</span>
+          )}
+          {p.verdict === 'unverified' && (
+            <span
+              title="Could not verify this claim in the cited source — check manually"
+              className="inline-block text-[9px] font-bold ml-0.5 mr-0.5 align-super"
+              style={{ color: 'var(--warn)' }}
+            >?</span>
+          )}
+          <Markdown>{p.text}</Markdown>
+        </span>
+      ))}
+    </>
+  )
+}
+
 // ── Streaming message (in-progress) ──────────────────────────────────────────
 
 export function StreamingBubble({
@@ -332,6 +467,8 @@ export function MessageBubble({
     status: tc.error ? 'error' : 'done',
     result: tc.error ?? tc.result,
   }))
+  const rm: ResearchMeta | undefined = message.researchMeta
+  const verdicts = rm?.refereeVerdicts ?? []
   return (
     <div className="group flex gap-3">
       <ModelAvatar />
@@ -347,9 +484,20 @@ export function MessageBubble({
           </div>
         ) : (
           <div className="prose-tllm text-[15px] leading-[1.7] text-ink">
-            <Markdown>{message.content}</Markdown>
+            {verdicts.length > 0
+              ? <AnnotatedReply content={message.content} verdicts={verdicts} />
+              : <Markdown>{message.content}</Markdown>
+            }
           </div>
         )}
+        {/* F-021: confidence badge */}
+        {rm?.confidence !== undefined && (
+          <div className="mt-1.5">
+            <ConfidenceBadge confidence={rm.confidence} />
+          </div>
+        )}
+        {/* F-021: sources panel */}
+        {rm && <SourcesPanel meta={rm} />}
         <StatsRow stats={message.stats} />
         <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
           <CopyButton text={message.content} className="rounded p-1 hover:bg-panel-2" />

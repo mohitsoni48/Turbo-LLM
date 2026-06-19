@@ -31,6 +31,31 @@ export interface LiveToolCall {
   result?: string
 }
 
+/** F-021: a single ranked research result from the retrieval service. */
+export interface ResearchSource {
+  url: string
+  title: string
+  passage: string
+  relevanceScore: number
+  freshnessSignal: 'recent' | 'dated' | 'unknown'
+  domain: string
+}
+
+/** F-022: per-sentence claim verdict from the heuristic referee. */
+export interface ClaimVerdict {
+  sentence: string
+  citedUrl?: string
+  verdict: 'verified' | 'unverified' | 'uncited'
+  matchedPassage?: string
+}
+
+/** F-021/F-022: research metadata attached to Research-persona messages. */
+export interface ResearchMeta {
+  confidence?: number
+  sources?: ResearchSource[]
+  refereeVerdicts?: ClaimVerdict[]
+}
+
 export interface Message {
   id: string
   convId: string
@@ -42,6 +67,8 @@ export interface Message {
   textAttachments: string[]
   toolCalls: ToolCallRecord[]
   stats: Partial<MessageStats>
+  /** F-021/F-022: research metadata (confidence, sources, referee verdicts). */
+  researchMeta?: ResearchMeta
   createdAt: string
 }
 

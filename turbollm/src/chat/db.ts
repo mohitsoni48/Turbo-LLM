@@ -47,6 +47,34 @@ export interface ToolCallRecord {
   error?: string
 }
 
+/** F-021: research metadata attached to Research-persona assistant messages. */
+export interface ResearchMeta {
+  /** Self-assessed confidence score emitted by the model (0.0–1.0). */
+  confidence?: number
+  /** Ranked source list from the retrieval service (F-021). */
+  sources?: ResearchSource[]
+  /** Per-claim referee verdicts (F-022). */
+  refereeVerdicts?: ClaimVerdict[]
+}
+
+/** A single ranked research result persisted with the message. */
+export interface ResearchSource {
+  url: string
+  title: string
+  passage: string
+  relevanceScore: number
+  freshnessSignal: 'recent' | 'dated' | 'unknown'
+  domain: string
+}
+
+/** F-022: per-sentence claim verdict from the heuristic referee. */
+export interface ClaimVerdict {
+  sentence: string
+  citedUrl?: string
+  verdict: 'verified' | 'unverified' | 'uncited'
+  matchedPassage?: string
+}
+
 export interface Message {
   id: string
   convId: string
@@ -59,11 +87,13 @@ export interface Message {
   /** Tool calls made by this assistant turn (v0.7.0). */
   toolCalls: ToolCallRecord[]
   stats: Partial<MessageStats>
+  /** F-021/F-022: research metadata (confidence, sources, referee verdicts). Absent on non-research messages. */
+  researchMeta?: ResearchMeta
   createdAt: string
 }
 
 interface ConvRow { id: string; title: string; system_prompt: string; model_key: string; sampling: string; expert_mode: number; tool_policy: string | null; created_at: string; updated_at: string }
-interface MsgRow  { id: string; conv_id: string; seq: number; role: 'user' | 'assistant'; content: string; reasoning: string; attachments: string; text_attachments: string | null; tool_calls: string | null; stats: string; model_key: string | null; created_at: string }
+interface MsgRow  { id: string; conv_id: string; seq: number; role: 'user' | 'assistant'; content: string; reasoning: string; attachments: string; text_attachments: string | null; tool_calls: string | null; stats: string; model_key: string | null; research_meta: string | null; created_at: string }
 
 // node:sqlite named-param objects need an explicit cast to Record<string, SQLInputValue>
 type P = Record<string, SQLInputValue>
@@ -75,7 +105,9 @@ function rowToConv(r: ConvRow): Conversation {
 }
 
 function rowToMsg(r: MsgRow): Message {
-  return { id: r.id, convId: r.conv_id, seq: r.seq, role: r.role, content: r.content, reasoning: r.reasoning, attachments: safeJson(r.attachments) as string[], textAttachments: r.text_attachments ? safeJson(r.text_attachments) as string[] : [], toolCalls: r.tool_calls ? safeJson(r.tool_calls) as ToolCallRecord[] : [], stats: safeJson(r.stats) as Partial<MessageStats>, createdAt: r.created_at }
+  const msg: Message = { id: r.id, convId: r.conv_id, seq: r.seq, role: r.role, content: r.content, reasoning: r.reasoning, attachments: safeJson(r.attachments) as string[], textAttachments: r.text_attachments ? safeJson(r.text_attachments) as string[] : [], toolCalls: r.tool_calls ? safeJson(r.tool_calls) as ToolCallRecord[] : [], stats: safeJson(r.stats) as Partial<MessageStats>, createdAt: r.created_at }
+  if (r.research_meta) msg.researchMeta = safeJson(r.research_meta) as ResearchMeta
+  return msg
 }
 
 interface Changes { changes: number }
@@ -152,6 +184,15 @@ export class ConversationStore {
       this.db.exec(`
         ALTER TABLE conversations ADD COLUMN tool_policy TEXT;
         PRAGMA user_version = 6;
+      `)
+    }
+    // v7 (F-021/F-022): research metadata — confidence score, ranked sources, and
+    // referee verdicts stored as JSON alongside the assistant message. Nullable —
+    // only set on Research-persona replies that use the retrieval service.
+    if (v < 7) {
+      this.db.exec(`
+        ALTER TABLE messages ADD COLUMN research_meta TEXT;
+        PRAGMA user_version = 7;
       `)
     }
   }
@@ -233,13 +274,14 @@ export class ConversationStore {
     return row ? rowToMsg(row) : null
   }
 
-  updateMessage(id: string, patch: Partial<Pick<Message, 'content' | 'reasoning' | 'toolCalls' | 'stats'>>): boolean {
+  updateMessage(id: string, patch: Partial<Pick<Message, 'content' | 'reasoning' | 'toolCalls' | 'stats' | 'researchMeta'>>): boolean {
     const sets: string[] = []
     const params: Record<string, SQLInputValue> = { $id: id }
-    if (patch.content   !== undefined) { sets.push('content = $content');     params.$content   = patch.content }
-    if (patch.reasoning !== undefined) { sets.push('reasoning = $reasoning'); params.$reasoning = patch.reasoning }
-    if (patch.toolCalls !== undefined) { sets.push('tool_calls = $tc');       params.$tc        = JSON.stringify(patch.toolCalls) }
-    if (patch.stats     !== undefined) { sets.push('stats = $stats');         params.$stats     = JSON.stringify(patch.stats) }
+    if (patch.content      !== undefined) { sets.push('content = $content');         params.$content      = patch.content }
+    if (patch.reasoning    !== undefined) { sets.push('reasoning = $reasoning');     params.$reasoning    = patch.reasoning }
+    if (patch.toolCalls    !== undefined) { sets.push('tool_calls = $tc');           params.$tc           = JSON.stringify(patch.toolCalls) }
+    if (patch.stats        !== undefined) { sets.push('stats = $stats');             params.$stats        = JSON.stringify(patch.stats) }
+    if (patch.researchMeta !== undefined) { sets.push('research_meta = $rm');        params.$rm           = JSON.stringify(patch.researchMeta) }
     if (!sets.length) return false
     return ((this.db.prepare(`UPDATE messages SET ${sets.join(', ')} WHERE id = $id`).run(params) as unknown) as Changes).changes > 0
   }

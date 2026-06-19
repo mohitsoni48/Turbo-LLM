@@ -7,7 +7,8 @@ import { engineModelAlias } from '../engines/compat'
 import { feedChunk, flushState, initParseState } from './parser'
 import { needsExtraPass } from './think-utils'
 import { getSysInfo } from '../sysinfo/sysinfo'
-import type { MessageStats, ToolCallRecord } from './db'
+import type { MessageStats, ResearchMeta, ResearchSource, ToolCallRecord } from './db'
+import type { ResearchResult } from '../tools/builtin.js'
 
 // Track in-flight abort controllers per conversation id.
 const inflight = new Map<string, AbortController>()
@@ -298,8 +299,28 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
   const iterMessages: { role: string; content: unknown; tool_calls?: unknown; tool_call_id?: string }[] =
     ctx.engineMessages.map((m) => ({ role: m.role, content: m.content }))
 
+  // F-021: inject confidence-loop instruction into Research persona system prompt.
+  // Appends to the existing system message (or inserts one if absent).
+  const CONFIDENCE_INSTRUCTION =
+    '\n\nAfter reviewing the search results, include a confidence assessment on a line by itself before your final answer: `[confidence: 0.XX]` where XX is your confidence (0.0–1.0) that your answer is accurate and current. If your confidence is below 0.8, call web_search again with a more specific query first. Maximum 3 search calls per response.'
+  if (conv.toolPolicy === 'force_web_search') {
+    const sysIdx = iterMessages.findIndex((m) => m.role === 'system')
+    if (sysIdx >= 0) {
+      const existing = typeof iterMessages[sysIdx].content === 'string' ? iterMessages[sysIdx].content : ''
+      iterMessages[sysIdx] = { ...iterMessages[sysIdx], content: existing + CONFIDENCE_INSTRUCTION }
+    } else {
+      iterMessages.unshift({ role: 'system', content: CONFIDENCE_INSTRUCTION.trim() })
+    }
+  }
+
   const MAX_TOOL_ITER = 10
   let toolIter = 0
+  /** Number of web_search tool calls made this turn (caps confidence re-loop at 3). */
+  let searchCallCount = 0
+  /** Accumulated ResearchResult[] from all web_search calls this turn (F-021). */
+  const allResearchSources: ResearchSource[] = []
+  /** Confidence score parsed from model output (F-021); undefined for non-research turns. */
+  let parsedConfidence: number | undefined
 
   // Accumulated across all tool iterations for persistence
   let fullContent = ''
@@ -529,6 +550,29 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
             result = `Error: ${callError}`
           }
 
+          // F-021: track web_search calls and accumulate research sources.
+          if (tc.name === 'web_search' && !callError) {
+            searchCallCount++
+            // The result string embeds the structured data; also ask the registry
+            // for the raw ResearchResult[] via a direct research call on the same
+            // args (zero extra network cost — the registry already called it).
+            // We parse what we can from the result string as a fallback.
+            try {
+              // Re-parse sources from result text: each [N] block has Domain/Relevance line
+              const sourceMatches = [...result.matchAll(/\[(\d+)\] (.+?)\nSource: (\S+)\nDomain: (\S+) \| Relevance: ([\d.]+) \| Freshness: (\w+)\nKey passage: ([\s\S]+?)(?=\n\[|\s*$)/g)]
+              for (const m of sourceMatches) {
+                allResearchSources.push({
+                  title: m[2].trim(),
+                  url: m[3].trim(),
+                  domain: m[4].trim(),
+                  relevanceScore: parseFloat(m[5]),
+                  freshnessSignal: (m[6].trim() as 'recent' | 'dated' | 'unknown'),
+                  passage: m[7].trim(),
+                })
+              }
+            } catch { /* parsing is best-effort */ }
+          }
+
           allToolCalls.push({ id: tc.id, name: tc.name, args: parsedArgs, result: callError ? undefined : result, error: callError })
 
           // Emit done event with result
@@ -543,6 +587,35 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
 
         // Continue to next round
         continue outerLoop
+      }
+
+      // ── F-021: Confidence loop (no tool calls — model gave final answer) ─────
+      // For Research persona: parse [confidence: 0.XX] from accumulated content,
+      // strip it from visible reply, and trigger another search pass if < 0.8
+      // and search budget allows (max 3 web_search calls per turn).
+      if (conv.toolPolicy === 'force_web_search' && fullContent && d.tools) {
+        const confMatch = fullContent.match(/\[confidence:\s*([\d.]+)\]/i)
+        if (confMatch) {
+          const conf = parseFloat(confMatch[1])
+          parsedConfidence = conf
+          // Strip confidence marker from visible content regardless
+          fullContent = fullContent.replace(/\[confidence:\s*[\d.]+\]\s*/gi, '').trim()
+
+          if (conf < 0.8 && searchCallCount < 3) {
+            console.log(`[chat] F-021: confidence ${conf} < 0.8 (searches: ${searchCallCount}/3) — re-entering search loop`)
+            const toolDefs2 = await d.tools.buildToolDefinitions()
+            if (toolDefs2.some((t) => t.function.name === 'web_search')) {
+              // Fold the low-confidence answer back and ask the model to refine
+              iterMessages.push({ role: 'assistant', content: fullContent })
+              iterMessages.push({
+                role: 'user',
+                content: `Your confidence is ${conf}. Please search again with a more specific query to improve accuracy, then provide a revised answer with an updated [confidence: X.XX] line.`,
+              })
+              fullContent = ''
+              continue outerLoop
+            }
+          }
+        }
       }
 
       // No tool calls (or tools not available) — done
@@ -691,7 +764,13 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
     stats.cachedTokens = cachedExplicit ?? 0
   }
 
-  db.updateMessage(assistantMsg.id, { content: fullContent, reasoning: fullReasoning, toolCalls: allToolCalls, stats })
+  // F-021: persist research metadata alongside the message.
+  const researchMeta: ResearchMeta | undefined =
+    conv.toolPolicy === 'force_web_search' && (parsedConfidence !== undefined || allResearchSources.length > 0)
+      ? { confidence: parsedConfidence, sources: allResearchSources.length > 0 ? allResearchSources : undefined }
+      : undefined
+
+  db.updateMessage(assistantMsg.id, { content: fullContent, reasoning: fullReasoning, toolCalls: allToolCalls, stats, researchMeta })
   db.touchConversation(convId)
 
   try {
