@@ -126,7 +126,7 @@ export function ModelDetailDialog({
 
   return (
     <Dialog open={!!modelKey} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-[560px]">
+      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-[560px] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border hover:[&::-webkit-scrollbar-thumb]:bg-muted-foreground/40">
         <DialogHeader>
           <DialogTitle className="truncate">{detail?.name ?? 'Model'}</DialogTitle>
           <DialogDescription>
