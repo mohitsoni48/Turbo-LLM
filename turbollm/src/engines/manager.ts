@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path'
 import type { ConfigStore, Engine } from '../config/config'
 import { mlxServerCommand } from './mlx'
 import { slotCacheDir } from './slot-cache'
-import { vllmServerCommand } from './vllm'
+import { vllmServerCommand, vllmServeBlocker } from './vllm'
 
 export type State = 'stopped' | 'starting' | 'running' | 'stopping' | 'error'
 
@@ -197,6 +197,19 @@ export class Manager {
     }
     if (!opts.engine.binPath) throw new Error('no_active_engine')
     if (!opts.modelPath) throw new Error('no_such_model')
+
+    // Engine preflight (ADR-080): refuse to spawn vLLM where it can't actually serve (e.g.
+    // Windows, where its uvloop/NCCL deps don't exist) and surface a clear, actionable error
+    // instead of letting the process crash on import with a raw Python traceback. Mirrors the
+    // engine-capability concept: know what the engine can do on this machine before launching it.
+    if (opts.engine.kind === 'vllm') {
+      const blocker = await vllmServeBlocker(opts.engine.binPath)
+      if (blocker) {
+        this.state = 'error'
+        this.errInfo = { code: 'engine_unsupported', message: blocker, exitCode: -1, logTail: [] }
+        return
+      }
+    }
 
     const port = await allocPort()
     const logPath = join(this.store.dir(), 'logs', `engine-${opts.engine.id}.log`)

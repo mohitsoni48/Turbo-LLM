@@ -62,6 +62,29 @@ export async function ensureVllmEnv(root: string, onProgress?: (p: ProvisionProg
   return { python: py, version }
 }
 
+/**
+ * Preflight (ADR-080): can vLLM's OpenAI server actually run on this machine? Its entrypoint
+ * hard-imports `uvloop` (POSIX-only) plus other Linux-only deps (NCCL, Triton, CUDA-graph capture),
+ * so on Windows it crashes on import before loading anything. We probe the *concrete* blocker — can
+ * the venv import uvloop — rather than guessing from `process.platform`, so this stays correct if a
+ * future vLLM/uvloop ever gains Windows support. Returns a clear, actionable message when vLLM can't
+ * serve here, or null when it can. Fast (~1s) and run once per load, before spawn.
+ */
+export async function vllmServeBlocker(python: string): Promise<string | null> {
+  try {
+    await execFileP(python, ['-c', 'import uvloop'], { timeout: 20_000 })
+    return null
+  } catch {
+    const plat =
+      process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : process.platform
+    return (
+      `vLLM cannot run on ${plat}: its OpenAI server requires uvloop (and other Linux-only ` +
+      `components such as NCCL/Triton), which have no ${plat} build. Use the llama.cpp / TurboQuant ` +
+      `engine for GGUF models here, or run vLLM under WSL2 / Linux.`
+    )
+  }
+}
+
 /** Read the installed vllm version (also a smoke test that it imports). */
 export async function probeVllm(python: string): Promise<string> {
   const { stdout } = await execFileP(
