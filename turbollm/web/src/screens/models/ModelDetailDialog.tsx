@@ -101,15 +101,25 @@ export function ModelDetailDialog({
   const benchRunning = !!benchState?.running && benchHere
   const benchDone = !!benchState?.done && benchHere && !benchState.running
   const benchErr = bench.start.error instanceof ApiError ? bench.start.error.message : null
-  // Which engine will load this model decides which knobs apply (BUG-004). GGUF is always
-  // loaded by a llama.cpp-family engine → full knobs + auto-tune. Safetensors models report
-  // format 'mlx', but they load on whichever safetensors engine is active: vLLM (tensor-parallel
-  // + sampling) or MLX (sampling only). vLLM must be told apart by the active engine kind, not
-  // the model format — otherwise a vLLM load shows MLX (Apple Silicon) copy.
-  const isGguf = detail?.format === 'gguf'
-  const isLlamaCpp = isGguf
-  const isVllm = !isGguf && activeEngine?.kind === 'vllm'
-  const isMlx = !isGguf && !isVllm
+  // Which engine will load this model decides which knobs apply (BUG-004). Switch on the active
+  // engine kind rather than inferring from the model format: safetensors dirs report format 'mlx'
+  // under any engine, so a vLLM load would otherwise show MLX (Apple Silicon) copy. Each kind is
+  // handled explicitly; an unrecognised/absent engine shows neither note and no engine-specific
+  // knobs (sampling still applies) rather than assuming a default.
+  let isLlamaCpp = false
+  let isMlx = false
+  let isVllm = false
+  switch (activeEngine?.kind) {
+    case 'llama-server':
+      isLlamaCpp = true
+      break
+    case 'mlx':
+      isMlx = true
+      break
+    case 'vllm':
+      isVllm = true
+      break
+  }
   // The runner requires a free engine (409 otherwise). When this model is loaded,
   // stop it first, then start the sweep once the engine has settled.
   const startBenchRun = () => {
