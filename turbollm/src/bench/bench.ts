@@ -480,12 +480,13 @@ function makeBenchContent(targetTokens: number): string {
   return BENCH_BASE.repeat(reps).slice(0, targetChars) + '\n\nSummarize the passage above in one sentence.'
 }
 
-/** How many prompt tokens to use for a bench trial at a given ctx size: 75% of the configured
- *  context. A realistic fraction of the window the user will actually use, leaving the remaining
- *  25% for generation. (KV/VRAM is allocated for the full ctx at load regardless of prompt size,
- *  so this only sizes the prefill-speed measurement — not the VRAM-fit decision.) */
+/** How many prompt tokens to use for a bench trial: 75% of the configured context, capped at
+ *  50k tokens. The 0.75 factor keeps the prompt a realistic fraction of the window (leaving room
+ *  for generation); the 50k cap stops very large-ctx models from spending the whole trial
+ *  prefilling a huge prompt (which would risk the per-test timeout). KV/VRAM is allocated for the
+ *  full ctx at load regardless, so this only sizes the prefill-speed measurement, not VRAM fit. */
 function benchPromptTokens(ctx: number): number {
-  return Math.max(256, Math.floor(ctx * 0.75))
+  return Math.max(256, Math.min(50_000, Math.floor(ctx * 0.75)))
 }
 
 /** True when a measured VRAM figure exceeds 95% of the primary GPU's VRAM. */
