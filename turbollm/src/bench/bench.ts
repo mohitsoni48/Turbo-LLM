@@ -1,5 +1,5 @@
 // Auto-benchmark + auto-tune runner (Differentiator #2, spec 09 §1). Owns the
-// engine exclusively for the duration of a run: sweeps candidate LoadProfiles,
+// engine exclusively for the duration of a run: binary-searches candidate LoadProfiles,
 // measures real tok/s on the user's hardware, saves the best as the model's
 // profile (tunedBy:'bench'), persists a benchResults row, and — when telemetry is
 // on — queues an anonymized bench_result event. Single active run; additive;
@@ -13,7 +13,7 @@ import type { Manager, StartOpts } from '../engines/manager'
 import type { Registry } from '../engines/registry'
 import type { Engine } from '../config/config'
 import type { Scanner, ModelEntry } from '../models/scanner'
-import { deriveDefault, estimateVram, profileToArgs, resolveProfile, type LoadProfile } from '../models/profile'
+import { deriveDefault, profileToArgs, resolveProfile, type LoadProfile } from '../models/profile'
 import { getSysInfo, type SysInfo } from '../sysinfo/sysinfo'
 
 /** A single candidate the sweep evaluated. `outcome` is 'ok' on a measured run, or
@@ -43,8 +43,9 @@ export interface BenchState {
 const READY_TIMEOUT_MS = 120_000
 const TOTAL_BUDGET_MS = 10 * 60_000
 const OOM_RE = /out of memory|cudaMalloc/i
-const MAX_DENSE = 3
-const MAX_MOE = 8
+
+// English text is roughly 4 characters per token — used to size the bench prompt.
+const CHARS_PER_TOKEN = 4
 
 export class BenchError extends Error {
   constructor(
@@ -127,29 +128,14 @@ export class BenchRunner {
     // with. `base` overrides the saved profile + global defaults.
     const baseProfile = resolveProfile(entry, sys, saved, base, defaults)
 
-    const candidates = this.buildCandidates(entry, sys, baseProfile)
     const results: BenchCandidate[] = []
     let best: { cand: BenchCandidate; profile: LoadProfile } | null = null
 
-    for (const { profile, label } of candidates) {
-      if (this.cancelled || Date.now() > this.deadline) break
-      this.state = { ...this.state, step: `${label}…`, candidates: results }
-      const cand = await this.measure(entry, sys, profile, caps, label)
-      results.push(cand)
-      this.state = { ...this.state, candidates: results }
-      if (cand.outcome === 'ok' && cand.tps !== null) {
-        if (!best || cand.tps > (best.cand.tps ?? 0)) {
-          best = { cand, profile }
-          this.state = { ...this.state, bestTps: cand.tps, step: `${label} → ${cand.tps.toFixed(1)} tok/s` }
-        }
-      }
-      // MoE sweep early-stop: first OOM (or VRAM>95%) means deeper offload is needed —
-      // descending further (less CPU offload) only gets worse. Stop sweeping down.
-      if (entry.moe && (cand.outcome === 'oom' || overVram(cand.vramMb, sys))) break
+    if (!entry.moe) {
+      best = await this.denseSearch(entry, sys, baseProfile, caps, results)
+    } else {
+      best = await this.moeSearch(entry, sys, baseProfile, caps, results)
     }
-
-    // (KV cache type is NOT swept — auto-tune respects the user's chosen KV quant
-    // from their config, same as ctx. It tunes offload only.)
 
     // Engine is always left stopped at the end of a run (AC#3 for cancel; also tidy
     // for a normal finish — the user explicitly loads afterward).
@@ -167,37 +153,95 @@ export class BenchRunner {
     }
   }
 
-  /** Build the candidate sweep (spec 09 §1). Dense ≤3, MoE ≤8. Each carries the
-   *  REAL-ctx profile; the measurement clamps ctx itself. */
-  private buildCandidates(
+  /** Binary search over ngl to find the highest number of GPU layers that does not OOM.
+   *  For dense models, more GPU layers = faster (monotonically), so the optimal is simply
+   *  the maximum ngl that fits in VRAM. O(log blockCount) trials — far more precise than
+   *  the old fixed-set sweep. CPU-only machines skip straight to ngl=0. */
+  private async denseSearch(
     entry: ModelEntry,
     sys: SysInfo,
     base: LoadProfile,
-  ): Array<{ profile: LoadProfile; label: string }> {
-    const out: Array<{ profile: LoadProfile; label: string }> = []
+    caps: Engine['capabilities'],
+    results: BenchCandidate[],
+  ): Promise<{ cand: BenchCandidate; profile: LoadProfile } | null> {
     const hasGpu = sys.gpus.length > 0
 
-    if (!entry.moe) {
-      // Dense: all-on-GPU first; if that overflows VRAM, add a best-fit ngl.
-      const all: LoadProfile = { ...base, ngl: hasGpu ? 99 : 0 }
-      out.push({ profile: all, label: `ngl=${all.ngl}` })
-      if (hasGpu && entry.blockCount > 0) {
-        const fit = bestFitNgl(all, entry, sys)
-        if (fit < 99 && fit > 0) out.push({ profile: { ...base, ngl: fit }, label: `ngl=${fit}` })
-      }
-      return out.slice(0, MAX_DENSE)
+    if (!hasGpu) {
+      const label = 'ngl=0 (CPU-only)'
+      this.state = { ...this.state, step: `${label}…`, candidates: results }
+      const cand = await this.measure(entry, sys, { ...base, ngl: 0 }, caps, label)
+      results.push(cand)
+      this.state = { ...this.state, candidates: results }
+      if (cand.outcome === 'ok') return { cand, profile: { ...base, ngl: 0 } }
+      return null
     }
 
-    // MoE: nCpuMoe descending from the derived default in steps of 2 toward 0.
-    const derived = deriveDefault(entry, sys)
-    const startN = Math.max(0, Math.min(entry.blockCount || derived.nCpuMoe, derived.nCpuMoe))
-    const seen = new Set<number>()
-    for (let n = startN; n >= 0 && out.length < MAX_MOE - 1; n -= 2) {
-      if (seen.has(n)) continue
-      seen.add(n)
-      out.push({ profile: { ...base, nCpuMoe: n }, label: `nCpuMoe=${n}` })
+    // Binary search: find highest ngl ∈ [0, blockCount] with outcome 'ok'.
+    // OOM or crash → search lower; ok → record and search higher.
+    const hi0 = entry.blockCount > 0 ? entry.blockCount : 99
+    let lo = 0, hi = hi0
+    let best: { cand: BenchCandidate; profile: LoadProfile } | null = null
+
+    while (lo <= hi && !this.cancelled && Date.now() <= this.deadline) {
+      const mid = Math.floor((lo + hi) / 2)
+      const label = `ngl=${mid}`
+      this.state = { ...this.state, step: `Trying ${label} (range ${lo}–${hi})…`, candidates: results }
+      const profile: LoadProfile = { ...base, ngl: mid }
+      const cand = await this.measure(entry, sys, profile, caps, label)
+      results.push(cand)
+      this.state = { ...this.state, candidates: results }
+
+      if (cand.outcome === 'ok' && cand.tps !== null) {
+        // More GPU layers is always faster; the last ok in the search has the highest ngl.
+        if (!best || cand.tps > (best.cand.tps ?? 0)) best = { cand, profile }
+        this.state = { ...this.state, bestTps: best.cand.tps ?? undefined }
+        lo = mid + 1  // try higher
+      } else if (cand.outcome === 'oom') {
+        hi = mid - 1  // too many layers, try fewer
+      } else {
+        // crash / timeout — treat conservatively
+        hi = mid - 1
+      }
     }
-    return out.slice(0, MAX_MOE)
+    return best
+  }
+
+  /** Binary search over nCpuMoe to find the minimum number of MoE experts kept on CPU
+   *  that still fits in VRAM. Fewer CPU experts = more on GPU = faster; we want the
+   *  minimum that doesn't OOM. O(log blockCount) trials. */
+  private async moeSearch(
+    entry: ModelEntry,
+    sys: SysInfo,
+    base: LoadProfile,
+    caps: Engine['capabilities'],
+    results: BenchCandidate[],
+  ): Promise<{ cand: BenchCandidate; profile: LoadProfile } | null> {
+    const derived = deriveDefault(entry, sys)
+    const maxN = entry.blockCount > 0 ? entry.blockCount : (derived.nCpuMoe || 0)
+    let lo = 0, hi = maxN
+    let best: { cand: BenchCandidate; profile: LoadProfile } | null = null
+
+    while (lo <= hi && !this.cancelled && Date.now() <= this.deadline) {
+      const mid = Math.floor((lo + hi) / 2)
+      const label = `nCpuMoe=${mid}`
+      this.state = { ...this.state, step: `Trying ${label} (range ${lo}–${hi})…`, candidates: results }
+      const profile: LoadProfile = { ...base, nCpuMoe: mid }
+      const cand = await this.measure(entry, sys, profile, caps, label)
+      results.push(cand)
+      this.state = { ...this.state, candidates: results }
+
+      if (cand.outcome === 'oom' || overVram(cand.vramMb, sys)) {
+        lo = mid + 1  // need more CPU experts to free VRAM
+      } else if (cand.outcome === 'ok' && cand.tps !== null) {
+        // Fewer CPU experts = more GPU = faster; record and try even fewer.
+        if (!best || cand.tps > (best.cand.tps ?? 0)) best = { cand, profile }
+        this.state = { ...this.state, bestTps: best.cand.tps ?? undefined }
+        hi = mid - 1
+      } else {
+        lo = mid + 1  // crash / timeout → treat as memory pressure
+      }
+    }
+    return best
   }
 
   /** The measurement primitive (spec 09 §1): launch the candidate, detect
@@ -253,9 +297,15 @@ export class BenchRunner {
       return fail('crash')
     }
 
+    // Use a large bench prompt so the measurement reflects realistic context usage:
+    // at least 50k tokens, or half the configured ctx — whichever is smaller after
+    // clamping to fit within ctx. For small-ctx models this fills nearly the whole
+    // context window; for large-ctx models it uses ≥50k tokens.
+    const promptContent = makeBenchContent(benchPromptTokens(profile.ctx))
+
     // Warmup (discarded) then the measured request.
-    await this.chat(target, 16).catch(() => null)
-    const timed = await this.chat(target, 128).catch(() => null)
+    await this.chat(target, promptContent, 16).catch(() => null)
+    const timed = await this.chat(target, promptContent, 128).catch(() => null)
     const vramAfter = await readNvidiaVramMb()
     await this.manager.stopAndWait().catch(() => {})
 
@@ -284,21 +334,22 @@ export class BenchRunner {
     }
   }
 
-  /** One non-streaming /v1/chat/completions request with the fixed deterministic
-   *  prompt. Returns engine-reported tps (predicted_per_second) + ttftMs (prompt_ms). */
-  private async chat(target: string, maxTokens: number): Promise<{ tps: number; ttftMs: number } | null> {
+  /** One non-streaming /v1/chat/completions request with the given content string.
+   *  Returns engine-reported tps (predicted_per_second) + ttftMs (prompt_ms).
+   *  Timeout is 5 minutes to accommodate large prompt prefill on slower configs. */
+  private async chat(target: string, content: string, maxTokens: number): Promise<{ tps: number; ttftMs: number } | null> {
     const res = await fetch(`${target}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: 'bench',
-        messages: [{ role: 'user', content: BENCH_PROMPT }],
+        messages: [{ role: 'user', content }],
         max_tokens: maxTokens,
         temperature: 0,
         seed: 42,
         stream: false,
       }),
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.timeout(300_000),
     })
     if (!res.ok) return null
     const data = (await res.json()) as { timings?: { predicted_per_second?: number; prompt_ms?: number } }
@@ -375,34 +426,36 @@ export class BenchRunner {
 
 // ---- helpers ----------------------------------------------------------------
 
-/** ~512 tokens of deterministic lorem-style text for the measured request. */
-const BENCH_PROMPT = ('Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor ' +
+/** Filler text for the bench prompt — varied enough to avoid tokenizer-dedup tricks. */
+const BENCH_BASE =
+  'Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor ' +
   'incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud ' +
   'exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure ' +
   'dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. ' +
   'Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt ' +
-  'mollit anim id est laborum. ').repeat(6) + 'Summarize the passage above in one sentence.'
+  'mollit anim id est laborum. '
+
+/** Build a bench prompt of approximately `targetTokens` tokens by repeating BENCH_BASE.
+ *  Uses a 4-chars-per-token estimate — close enough for English lorem text. */
+function makeBenchContent(targetTokens: number): string {
+  const targetChars = Math.max(BENCH_BASE.length, targetTokens * CHARS_PER_TOKEN)
+  const reps = Math.ceil(targetChars / BENCH_BASE.length)
+  return BENCH_BASE.repeat(reps).slice(0, targetChars) + '\n\nSummarize the passage above in one sentence.'
+}
+
+/** How many prompt tokens to use for a bench trial at a given ctx size.
+ *  Target: max(ctx/2, 50_000) — fills nearly the full window for small-ctx models,
+ *  uses at least 50k tokens for large-ctx models. Always leaves room for generation. */
+function benchPromptTokens(ctx: number): number {
+  const target = Math.max(Math.floor(ctx / 2), 50_000)
+  return Math.min(target, Math.max(1, ctx - 128))
+}
 
 /** True when a measured VRAM figure exceeds 95% of the primary GPU's VRAM. */
 function overVram(vramMb: number | null, sys: SysInfo): boolean {
   const total = sys.gpus[0]?.vramMb ?? 0
   if (!vramMb || total <= 0) return false
   return vramMb > total * 0.95
-}
-
-/** The smallest ngl whose estimate fits ~85% of VRAM, for the dense overflow case.
- *  Returns 99 when even full offload fits (no second candidate needed). Local copy
- *  of the fit search so bench doesn't depend on profile internals beyond the public
- *  estimateVram. */
-function bestFitNgl(p: LoadProfile, entry: ModelEntry, sys: SysInfo): number {
-  const total = sys.gpus[0]?.vramMb ?? 0
-  if (total <= 0 || entry.blockCount <= 0) return 99
-  const budget = total * 0.85
-  // Walk down from full offload to find the largest ngl whose estimate fits.
-  for (let n = Math.min(99, entry.blockCount); n >= 0; n--) {
-    if (estimateVram({ ...p, ngl: n }, entry, sys).estMb <= budget) return n
-  }
-  return 0
 }
 
 /** Best-effort current NVIDIA VRAM use in MB (sum across GPUs). Null on non-NVIDIA

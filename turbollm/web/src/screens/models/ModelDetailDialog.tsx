@@ -179,7 +179,7 @@ export function ModelDetailDialog({
             <Section>
               <Slider label="Context length" hint="Tokens of history the model can use." value={draft.ctx} min={512} max={Math.max(512, detail.nativeCtx || 8192)} step={512} onChange={(v) => set('ctx', v)} fmt={(v) => v.toLocaleString()} />
               {detail.gpu && (
-                <Slider label="GPU layers" hint="99 = all on GPU." value={draft.ngl} min={0} max={99} step={1} onChange={(v) => set('ngl', v)} fmt={(v) => (v >= 99 ? 'All' : String(v))} />
+                <Slider label="GPU layers" hint={detail.blockCount > 0 ? `${detail.blockCount} total layers.` : 'All layers on GPU = max performance.'} value={draft.ngl} min={0} max={detail.blockCount > 0 ? detail.blockCount : 99} step={1} onChange={(v) => set('ngl', v)} fmt={(v) => (v >= (detail.blockCount > 0 ? detail.blockCount : 99) ? 'All' : String(v))} />
               )}
               {detail.moe && detail.blockCount > 0 && (
                 <Slider label="MoE experts on CPU" hint="Higher = less VRAM, slower. Lower = faster if it fits." value={draft.nCpuMoe} min={0} max={detail.blockCount} step={1} onChange={(v) => set('nCpuMoe', v)} />
