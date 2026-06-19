@@ -41,7 +41,12 @@ export interface BenchState {
 
 // Hard limits (spec 09 §1).
 const READY_TIMEOUT_MS = 120_000
-const TOTAL_BUDGET_MS = 10 * 60_000
+// Per-candidate cap: model load + warmup + the measured request must all finish within this
+// window, otherwise the candidate is recorded as 'timeout' and the sweep moves on — a single
+// hung/too-slow config can never stall the whole run.
+const PER_TEST_TIMEOUT_MS = 3 * 60_000
+// Overall budget — sized to fit a full binary search of per-test-capped trials (~log2(layers)).
+const TOTAL_BUDGET_MS = 20 * 60_000
 const OOM_RE = /out of memory|cudaMalloc/i
 
 // English text is roughly 4 characters per token — used to size the bench prompt.
@@ -168,8 +173,7 @@ export class BenchRunner {
 
     if (!hasGpu) {
       const label = 'ngl=0 (CPU-only)'
-      this.state = { ...this.state, step: `${label}…`, candidates: results }
-      const cand = await this.measure(entry, sys, { ...base, ngl: 0 }, caps, label)
+      const cand = await this.measure(entry, sys, { ...base, ngl: 0 }, caps, label, label)
       results.push(cand)
       this.state = { ...this.state, candidates: results }
       if (cand.outcome === 'ok') return { cand, profile: { ...base, ngl: 0 } }
@@ -185,9 +189,10 @@ export class BenchRunner {
     while (lo <= hi && !this.cancelled && Date.now() <= this.deadline) {
       const mid = Math.floor((lo + hi) / 2)
       const label = `ngl=${mid}`
-      this.state = { ...this.state, step: `Trying ${label} (range ${lo}–${hi})…`, candidates: results }
+      const stepPrefix = `Trial ${results.length + 1}: ${label} (range ${lo}–${hi})`
+      this.state = { ...this.state, step: `${stepPrefix}…`, candidates: results }
       const profile: LoadProfile = { ...base, ngl: mid }
-      const cand = await this.measure(entry, sys, profile, caps, label)
+      const cand = await this.measure(entry, sys, profile, caps, label, stepPrefix)
       results.push(cand)
       this.state = { ...this.state, candidates: results }
 
@@ -224,9 +229,10 @@ export class BenchRunner {
     while (lo <= hi && !this.cancelled && Date.now() <= this.deadline) {
       const mid = Math.floor((lo + hi) / 2)
       const label = `nCpuMoe=${mid}`
-      this.state = { ...this.state, step: `Trying ${label} (range ${lo}–${hi})…`, candidates: results }
+      const stepPrefix = `Trial ${results.length + 1}: ${label} (range ${lo}–${hi})`
+      this.state = { ...this.state, step: `${stepPrefix}…`, candidates: results }
       const profile: LoadProfile = { ...base, nCpuMoe: mid }
-      const cand = await this.measure(entry, sys, profile, caps, label)
+      const cand = await this.measure(entry, sys, profile, caps, label, stepPrefix)
       results.push(cand)
       this.state = { ...this.state, candidates: results }
 
@@ -253,6 +259,7 @@ export class BenchRunner {
     profile: LoadProfile,
     caps: Engine['capabilities'],
     label: string,
+    stepPrefix: string,
   ): Promise<BenchCandidate> {
     const params = {
       ctx: profile.ctx,
@@ -263,9 +270,17 @@ export class BenchRunner {
       flashAttn: profile.flashAttn,
     }
     const fail = (outcome: BenchCandidate['outcome']): BenchCandidate => ({ label, params, outcome, tps: null, ttftMs: null, vramMb: null })
+    // Live sub-phase progress so each (possibly multi-minute) trial isn't a silent wait.
+    const phase = (p: string) => { this.state = { ...this.state, step: `${stepPrefix} — ${p}` } }
 
     const active = this.registry.active()
     if (!active) return fail('crash')
+
+    // Per-test cap (3 min): the whole trial — load + warmup + measured request — must finish
+    // within this, else it's recorded 'timeout' and the sweep continues. Also bounded by the
+    // global deadline so a near-budget start can't overrun.
+    const testDeadline = Math.min(Date.now() + PER_TEST_TIMEOUT_MS, this.deadline)
+    const remaining = () => Math.max(1_000, testDeadline - Date.now())
 
     // Run at the user's REAL ctx (no clamp): VRAM use + OOM behavior then reflect the
     // actual config they'll load with, so the winning offload is one that genuinely
@@ -278,14 +293,15 @@ export class BenchRunner {
     }
 
     const vramBefore = await readNvidiaVramMb()
+    phase('loading model…')
     try {
       await this.manager.start(opts)
     } catch {
       return fail('crash')
     }
 
-    // Wait for ready / detect crash / OOM within the readiness window.
-    const outcome = await this.awaitReady()
+    // Wait for ready / detect crash / OOM within the readiness window (and per-test cap).
+    const outcome = await this.awaitReady(testDeadline)
     if (outcome !== 'ok') {
       await this.manager.stopAndWait().catch(() => {})
       return fail(outcome)
@@ -303,13 +319,16 @@ export class BenchRunner {
     // context window; for large-ctx models it uses ≥50k tokens.
     const promptContent = makeBenchContent(benchPromptTokens(profile.ctx))
 
-    // Warmup (discarded) then the measured request.
-    await this.chat(target, promptContent, 16).catch(() => null)
-    const timed = await this.chat(target, promptContent, 128).catch(() => null)
+    // Warmup (discarded) then the measured request — both bounded by the remaining per-test time.
+    phase('warming up…')
+    await this.chat(target, promptContent, 16, remaining()).catch(() => null)
+    phase('measuring t/s…')
+    const timed = await this.chat(target, promptContent, 128, remaining()).catch(() => null)
     const vramAfter = await readNvidiaVramMb()
     await this.manager.stopAndWait().catch(() => {})
 
-    if (!timed) return fail('crash')
+    // A null result past the per-test deadline is a timeout (too slow), not a crash.
+    if (!timed) return fail(Date.now() >= testDeadline ? 'timeout' : 'crash')
     const vramMb = vramBefore !== null && vramAfter !== null ? Math.max(0, vramAfter - vramBefore) : vramAfter
     return { label, params, outcome: 'ok', tps: timed.tps, ttftMs: timed.ttftMs, vramMb }
   }
@@ -317,8 +336,9 @@ export class BenchRunner {
   /** Poll the manager state until the engine is running, the readiness window
    *  elapses (timeout), the process exits (crash), or an OOM line appears in the
    *  log (oom). Honors cancel + the global deadline. */
-  private async awaitReady(): Promise<'ok' | 'timeout' | 'crash' | 'oom'> {
-    const deadline = Date.now() + READY_TIMEOUT_MS
+  private async awaitReady(testDeadline: number): Promise<'ok' | 'timeout' | 'crash' | 'oom'> {
+    // Bounded by both the readiness window and the per-test cap (whichever is sooner).
+    const deadline = Math.min(Date.now() + READY_TIMEOUT_MS, testDeadline)
     for (;;) {
       await sleep(400)
       if (this.cancelled) return 'crash' // treated as a non-ok outcome; engine stopped by caller
@@ -336,8 +356,8 @@ export class BenchRunner {
 
   /** One non-streaming /v1/chat/completions request with the given content string.
    *  Returns engine-reported tps (predicted_per_second) + ttftMs (prompt_ms).
-   *  Timeout is 5 minutes to accommodate large prompt prefill on slower configs. */
-  private async chat(target: string, content: string, maxTokens: number): Promise<{ tps: number; ttftMs: number } | null> {
+   *  `timeoutMs` is the remaining per-test budget — the request aborts when it elapses. */
+  private async chat(target: string, content: string, maxTokens: number, timeoutMs: number): Promise<{ tps: number; ttftMs: number } | null> {
     const res = await fetch(`${target}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -349,7 +369,7 @@ export class BenchRunner {
         seed: 42,
         stream: false,
       }),
-      signal: AbortSignal.timeout(300_000),
+      signal: AbortSignal.timeout(timeoutMs),
     })
     if (!res.ok) return null
     const data = (await res.json()) as { timings?: { predicted_per_second?: number; prompt_ms?: number } }
