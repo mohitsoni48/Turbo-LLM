@@ -1,5 +1,5 @@
 import { Check, Download, ExternalLink, Loader2, Sparkles, Trash2 } from 'lucide-react'
-import { useBackendInstall, useEngineBackends, useEngineCatalog, useStatus } from '../../lib/queries'
+import { useBackendInstall, useEngineBackends, useEngineCatalog, useEngines, useEngineMutations, useStatus } from '../../lib/queries'
 import { ApiError } from '../../lib/api'
 import type { CatalogEngine } from '../../lib/types'
 import { Badge } from '../../components/ui/badge'
@@ -101,7 +101,9 @@ export function DiscoverEngines() {
   const { data: status } = useStatus()
   const provisioning = !!status?.engineProvision?.active
   const { data, isLoading } = useEngineCatalog(provisioning)
+  const { data: registry } = useEngines()
   const install = useBackendInstall()
+  const engineMut = useEngineMutations()
 
   if (isLoading || !data) return null
 
@@ -112,7 +114,11 @@ export function DiscoverEngines() {
   if (engines.length === 0) return null
 
   const busy =
-    provisioning || install.vllm.isPending || install.mlx.isPending || install.turboquant.isPending
+    provisioning ||
+    install.vllm.isPending ||
+    install.mlx.isPending ||
+    install.turboquant.isPending ||
+    engineMut.remove.isPending
 
   // Map a catalog entry to its install mutation by install endpoint.
   const installFor = (e: CatalogEngine) => {
@@ -122,12 +128,34 @@ export function DiscoverEngines() {
     return null
   }
 
+  // Find the registered engine this catalog entry installed, so it can be removed.
+  // Mirrors the daemon's catalog `installed` detection: pip engines register under
+  // their own kind; TurboQuant is a llama-server fork detected by its install dir.
+  const registryEngineId = (e: CatalogEngine): string | undefined => {
+    const list = registry?.engines ?? []
+    if (e.provision === 'pip') return list.find((x) => x.kind === e.kind)?.id
+    if (e.id === 'turboquant') return list.find((x) => /[\\/]engines[\\/]turboquant[\\/]/.test(x.binPath))?.id
+    return undefined
+  }
+
   const doInstall = (e: CatalogEngine) => {
     const m = installFor(e)
     if (!m) return
     m.mutate(undefined, {
       onError: (err) =>
         toast.error(err instanceof ApiError ? err.message : `Could not install ${e.name}.`),
+    })
+  }
+
+  const doRemove = (e: CatalogEngine) => {
+    const id = registryEngineId(e)
+    if (!id) {
+      toast.error(`Could not find the installed ${e.name} engine to remove.`)
+      return
+    }
+    engineMut.remove.mutate(id, {
+      onSuccess: () => toast.success(`${e.name} removed`),
+      onError: (err) => toast.error(err instanceof ApiError ? err.message : `Could not remove ${e.name}.`),
     })
   }
 
@@ -168,9 +196,20 @@ export function DiscoverEngines() {
             </div>
             <div className="flex shrink-0 items-center gap-2 pt-0.5">
               {e.installed ? (
-                <span className="flex items-center gap-1 text-[12px] font-medium text-accent">
-                  <Check size={13} /> Installed
-                </span>
+                <>
+                  <span className="flex items-center gap-1 text-[12px] font-medium text-accent">
+                    <Check size={13} /> Installed
+                  </span>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => doRemove(e)}
+                    title={`Remove ${e.name}`}
+                    className="grid h-8 w-8 place-items-center rounded border border-border text-faint transition-colors hover:border-[color:var(--err)] hover:text-[color:var(--err)] disabled:opacity-50"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </>
               ) : (
                 <Button
                   size="sm"
