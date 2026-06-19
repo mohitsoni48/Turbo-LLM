@@ -220,19 +220,22 @@ export class ComfyGuard {
     this.freeing = (async () => {
       const url = `${cfg.url.replace(/\/+$/, '')}/free`
       try {
-        console.log('[comfy-guard] TurboLLM is loading a model — asking ComfyUI to free its VRAM first.')
         const res = await this.fetchImpl(url, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ unload_models: true, free_memory: true }),
           signal: AbortSignal.timeout(FREE_TIMEOUT_MS),
         })
-        if (!res.ok) {
+        if (res.ok) {
+          console.log('[comfy-guard] freed ComfyUI VRAM before model load.')
+        } else {
           console.warn(`[comfy-guard] ComfyUI /free returned ${res.status} — loading anyway.`)
         }
       } catch (e) {
-        // Non-fatal: ComfyUI may be down or unreachable. Don't block the load.
-        console.warn(`[comfy-guard] could not reach ComfyUI /free (${e instanceof Error ? e.message : e}) — loading anyway.`)
+        // TypeError (fetch failed / ECONNREFUSED) = ComfyUI simply not running — silent.
+        if (!(e instanceof TypeError)) {
+          console.warn(`[comfy-guard] unexpected error calling ComfyUI /free (${e instanceof Error ? e.message : e}) — loading anyway.`)
+        }
       }
     })()
     try {
