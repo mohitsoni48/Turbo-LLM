@@ -5,7 +5,7 @@
 // on — queues an anonymized bench_result event. Single active run; additive;
 // fail-safe (a bad candidate is recorded and the sweep continues).
 import { execFile } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { BenchResult, ConfigStore } from '../config/config'
@@ -40,14 +40,23 @@ export interface BenchState {
 }
 
 // Hard limits (spec 09 §1).
-const READY_TIMEOUT_MS = 120_000
-// Per-candidate cap: model load + warmup + the measured request must all finish within this
-// window, otherwise the candidate is recorded as 'timeout' and the sweep moves on — a single
-// hung/too-slow config can never stall the whole run.
+// Readiness window: how long to wait for a candidate to come up before calling it a timeout.
+// Generous enough for a large model (e.g. a 35B) to load; a candidate that over-allocates VRAM
+// is caught faster than this by scanning the live log for an OOM signature (see awaitReady).
+const READY_TIMEOUT_MS = 150_000
+// Per-candidate cap: load + warmup + the measured request must all finish within this window,
+// else the candidate is recorded 'timeout' and the sweep moves on — one hung config can't stall
+// the run.
 const PER_TEST_TIMEOUT_MS = 3 * 60_000
+// Grace before judging prefill speed — give the first tokens time to flow before projecting.
+const PREFILL_GRACE_MS = 8_000
 // Overall budget — sized to fit a full binary search of per-test-capped trials (~log2(layers)).
 const TOTAL_BUDGET_MS = 20 * 60_000
-const OOM_RE = /out of memory|cudaMalloc/i
+// Memory-pressure / GPU-exhaustion signatures. Beyond a clean "out of memory", a config that
+// overflows VRAM often surfaces a secondary CUDA fault (failed allocation, or "device not ready"
+// during graph capture once the allocation failed). Treat all of these as OOM so the search
+// offloads more and the result reads as a fit problem rather than a mystery crash.
+const OOM_RE = /out of memory|cudaMalloc|failed to allocate|unable to allocate|device not ready|CUDA error/i
 
 // English text is roughly 4 characters per token — used to size the bench prompt.
 const CHARS_PER_TOKEN = 4
@@ -167,9 +176,15 @@ export class BenchRunner {
       this.queueTelemetry(record, entry, sys, this.version, active?.version ?? '')
       this.state = { running: false, modelKey, done: true, bestTps: best.cand.tps ?? undefined, candidates: results }
     } else {
-      // No candidate measured successfully — keep the partial results, surface a
-      // soft error (every candidate's outcome is visible in `candidates`).
-      const err = this.cancelled ? undefined : 'No candidate completed successfully.'
+      // No candidate measured successfully — keep the partial results, surface a soft error
+      // (every candidate's outcome is visible in `candidates`). When every trial ran out of VRAM,
+      // say so with the context size so the fix (lower ctx) is obvious — rather than a vague crash.
+      const memoryBound = results.length > 0 && results.every((r) => r.outcome === 'oom')
+      const err = this.cancelled
+        ? undefined
+        : memoryBound
+          ? `This model doesn't fit on your GPU at ${baseProfile.ctx.toLocaleString()} context — even with maximum CPU offload it ran out of VRAM. Lower the context length and try again.`
+          : 'No candidate completed successfully.'
       this.state = { running: false, modelKey, done: true, error: err, candidates: results }
     }
   }
@@ -211,6 +226,7 @@ export class BenchRunner {
       const cand = await this.measure(entry, sys, profile, caps, label, stepPrefix)
       results.push(cand)
       this.state = { ...this.state, candidates: results }
+      await this.settleGpu()
 
       if (cand.outcome === 'ok' && cand.tps !== null) {
         // More GPU layers is always faster; the last ok in the search has the highest ngl.
@@ -251,6 +267,7 @@ export class BenchRunner {
       const cand = await this.measure(entry, sys, profile, caps, label, stepPrefix)
       results.push(cand)
       this.state = { ...this.state, candidates: results }
+      await this.settleGpu()
 
       if (cand.outcome === 'oom' || overVram(cand.vramMb, sys)) {
         lo = mid + 1  // need more CPU experts to free VRAM
@@ -328,31 +345,36 @@ export class BenchRunner {
       await this.manager.stopAndWait().catch(() => {})
       return fail('crash')
     }
+    const logPath = this.manager.logPath()
 
-    // Bench prompt = 75% of the configured ctx — a realistic fraction of the window the user
-    // will actually use, leaving room for generation (see benchPromptTokens).
+    // Bench prompt = 75% of the configured ctx, capped at 50k (see benchPromptTokens).
     const promptContent = makeBenchContent(benchPromptTokens(profile.ctx))
 
-    // Warmup (discarded) then the measured request — both bounded by the remaining per-test time.
+    // Prefill gate (doubles as warmup): stream the prompt and fail fast if it's spilling/crawling
+    // or the engine faults — so a config that doesn't fit at this ctx is rejected in seconds and the
+    // search offloads more, instead of hanging out the whole per-test budget.
     phase('warming up…')
-    await this.chat(target, promptContent, 16, remaining()).catch(() => null)
+    const warm = await this.prefillProbe(target, promptContent, remaining(), logPath, stepPrefix)
+    if (warm !== 'ok') {
+      await this.manager.stopAndWait().catch(() => {})
+      return fail(warm.fault)
+    }
     phase('measuring t/s…')
-    const timed = await this.chat(target, promptContent, 128, remaining()).catch(() => null)
+    const measured = await this.runChatWatched(target, promptContent, 128, remaining(), logPath)
     const vramAfter = await readNvidiaVramMb()
     await this.manager.stopAndWait().catch(() => {})
 
-    // A null result past the per-test deadline is a timeout (too slow), not a crash.
-    if (!timed) return fail(Date.now() >= testDeadline ? 'timeout' : 'crash')
+    if ('fault' in measured) return fail(measured.fault)
     const vramMb = vramBefore !== null && vramAfter !== null ? Math.max(0, vramAfter - vramBefore) : vramAfter
-    return { label, params, outcome: 'ok', tps: timed.tps, ttftMs: timed.ttftMs, vramMb }
+    return { label, params, outcome: 'ok', tps: measured.tps, ttftMs: measured.ttftMs, vramMb }
   }
 
   /** Poll the manager state until the engine is running, the readiness window
    *  elapses (timeout), the process exits (crash), or an OOM line appears in the
    *  log (oom). Honors cancel + the global deadline. */
   private async awaitReady(testDeadline: number): Promise<'ok' | 'timeout' | 'crash' | 'oom'> {
-    // Bounded by both the readiness window and the per-test cap (whichever is sooner).
-    const deadline = Math.min(Date.now() + READY_TIMEOUT_MS, testDeadline)
+    const deadline = Math.min(Date.now() + READY_TIMEOUT_MS, testDeadline, this.deadline)
+    const logPath = this.manager.logPath()
     for (;;) {
       await sleep(400)
       if (this.cancelled) return 'crash' // treated as a non-ok outcome; engine stopped by caller
@@ -364,14 +386,162 @@ export class BenchRunner {
         if (tail.some((l) => OOM_RE.test(l))) return 'oom'
         return 'crash'
       }
-      if (Date.now() > deadline || Date.now() > this.deadline) return 'timeout'
+      // Still 'starting' — but a candidate that over-allocates VRAM can hang here without the
+      // process cleanly exiting (it allocates/thrashes instead of crashing). Scan the LIVE engine
+      // log so we catch the OOM / "device not ready" right away rather than waiting out the window.
+      if (logPath && OOM_RE.test(readLiveTail(logPath))) return 'oom'
+      if (Date.now() > deadline) return 'timeout'
     }
   }
 
-  /** One non-streaming /v1/chat/completions request with the given content string.
-   *  Returns engine-reported tps (predicted_per_second) + ttftMs (prompt_ms).
-   *  `timeoutMs` is the remaining per-test budget — the request aborts when it elapses. */
-  private async chat(target: string, content: string, maxTokens: number, timeoutMs: number): Promise<{ tps: number; ttftMs: number } | null> {
+  /** After a candidate's engine is stopped, wait for the GPU to actually release its VRAM (and the
+   *  driver to settle) before the next candidate loads. A trial that exhausts VRAM can leave the GPU
+   *  in a "device not ready" state that otherwise cascades into every following trial failing — the
+   *  cause of spurious "no candidate found" on large models. Returns fast when VRAM is already low
+   *  (the normal success case). Best-effort; never throws. */
+  private async settleGpu(): Promise<void> {
+    await sleep(1500) // base: let the killed engine process release + the driver settle
+    let prev = await readNvidiaVramMb()
+    if (prev === null) return // non-NVIDIA / no nvidia-smi: the fixed wait is all we can do
+    for (let i = 0; i < 12 && !this.cancelled; i++) {
+      await sleep(1000)
+      const cur = await readNvidiaVramMb()
+      if (cur === null || cur >= prev - 64) return // released / stabilized (no further drop)
+      prev = cur
+    }
+  }
+
+  /** A measured chat that aborts the instant the engine faults, so a config that doesn't fit fails
+   *  in seconds instead of hanging out the per-test budget. A watchdog polls the engine state + the
+   *  live engine log; on an OOM / "device not ready" / process death it aborts the request and the
+   *  result is classified accordingly. Returns the timing, or a `fault` outcome. */
+  private async runChatWatched(
+    target: string,
+    content: string,
+    maxTokens: number,
+    budgetMs: number,
+    logPath: string,
+  ): Promise<{ tps: number; ttftMs: number } | { fault: 'oom' | 'crash' | 'timeout' }> {
+    const probe = new AbortController()
+    let fault: 'oom' | 'crash' | null = null
+    const watch = (async () => {
+      while (!probe.signal.aborted) {
+        await sleep(1200)
+        if (this.cancelled) { fault = 'crash'; probe.abort(); return }
+        const st = this.manager.status()
+        if (st.state === 'error' || st.state === 'stopped') {
+          fault = (st.err?.logTail ?? []).some((l) => OOM_RE.test(l)) ? 'oom' : 'crash'
+          probe.abort(); return
+        }
+        // Engine still "running" but stuck mid-inference (graph-capture OOM, etc.) writes the fault
+        // to its log without exiting — catch it from the live log so we don't wait out the budget.
+        if (logPath && OOM_RE.test(readLiveTail(logPath))) { fault = 'oom'; probe.abort(); return }
+      }
+    })()
+
+    let timed: { tps: number; ttftMs: number } | null = null
+    try {
+      timed = await this.chat(target, content, maxTokens, budgetMs, probe.signal)
+    } catch {
+      timed = null
+    } finally {
+      probe.abort()
+      await watch.catch(() => {})
+    }
+    if (timed) return timed
+    if (fault) return { fault }
+    return { fault: this.cancelled ? 'crash' : 'timeout' }
+  }
+
+  /** Prefill gate: stream the bench prompt and watch how fast the prompt is processed. If the
+   *  projected time to finish prefilling exceeds the per-test budget, the config is spilling to
+   *  system memory / crawling — abort and mark it NG so the search offloads more, instead of waiting
+   *  out the whole budget. Also aborts on an engine fault (OOM / "device not ready" / process death).
+   *  Returns 'ok' once prefill completes (generation starts) — a config that gets here is viable and
+   *  the warm prompt cache makes the following measured request fast and accurate. */
+  private async prefillProbe(
+    target: string,
+    content: string,
+    budgetMs: number,
+    logPath: string,
+    stepPrefix: string,
+  ): Promise<'ok' | { fault: 'oom' | 'crash' | 'timeout' }> {
+    const probe = new AbortController()
+    let fault: 'oom' | 'crash' | null = null
+    const watch = (async () => {
+      while (!probe.signal.aborted) {
+        await sleep(1200)
+        if (this.cancelled) { fault = 'crash'; probe.abort(); return }
+        const st = this.manager.status()
+        if (st.state === 'error' || st.state === 'stopped') {
+          fault = (st.err?.logTail ?? []).some((l) => OOM_RE.test(l)) ? 'oom' : 'crash'
+          probe.abort(); return
+        }
+        if (logPath && OOM_RE.test(readLiveTail(logPath))) { fault = 'oom'; probe.abort(); return }
+      }
+    })()
+
+    const signals: AbortSignal[] = [AbortSignal.timeout(budgetMs), probe.signal]
+    if (this.abort) signals.push(this.abort.signal)
+    const start = Date.now()
+    let reachedGen = false
+    try {
+      const res = await fetch(`${target}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'bench', messages: [{ role: 'user', content }], max_tokens: 8, temperature: 0, seed: 42, stream: true, return_progress: true }),
+        signal: AbortSignal.any(signals),
+      })
+      if (!res.ok || !res.body) throw new Error('no stream')
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      outer: while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split('\n')
+        buf = lines.pop() ?? ''
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const raw = line.slice(6).trim()
+          if (raw === '[DONE]') { reachedGen = true; break outer }
+          let chunk: Record<string, unknown>
+          try { chunk = JSON.parse(raw) } catch { continue }
+          const pp = chunk.prompt_progress as { processed?: number; total?: number } | undefined
+          if (pp?.total) {
+            const processed = pp.processed ?? 0
+            const pct = Math.round((processed / pp.total) * 100)
+            this.state = { ...this.state, step: `${stepPrefix} — prefill ${pct}%` }
+            const elapsed = Date.now() - start
+            if (processed > 0 && elapsed > PREFILL_GRACE_MS && elapsed * (pp.total / processed) > budgetMs) {
+              // Projected to overrun the budget → spilling/too slow for this ctx. NG.
+              fault = 'oom'
+              await reader.cancel().catch(() => {})
+              break outer
+            }
+          }
+          const delta = (chunk.choices as Array<{ delta?: { content?: string; reasoning_content?: string } }> | undefined)?.[0]?.delta
+          if (delta && (delta.content || delta.reasoning_content)) { reachedGen = true; await reader.cancel().catch(() => {}); break outer }
+        }
+      }
+    } catch {
+      // aborted by fault watchdog / cancel / budget, or a transport error
+    } finally {
+      probe.abort()
+      await watch.catch(() => {})
+    }
+    if (reachedGen) return 'ok'
+    if (fault) return { fault }
+    return { fault: this.cancelled ? 'crash' : 'timeout' }
+  }
+
+  /** One non-streaming /v1/chat/completions request. Returns engine-reported tps + ttftMs, or null.
+   *  Aborts on the per-test timeout, the cancel kill-switch, or `extraSignal` (the fault watchdog). */
+  private async chat(target: string, content: string, maxTokens: number, timeoutMs: number, extraSignal?: AbortSignal): Promise<{ tps: number; ttftMs: number } | null> {
+    const signals: AbortSignal[] = [AbortSignal.timeout(timeoutMs)]
+    if (this.abort) signals.push(this.abort.signal)
+    if (extraSignal) signals.push(extraSignal)
     const res = await fetch(`${target}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -383,10 +553,7 @@ export class BenchRunner {
         seed: 42,
         stream: false,
       }),
-      // Abort on the per-test timeout OR when cancel() fires (stop/restart/load kill switch).
-      signal: this.abort
-        ? AbortSignal.any([AbortSignal.timeout(timeoutMs), this.abort.signal])
-        : AbortSignal.timeout(timeoutMs),
+      signal: signals.length > 1 ? AbortSignal.any(signals) : signals[0],
     })
     if (!res.ok) return null
     const data = (await res.json()) as { timings?: { predicted_per_second?: number; prompt_ms?: number } }
@@ -524,4 +691,14 @@ function readNvidiaVramMb(): Promise<number | null> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
+}
+
+/** Last ~8KB of a (possibly growing) log file as a string, or '' on error. Cheap enough to poll
+ *  during readiness to catch an OOM the engine prints but hasn't crashed on yet. */
+function readLiveTail(path: string): string {
+  try {
+    return readFileSync(path, 'utf8').slice(-8000)
+  } catch {
+    return ''
+  }
 }
