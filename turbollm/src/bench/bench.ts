@@ -66,6 +66,10 @@ export class BenchRunner {
   private state: BenchState = { running: false }
   private cancelled = false
   private deadline = 0
+  // Aborts the in-flight measurement request the instant cancel() is called, so a
+  // stop/restart/load (kill switches) interrupts auto-tune immediately rather than
+  // waiting out the current candidate's request.
+  private abort: AbortController | null = null
 
   constructor(
     private manager: Manager,
@@ -85,10 +89,21 @@ export class BenchRunner {
     return this.state.running
   }
 
-  /** Cancel the active run: it stops after the current step, leaves the engine
-   *  stopped, and keeps the partial results gathered so far (AC#3). */
+  /** Cancel the active run: aborts the in-flight measurement immediately, stops after the
+   *  current step, leaves the engine stopped, and keeps the partial results gathered so far
+   *  (AC#3). A no-op when nothing is running. */
   cancel(): void {
-    if (this.state.running) this.cancelled = true
+    if (!this.state.running) return
+    this.cancelled = true
+    this.abort?.abort()
+  }
+
+  /** Resolve once no run is in flight (the runner has finished its teardown), or after
+   *  `timeoutMs`. Lets a restart wait for auto-tune to release the engine before reloading,
+   *  so the two don't race over the engine. */
+  async waitIdle(timeoutMs = 15_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (this.state.running && Date.now() < deadline) await sleep(150)
   }
 
   /** Start a run for `modelKey`. Rejects (throws BenchError) when a run is already
@@ -109,6 +124,7 @@ export class BenchRunner {
     if (entry.incomplete || entry.parseError) throw new BenchError('model_not_loadable', 'This model is incomplete or unreadable.')
 
     this.cancelled = false
+    this.abort = new AbortController()
     this.deadline = Date.now() + TOTAL_BUDGET_MS
     this.state = { running: true, modelKey, step: 'Preparing…', candidates: [] }
     void this.run(modelKey, entry, base).catch((e) => {
@@ -369,7 +385,10 @@ export class BenchRunner {
         seed: 42,
         stream: false,
       }),
-      signal: AbortSignal.timeout(timeoutMs),
+      // Abort on the per-test timeout OR when cancel() fires (stop/restart/load kill switch).
+      signal: this.abort
+        ? AbortSignal.any([AbortSignal.timeout(timeoutMs), this.abort.signal])
+        : AbortSignal.timeout(timeoutMs),
     })
     if (!res.ok) return null
     const data = (await res.json()) as { timings?: { predicted_per_second?: number; prompt_ms?: number } }

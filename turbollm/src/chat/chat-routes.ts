@@ -16,6 +16,16 @@ import type { ExportFormat } from './chat-export'
 // Track in-flight abort controllers per conversation id.
 const inflight = new Map<string, AbortController>()
 
+/** Abort every in-flight chat generation. Called when the user takes over the engine
+ *  (load / stop / restart) — those are kill switches: they must stop all other in-app
+ *  model calls, not leave streams hanging against an engine that's going away. */
+export function abortAllInFlightChats(): number {
+  const n = inflight.size
+  for (const ac of inflight.values()) ac.abort()
+  inflight.clear()
+  return n
+}
+
 // Built-in system prompt for the TurboLLM Expert thread (spec 08 §2). Kept
 // server-side and never sent to the client, so it stays hidden from the UI.
 const EXPERT_SYSTEM_PROMPT = `You are the TurboLLM in-app expert assistant — a knowledgeable, friendly guide built into TurboLLM, a local-first desktop app for running large language models on the user's own machine.

@@ -9,6 +9,7 @@ import { homedir, networkInterfaces } from 'node:os'
 import { ValueError, type ApiKey, type Engine, type McpServer } from '../config/config'
 import type { Deps } from '../deps'
 import { type ModelInfo, type StartOpts } from '../engines/manager'
+import { abortAllInFlightChats } from '../chat/chat-routes'
 import { NameTakenError, NotFoundError } from '../engines/registry'
 import { ProbeError } from '../engines/probe'
 import {
@@ -469,6 +470,12 @@ export function registerApi(app: Hono, d: Deps): void {
     // ComfyUI guard: while ComfyUI is rendering it owns the GPU, so refuse to load a
     // model (it would thrash/OOM VRAM). The guard reloads automatically once idle.
     if (d.comfy?.isBlocked()) return err(c, 409, 'comfyui_busy', 'ComfyUI is rendering — model loading is paused until its queue finishes.')
+    // Kill switch: loading a model takes over the engine — cancel any auto-tune and abort
+    // in-flight chats, then wait for auto-tune to release the engine so the load can't race
+    // the runner's teardown.
+    d.bench.cancel()
+    abortAllInFlightChats()
+    await d.bench.waitIdle()
     const cfg = d.store.snapshot()
     const sys = getSysInfo()
 
@@ -550,12 +557,23 @@ export function registerApi(app: Hono, d: Deps): void {
   })
 
   app.post('/api/v1/engine/stop', (c) => {
+    // Kill switch: stopping the engine cancels auto-tune and aborts in-flight chats too —
+    // they all depend on the engine that's going away.
+    d.bench.cancel()
+    abortAllInFlightChats()
     d.manager.stop()
     return c.json({ ok: true }, 202)
   })
 
   app.post('/api/v1/engine/restart', (c) => {
-    void d.manager.restart().catch(() => {})
+    // Kill switch: cancel auto-tune + abort chats, wait for the runner to release the engine,
+    // then restart — so the reload doesn't race auto-tune's teardown.
+    d.bench.cancel()
+    abortAllInFlightChats()
+    void (async () => {
+      await d.bench.waitIdle()
+      await d.manager.restart()
+    })().catch(() => {})
     return c.json({ ok: true }, 202)
   })
 
