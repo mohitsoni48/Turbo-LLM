@@ -65,9 +65,21 @@ export interface LastLoaded {
 export interface HF {
   token: string
 }
+/** Web-search backend selection (F-020). */
+export type SearchProvider = 'tavily' | 'kagi' | 'searxng'
+export interface SearchConfig {
+  provider: SearchProvider
+  tavilyApiKey?: string
+  kagiApiKey?: string
+  searxngUrl?: string
+}
+
 /** Built-in tool configuration (v0.7.0). */
 export interface ToolsConfig {
+  /** Legacy Tavily key (pre-F-020). Migrated into `search.tavilyApiKey` on load; kept for read. */
   tavily?: { apiKey: string }
+  /** Pluggable web-search provider config (F-020). */
+  search?: SearchConfig
   /** When true (default), run_code emits a confirmation-required message instead of
    *  executing immediately, giving the user a chance to approve (F-019). */
   requireRunCodeConfirmation?: boolean
@@ -451,6 +463,17 @@ function normalize(c: Config): void {
   c.tools = {}
   if (tl.tavily && typeof tl.tavily.apiKey === 'string') {
     c.tools.tavily = { apiKey: tl.tavily.apiKey }
+  }
+  // Search provider (F-020): absent in pre-F-020 configs → default 'tavily', migrating any
+  // legacy tavily.apiKey into search.tavilyApiKey so existing keys keep working.
+  const sl = (tl.search ?? {}) as Partial<SearchConfig>
+  const provider: SearchProvider =
+    sl.provider === 'kagi' || sl.provider === 'searxng' ? sl.provider : 'tavily'
+  c.tools.search = {
+    provider,
+    tavilyApiKey: sl.tavilyApiKey ?? c.tools.tavily?.apiKey ?? undefined,
+    kagiApiKey: sl.kagiApiKey ?? undefined,
+    searxngUrl: typeof sl.searxngUrl === 'string' && sl.searxngUrl.trim() ? sl.searxngUrl.trim() : undefined,
   }
   // requireRunCodeConfirmation (F-019): absent in pre-F-019 configs → true (safe default).
   c.tools.requireRunCodeConfirmation = tl.requireRunCodeConfirmation !== false

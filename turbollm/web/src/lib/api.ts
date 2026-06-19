@@ -365,21 +365,38 @@ export type DaemonSettings = {
   hfTokenSet: boolean
   /** Gateway intelligence settings (ADR-06x): model auto-swap + keep-N pool. */
   gateway: { autoSwap: boolean; keepN: number }
-  /** Whether a Tavily API key is configured (the key itself is never echoed back). */
+  /** Whether a Tavily API key is configured (legacy mirror of `search.tavilyKeySet`). */
   tavilyKeySet: boolean
+  /** Web-search provider config (F-020). Keys are write-only — only "is it set" booleans
+   *  come back; `searxngUrl` is not a secret so it is echoed. */
+  search: {
+    provider: SearchProvider
+    tavilyKeySet: boolean
+    kagiKeySet: boolean
+    searxngUrl: string
+  }
   /** MCP server list. */
   mcp: { servers: McpServer[] }
 }
+
+export type SearchProvider = 'tavily' | 'kagi' | 'searxng'
 
 /** Settings patch: the persisted {@link DaemonSettings} fields plus a write-only
  *  `hfToken` (spec 10 §4) that sets/clears the stored Hugging Face token. `comfyui`
  *  is patchable per-field (only `enabled` is set here; `gatePath` is owned by the
  *  install endpoints). */
-export type DaemonSettingsPatch = Partial<Omit<DaemonSettings, 'comfyui' | 'tavilyKeySet' | 'mcp'>> & {
+export type DaemonSettingsPatch = Partial<Omit<DaemonSettings, 'comfyui' | 'tavilyKeySet' | 'search' | 'mcp'>> & {
   comfyui?: Partial<ComfyUiSettings>
   hfToken?: string
-  /** Write-only: set or clear the Tavily API key. */
+  /** Write-only: set or clear the Tavily API key (legacy alias for `search.tavilyApiKey`). */
   tavilyApiKey?: string
+  /** Write-only search-provider patch (F-020). Key/URL fields set or clear ('') the stored value. */
+  search?: {
+    provider?: SearchProvider
+    tavilyApiKey?: string
+    kagiApiKey?: string
+    searxngUrl?: string
+  }
 }
 
 export function getSettings(): Promise<DaemonSettings> {

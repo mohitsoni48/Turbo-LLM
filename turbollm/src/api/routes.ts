@@ -739,6 +739,7 @@ export function registerApi(app: Hono, d: Deps): void {
       comfyui?: { enabled?: boolean; url?: string; reverseGate?: boolean }
       gateway?: { autoSwap?: boolean; keepN?: number }
       tavilyApiKey?: string
+      search?: { provider?: string; tavilyApiKey?: string; kagiApiKey?: string; searxngUrl?: string }
     }>(c)
 
     const updates: Record<string, unknown> = {}
@@ -842,14 +843,26 @@ export function registerApi(app: Hono, d: Deps): void {
       if (telemetryLevel !== undefined) cfg.telemetry.level = telemetryLevel
       // HF token (spec 10 §4): write-only. An explicit '' clears it. Never logged.
       if (b.hfToken !== undefined) cfg.hf.token = String(b.hfToken).trim()
-      // Tavily API key (v0.7.0): write-only. An explicit '' clears it.
+      // Search provider config (F-020). All key/URL fields are write-only; '' clears them.
+      // `search` is the canonical block; legacy top-level `tavilyApiKey` still works as an alias.
+      cfg.tools.search ??= { provider: 'tavily' }
+      const s = cfg.tools.search
+      if (b.search?.provider === 'tavily' || b.search?.provider === 'kagi' || b.search?.provider === 'searxng') {
+        s.provider = b.search.provider
+      }
+      const trimmed = (v: string): string | undefined => v.trim() || undefined
+      if (b.search?.tavilyApiKey !== undefined) s.tavilyApiKey = trimmed(b.search.tavilyApiKey)
+      if (b.search?.kagiApiKey !== undefined) s.kagiApiKey = trimmed(b.search.kagiApiKey)
+      if (b.search?.searxngUrl !== undefined) s.searxngUrl = trimmed(b.search.searxngUrl)
+      // Legacy alias: top-level tavilyApiKey maps onto search.tavilyApiKey + keeps tools.tavily for read.
       if (b.tavilyApiKey !== undefined) {
         const key = String(b.tavilyApiKey).trim()
         cfg.tools.tavily = key ? { apiKey: key } : undefined
+        s.tavilyApiKey = key || undefined
       }
     })
     // Keep ToolRegistry in sync when tools config changes.
-    if (b.tavilyApiKey !== undefined) {
+    if (b.tavilyApiKey !== undefined || b.search !== undefined) {
       d.tools?.updateConfig(d.store.snapshot().tools)
     }
     const after = d.store.snapshot().daemon
@@ -1249,8 +1262,16 @@ function settingsPayload(d: Deps) {
     // The HF token is write-only over the wire (spec 10 §4): we never echo it back,
     // only whether one is set, so the UI can show "configured" without leaking it.
     hfTokenSet: cfg.hf.token.length > 0,
-    // Tavily API key is write-only: expose only whether it is set.
-    tavilyKeySet: !!(cfg.tools.tavily?.apiKey),
+    // Tavily API key is write-only: expose only whether it is set (legacy field, kept for compat).
+    tavilyKeySet: !!(cfg.tools.search?.tavilyApiKey ?? cfg.tools.tavily?.apiKey),
+    // Search provider config (F-020): provider + which credentials are set. Keys are write-only
+    // (booleans only); searxngUrl is not a secret so it is echoed for the form to display.
+    search: {
+      provider: cfg.tools.search?.provider ?? 'tavily',
+      tavilyKeySet: !!cfg.tools.search?.tavilyApiKey,
+      kagiKeySet: !!cfg.tools.search?.kagiApiKey,
+      searxngUrl: cfg.tools.search?.searxngUrl ?? '',
+    },
     mcp: cfg.mcp,
   }
 }

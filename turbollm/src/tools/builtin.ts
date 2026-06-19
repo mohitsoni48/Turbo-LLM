@@ -2,6 +2,7 @@
 // Tools: web_search (Tavily), fetch_url, run_code (Node vm sandbox).
 import { runInNewContext } from 'node:vm'
 import { checkSsrf, RUN_CODE_BLOCKED_MSG } from './security'
+import { searchProviderClient, type SearchConfig } from './search-providers'
 
 // ── Tool JSON-schema definitions (OpenAI tool format) ─────────────────────
 
@@ -60,55 +61,26 @@ export const RUN_CODE_TOOL = {
   },
 }
 
-// ── Tavily web search ─────────────────────────────────────────────────────
+// ── Web search (pluggable provider — F-020) ─────────────────────────────────
 
-interface TavilyResult {
-  title: string
-  url: string
-  content: string
-  score: number
-}
-
-interface TavilyResponse {
-  results?: TavilyResult[]
-  answer?: string
-}
-
-export async function execWebSearch(args: Record<string, unknown>, tavilyApiKey: string): Promise<string> {
+export async function execWebSearch(args: Record<string, unknown>, searchCfg: SearchConfig): Promise<string> {
   const query = String(args.query ?? '')
   if (!query.trim()) return 'Error: query is required.'
   const maxResults = Math.min(10, Math.max(1, Number(args.max_results ?? 5) || 5))
 
-  let resp: Response
+  const client = searchProviderClient(searchCfg)
+  if (!client) return 'Error: no web-search provider configured. Add one in Settings → Tools.'
+
+  let results
   try {
-    resp = await fetch('https://api.tavily.com/search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        api_key: tavilyApiKey,
-        query,
-        max_results: maxResults,
-        search_depth: 'advanced',
-        include_answer: true,
-      }),
-      signal: AbortSignal.timeout(20_000),
-    })
+    results = await client.search(query, maxResults)
   } catch (e) {
-    return `Error: could not reach Tavily — ${(e as Error).message}`
+    return `Error: could not reach the ${searchCfg.provider} search provider — ${(e as Error).message}`
   }
 
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '')
-    return `Error: Tavily returned ${resp.status}${text ? ` — ${text.slice(0, 200)}` : ''}`
-  }
-
-  const data = (await resp.json()) as TavilyResponse
-  const results = data.results ?? []
   if (results.length === 0) return 'No results found.'
 
-  const lines: string[] = []
-  if (data.answer) lines.push(`ANSWER: ${data.answer}\n`)
-  lines.push(`SOURCES (${results.length} results for "${query}"):`)
+  const lines: string[] = [`SOURCES (${results.length} results for "${query}"):`]
   for (const [i, r] of results.entries()) {
     lines.push(`\n[${i + 1}] ${r.title}`)
     lines.push(`Source: ${r.url}`)
