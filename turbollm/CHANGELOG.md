@@ -25,6 +25,41 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
+## [0.8.0] - 2026-06-19
+
+### Added
+- **Research v2** — pluggable web-search providers (Tavily / Kagi / SearXNG); a deterministic
+  retrieval service with a confidence loop and a sources panel; and a heuristic referee that flags
+  reply claims not supported by their cited sources.
+- **Chat portability** — share a chat via a LAN link or a debug snapshot, and export/import chats
+  as `.turbollm-chat.json` (imported chats are fully continuable).
+- **Agentic tool security** — SSRF/RFC-1918 block on `fetch_url` and a confirmation gate on `run_code`.
+- **vLLM load controls** — max model length, GPU memory utilization, max concurrent sequences,
+  dtype, KV-cache dtype, enforce-eager, trust-remote-code.
+- **Engine lifecycle** — 3-state engine rows (Install / Update / Disable / Enable / Delete) for both
+  the catalog engines (vLLM / MLX / TurboQuant) and the llama.cpp backends.
+- **"All" models view** — list models unfiltered by the active engine, with compatibility badges.
+- **Auto-tune** — live prefill-% progress and a Save / Cancel results dialog.
+
+### Changed
+- **Auto-tune** rewritten — binary search over GPU offload, a realistic bench prompt
+  (`min(50k, 0.75 × ctx)`), a 3-minute-per-test cap, GPU settle between candidates, and a
+  spill-aware peak confirmation (a config that spills VRAM to system memory is PCIe-bottlenecked,
+  so throughput peaks at the no-spill edge).
+- Stop / restart / load now act as **kill switches** — they cancel a running auto-tune and abort
+  in-flight chat generations.
+- The model load dialog is driven by the active engine kind (vLLM shows its real controls, not MLX
+  copy); slim custom scrollbar; real GPU-layer count instead of "99".
+- `turbollm launch claude` raises the request timeout so slow local models don't trigger retries.
+
+### Fixed
+- Claude Code context meter and cache-hit now show real numbers (gateway maps engine token usage to
+  the Anthropic usage block).
+- Qwen tool-loop empty reply after web searches (forced final answer pass).
+- vLLM now fails fast with a clear message where it can't run (e.g. Windows), instead of a raw crash.
+- ComfyUI reverse-gate log noise when ComfyUI is configured but not running.
+- A stale engine error now resets when you switch the active engine.
+
 ## [0.7.2] - 2026-06-19
 
 ### Fixed

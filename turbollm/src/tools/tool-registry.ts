@@ -5,6 +5,7 @@ import {
   WEB_SEARCH_TOOL, FETCH_URL_TOOL, RUN_CODE_TOOL,
   execWebSearch, execFetchUrl, execRunCode,
 } from './builtin'
+import { searchConfigured } from './search-providers'
 import { createMcpClient, type IMcpClient } from './mcp-client'
 
 export interface ToolDefinition {
@@ -70,7 +71,7 @@ export class ToolRegistry {
     const defs: ToolDefinition[] = []
 
     // Built-in tools — only available when the required config is present
-    if (this.toolsCfg.tavily?.apiKey) defs.push(WEB_SEARCH_TOOL)
+    if (searchConfigured(this.toolsCfg.search)) defs.push(WEB_SEARCH_TOOL)
     defs.push(FETCH_URL_TOOL)
     defs.push(RUN_CODE_TOOL)
 
@@ -99,18 +100,19 @@ export class ToolRegistry {
     const name = call.name
     const args = call.args
 
-    // Built-in: web_search
+    // Built-in: web_search (provider chosen via tools.search — F-020)
     if (name === 'web_search') {
-      const key = this.toolsCfg.tavily?.apiKey
-      if (!key) return 'Error: Tavily API key not configured. Add it in Settings → Tools.'
-      return execWebSearch(args, key)
+      if (!searchConfigured(this.toolsCfg.search)) {
+        return 'Error: no web-search provider configured. Add one in Settings → Tools.'
+      }
+      return execWebSearch(args, this.toolsCfg.search!)
     }
 
     // Built-in: fetch_url
     if (name === 'fetch_url') return execFetchUrl(args)
 
-    // Built-in: run_code
-    if (name === 'run_code') return execRunCode(args)
+    // Built-in: run_code — gated behind user confirmation when enabled (F-019).
+    if (name === 'run_code') return execRunCode(args, this.toolsCfg.requireRunCodeConfirmation !== false)
 
     // MCP tool: mcp__{serverId}__{toolName}
     const mcpMatch = name.match(/^mcp__([^_]+(?:_[^_]+)*)__(.+)$/)
@@ -135,7 +137,7 @@ export class ToolRegistry {
 
   /** Whether any tools are currently available (determines if tools should be sent to engine). */
   hasTools(): boolean {
-    if (this.toolsCfg.tavily?.apiKey) return true
+    if (searchConfigured(this.toolsCfg.search)) return true
     if (this.mcpClients.size > 0) return true
     // fetch_url and run_code are always available
     return true

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { engineAcceptsFormat, engineModelAlias, ENGINE_MODEL_ALIAS } from './compat'
-import { vllmServerCommand } from './vllm'
+import { vllmServerCommand, vllmServeBlocker } from './vllm'
 import { mlxServerCommand, mlxSamplingArgs } from './mlx'
 
 test('engineAcceptsFormat: gguf for llama.cpp forks, mlx for python engines', () => {
@@ -27,6 +27,13 @@ test('vllmServerCommand serves under the shared default_model alias', () => {
   const i = args.indexOf('--served-model-name')
   assert.notEqual(i, -1)
   assert.equal(args[i + 1], ENGINE_MODEL_ALIAS)
+})
+
+test('vllmServeBlocker returns a clear message when the runtime cannot serve (ADR-080)', async () => {
+  // A bogus interpreter path can't import uvloop → the preflight reports vLLM can't run here,
+  // exactly as on Windows where uvloop has no build. (On Linux/macOS with a real venv it returns null.)
+  const msg = await vllmServeBlocker(process.platform === 'win32' ? 'C:/no/such/python.exe' : '/no/such/python')
+  assert.ok(msg && /vLLM cannot run/.test(msg))
 })
 
 test('mlxServerCommand passes model/host/port and appends MLX-only extraArgs (no alias flag)', () => {

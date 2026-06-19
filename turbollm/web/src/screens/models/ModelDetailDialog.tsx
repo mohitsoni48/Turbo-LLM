@@ -4,11 +4,41 @@ import { ChevronDown, ExternalLink, Gauge, RotateCcw, Save, X, Zap } from 'lucid
 import { ApiError } from '../../lib/api'
 import { useBenchActions, useBenchState, useEngines, useModelActions, useModelDetail, useStatus } from '../../lib/queries'
 import type { LoadProfile, SysGpu } from '../../lib/types'
-import { defaultGpu } from '../../lib/types'
+import { defaultGpu, defaultVllm } from '../../lib/types'
 import { estimateVram, gpuBudgetMb } from '../../lib/vram'
 import { Button } from '../../components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../components/ui/dialog'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '../../components/ui/alert-dialog'
 import { toast } from '../../components/ui/sonner'
+
+/**
+ * Which load-config UI a model gets is decided by the engine that will load it — NOT by the
+ * model format (safetensors dirs report format 'mlx' under any engine, so format can't tell
+ * MLX from vLLM). `'none'` covers an absent/unrecognised engine: show sampling only, assume nothing.
+ */
+type LoadMode = 'llamacpp' | 'mlx' | 'vllm' | 'none'
+
+function loadModeForEngine(engineKind: string | undefined): LoadMode {
+  switch (engineKind) {
+    case 'llama-server':
+      return 'llamacpp'
+    case 'mlx':
+      return 'mlx'
+    case 'vllm':
+      return 'vllm'
+    default:
+      return 'none'
+  }
+}
 
 export function ModelDetailDialog({
   modelKey,
@@ -90,6 +120,8 @@ export function ModelDetailDialog({
     setDraft((d) => (d ? { ...d, sampling: { ...d.sampling, [k]: v } } : d))
   const setG = <K extends keyof LoadProfile['gpu']>(k: K, v: LoadProfile['gpu'][K]) =>
     setDraft((d) => (d ? { ...d, gpu: { ...(d.gpu ?? defaultGpu()), [k]: v } } : d))
+  const setV = <K extends keyof LoadProfile['vllm']>(k: K, v: LoadProfile['vllm'][K]) =>
+    setDraft((d) => (d ? { ...d, vllm: { ...(d.vllm ?? defaultVllm()), [k]: v } } : d))
 
   const loadError = actions.load.error instanceof ApiError ? actions.load.error.message : null
 
@@ -101,7 +133,11 @@ export function ModelDetailDialog({
   const benchRunning = !!benchState?.running && benchHere
   const benchDone = !!benchState?.done && benchHere && !benchState.running
   const benchErr = bench.start.error instanceof ApiError ? bench.start.error.message : null
-  const isMlx = detail?.format === 'mlx'
+  // The load knobs follow the engine that will load the model (BUG-004), not the model format.
+  const loadMode = loadModeForEngine(activeEngine?.kind)
+  const isLlamaCpp = loadMode === 'llamacpp'
+  const isMlx = loadMode === 'mlx'
+  const isVllm = loadMode === 'vllm'
   // The runner requires a free engine (409 otherwise). When this model is loaded,
   // stop it first, then start the sweep once the engine has settled.
   const startBenchRun = () => {
@@ -124,9 +160,24 @@ export function ModelDetailDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [benchDone, detail?.key])
 
+  // Auto-tune results dialog (shown on a finished run). Both buttons close the whole model dialog;
+  // Save persists the tuned profile (POST /bench/save), Cancel discards it.
+  const onTuneSave = () => {
+    bench.save.mutate(undefined, {
+      onSuccess: () => toast.success('Tuned settings saved'),
+      onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not save tuned settings.'),
+    })
+    onClose()
+  }
+  const onTuneCancel = () => {
+    bench.cancel.mutate()
+    onClose()
+  }
+
   return (
+    <>
     <Dialog open={!!modelKey} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-[560px]">
+      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-[560px] slim-scroll">
         <DialogHeader>
           <DialogTitle className="truncate">{detail?.name ?? 'Model'}</DialogTitle>
           <DialogDescription>
@@ -150,7 +201,7 @@ export function ModelDetailDialog({
           <div className="flex flex-col gap-4">
             {fit && <VramBar estMb={fit.estMb} totalMb={fit.totalVramMb} verdict={fit.verdict} />}
 
-            {!isMlx && detail.gpu && (
+            {isLlamaCpp && detail.gpu && (
               <AutoTune
                 running={benchRunning}
                 done={benchDone}
@@ -175,11 +226,40 @@ export function ModelDetailDialog({
               </div>
             )}
 
-            {!isMlx && (
+            {isVllm && (
+              <Section>
+                <Row label="Max model length" hint="vLLM --max-model-len. Max context tokens. 0 = derive from the model config.">
+                  <NumberInput value={draft.vllm?.maxModelLen ?? 0} min={0} max={Math.max(0, detail.nativeCtx || 0)} step={1024} onChange={(v) => setV('maxModelLen', v)} />
+                </Row>
+                <Slider
+                  label="GPU memory utilization"
+                  hint="vLLM --gpu-memory-utilization. Fraction of VRAM vLLM may reserve. Lower it to share the GPU."
+                  value={Math.round((draft.vllm?.gpuMemoryUtilization ?? 0.9) * 100)}
+                  min={10}
+                  max={100}
+                  step={5}
+                  onChange={(v) => setV('gpuMemoryUtilization', v / 100)}
+                  fmt={(v) => `${v}%`}
+                />
+                <Row label="Max concurrent sequences" hint="vLLM --max-num-seqs. Requests served in parallel. 0 = vLLM default.">
+                  <NumberInput value={draft.vllm?.maxNumSeqs ?? 0} min={0} max={1024} step={1} onChange={(v) => setV('maxNumSeqs', v)} />
+                </Row>
+                <Row label="Compute dtype" hint="vLLM --dtype. 'auto' follows the model's config.">
+                  <Select value={draft.vllm?.dtype ?? 'auto'} options={['auto', 'bfloat16', 'float16', 'float32']} onChange={(v) => setV('dtype', v as LoadProfile['vllm']['dtype'])} />
+                </Row>
+                <Row label="KV cache dtype" hint="vLLM --kv-cache-dtype. fp8 roughly halves KV-cache memory.">
+                  <Select value={draft.vllm?.kvCacheDtype ?? 'auto'} options={['auto', 'fp8']} onChange={(v) => setV('kvCacheDtype', v as LoadProfile['vllm']['kvCacheDtype'])} />
+                </Row>
+                <Toggle label="Enforce eager" hint="vLLM --enforce-eager. Skips CUDA graphs: less VRAM, somewhat slower." value={draft.vllm?.enforceEager ?? false} onChange={(v) => setV('enforceEager', v)} />
+                <Toggle label="Trust remote code" hint="vLLM --trust-remote-code. Needed for models that ship custom modelling code." value={draft.vllm?.trustRemoteCode ?? false} onChange={(v) => setV('trustRemoteCode', v)} />
+              </Section>
+            )}
+
+            {isLlamaCpp && (
             <Section>
               <Slider label="Context length" hint="Tokens of history the model can use." value={draft.ctx} min={512} max={Math.max(512, detail.nativeCtx || 8192)} step={512} onChange={(v) => set('ctx', v)} fmt={(v) => v.toLocaleString()} />
               {detail.gpu && (
-                <Slider label="GPU layers" hint="99 = all on GPU." value={draft.ngl} min={0} max={99} step={1} onChange={(v) => set('ngl', v)} fmt={(v) => (v >= 99 ? 'All' : String(v))} />
+                <Slider label="GPU layers" hint={detail.blockCount > 0 ? `${detail.blockCount} total layers.` : 'All layers on GPU = max performance.'} value={draft.ngl} min={0} max={detail.blockCount > 0 ? detail.blockCount : 99} step={1} onChange={(v) => set('ngl', v)} fmt={(v) => (v >= (detail.blockCount > 0 ? detail.blockCount : 99) ? 'All' : String(v))} />
               )}
               {detail.moe && detail.blockCount > 0 && (
                 <Slider label="MoE experts on CPU" hint="Higher = less VRAM, slower. Lower = faster if it fits." value={draft.nCpuMoe} min={0} max={detail.blockCount} step={1} onChange={(v) => set('nCpuMoe', v)} />
@@ -215,7 +295,7 @@ export function ModelDetailDialog({
               </>
             )}
 
-            {!isMlx && (
+            {isLlamaCpp && (
             <Section>
               <Row label="Parallel slots">
                 <NumberInput value={draft.parallel} min={1} max={16} onChange={(v) => set('parallel', v)} />
@@ -245,7 +325,7 @@ export function ModelDetailDialog({
               <Slider label="Top P" value={draft.sampling.topP} min={0} max={1} step={0.01} onChange={(v) => setS('topP', v)} fmt={(v) => v.toFixed(2)} />
               <Slider label="Top K" value={draft.sampling.topK} min={0} max={200} step={1} onChange={(v) => setS('topK', v)} />
               <Slider label="Min P" value={draft.sampling.minP} min={0} max={1} step={0.01} onChange={(v) => setS('minP', v)} fmt={(v) => v.toFixed(2)} />
-              {!isMlx && (<>
+              {isLlamaCpp && (<>
               <Slider label="Repeat penalty" hint="Penalise tokens that appeared earlier. 1.0 = off." value={draft.sampling.repeatPenalty} min={1} max={2} step={0.05} onChange={(v) => setS('repeatPenalty', v)} fmt={(v) => v.toFixed(2)} />
               <Slider label="Presence penalty" hint="Flat penalty for any token that appeared. 0 = off." value={draft.sampling.presencePenalty} min={0} max={2} step={0.05} onChange={(v) => setS('presencePenalty', v)} fmt={(v) => v.toFixed(2)} />
               <Slider label="Frequency penalty" hint="Penalty proportional to how often a token appeared. 0 = off." value={draft.sampling.frequencyPenalty} min={0} max={2} step={0.05} onChange={(v) => setS('frequencyPenalty', v)} fmt={(v) => v.toFixed(2)} />
@@ -259,7 +339,7 @@ export function ModelDetailDialog({
               </>)}
             </Section>
 
-            {!isMlx && specOptions.length > 1 && (
+            {isLlamaCpp && specOptions.length > 1 && (
               <>
                 <SectionTitle>Speculative decoding</SectionTitle>
                 <Section>
@@ -291,7 +371,7 @@ export function ModelDetailDialog({
               </>
             )}
 
-            {!isMlx && (<>
+            {isLlamaCpp && (<>
             <button type="button" onClick={() => setAdvanced((a) => !a)} className="flex items-center gap-1 text-[13px] font-medium text-muted hover:text-ink">
               <ChevronDown size={14} className={advanced ? 'rotate-180 transition-transform' : 'transition-transform'} />
               Advanced
@@ -400,6 +480,61 @@ export function ModelDetailDialog({
         )}
       </DialogContent>
     </Dialog>
+    <AutoTuneResultDialog
+      result={benchDone && benchHere ? benchState?.result : undefined}
+      modelName={detail?.name}
+      onSave={onTuneSave}
+      onCancel={onTuneCancel}
+    />
+    </>
+  )
+}
+
+/** Shown when an auto-tune run finishes: the winning config + Save/Cancel. Both close the model
+ *  dialog (handled by the parent); Save persists the tuned profile, Cancel discards it. */
+function AutoTuneResultDialog({
+  result,
+  modelName,
+  onSave,
+  onCancel,
+}: {
+  result?: { params: { ctx: number; ngl: number; nCpuMoe: number }; tps: number; vramMb: number | null }
+  modelName?: string
+  onSave: () => void
+  onCancel: () => void
+}) {
+  return (
+    <AlertDialog open={!!result} onOpenChange={(o) => { if (!o) onCancel() }}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Auto-tune complete</AlertDialogTitle>
+          <AlertDialogDescription asChild>
+            <div className="flex flex-col gap-2 text-[13px]">
+              <span>
+                Fastest config found:{' '}
+                <span className="font-mono font-medium" style={{ color: 'var(--ok)' }}>{result?.tps.toFixed(1)} tok/s</span>{' '}
+                on your machine.
+              </span>
+              {result && (
+                <span className="text-muted">
+                  GPU layers <span className="font-mono text-ink">{result.params.ngl}</span>
+                  {result.params.nCpuMoe > 0 && (
+                    <> · MoE experts on CPU <span className="font-mono text-ink">{result.params.nCpuMoe}</span></>
+                  )}
+                  {' '}· <span className="font-mono text-ink">{result.params.ctx.toLocaleString()}</span> ctx
+                  {result.vramMb != null && <> · ~<span className="font-mono text-ink">{result.vramMb}</span> MB VRAM</>}
+                </span>
+              )}
+              <span className="text-faint">Save applies these settings to {modelName ?? 'this model'} and closes.</span>
+            </div>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel onClick={onCancel}>Cancel</AlertDialogCancel>
+          <AlertDialogAction onClick={onSave}>Save</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   )
 }
 

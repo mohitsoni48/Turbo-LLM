@@ -446,6 +446,10 @@ function ModelRow({
   ejecting: boolean
 }) {
   const loadable = !m.incomplete && !m.parseError
+  // Engine compatibility (ADR-044): shown in the "All" view via "Show all". An incompatible
+  // model can't be loaded by the active engine, so badge which engine it needs and block Load.
+  const compatible = m.compatibleWithActiveEngine !== false
+  const needsEngine = m.format === 'gguf' ? 'llama.cpp' : 'MLX or vLLM'
   // Built-in NextN / multi-token-prediction head, read from GGUF metadata
   // (`nextn_predict_layers`) — not guessed from the arch/name. Gemma-4 MTP needs a
   // separate head file, so it isn't a list badge; it's offered in the tune dialog.
@@ -469,6 +473,7 @@ function ModelRow({
           {m.hasProfile && <Tag>tuned</Tag>}
           {m.incomplete && <Tag tone="warn">missing parts</Tag>}
           {m.parseError && <Tag tone="err">unreadable</Tag>}
+          {!compatible && <Tag tone="warn">needs {needsEngine}</Tag>}
         </div>
         <div className="mt-0.5 truncate text-[12px] text-muted">
           {m.arch}
@@ -483,7 +488,12 @@ function ModelRow({
         <Stat>{m.nativeCtx ? `${fmtCtx(m.nativeCtx)} ctx` : '—'}</Stat>
         <TpsStat m={m} />
         <div className="ml-auto flex items-center gap-1 sm:ml-0">
-          <Button size="sm" onClick={onLoad} disabled={!loadable || busy} title={loadable ? '' : 'Model is incomplete or unreadable'}>
+          <Button
+            size="sm"
+            onClick={onLoad}
+            disabled={!loadable || !compatible || busy}
+            title={!loadable ? 'Model is incomplete or unreadable' : !compatible ? `The active engine can't load this model — switch to ${needsEngine}` : ''}
+          >
             {loadingThis ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />}
             {loadingThis ? 'Loading…' : m.loaded ? 'Reload' : 'Load'}
           </Button>

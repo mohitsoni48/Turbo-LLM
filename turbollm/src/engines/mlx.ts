@@ -67,8 +67,9 @@ function venvPython(envDir: string): string {
 /**
  * Provision an isolated MLX runtime: uv → venv → `uv pip install mlx-lm`.
  * macOS-only (mlx-lm requires Apple Metal). Returns the venv python + version.
+ * When `upgrade` is true, passes `--upgrade` to force an upgrade to the latest release.
  */
-export async function ensureMlxEnv(root: string, onProgress?: (p: ProvisionProgress) => void): Promise<MlxRuntime> {
+export async function ensureMlxEnv(root: string, onProgress?: (p: ProvisionProgress) => void, upgrade = false): Promise<MlxRuntime> {
   if (process.platform !== 'darwin') {
     throw new Error('MLX requires macOS (Apple Silicon).')
   }
@@ -81,8 +82,10 @@ export async function ensureMlxEnv(root: string, onProgress?: (p: ProvisionProgr
     await execFileP(uv, ['venv', envDir], { cwd: root })
   }
   // Install (or no-op if already satisfied) mlx-lm into the venv.
+  // `--upgrade` forces an upgrade to the latest release when requested.
   onProgress?.({ phase: 'extracting', pct: -1 })
-  await execFileP(uv, ['pip', 'install', '--python', py, 'mlx-lm'], {
+  const installArgs = ['pip', 'install', '--python', py, ...(upgrade ? ['--upgrade'] : []), 'mlx-lm']
+  await execFileP(uv, installArgs, {
     cwd: root,
     maxBuffer: 16 * 1024 * 1024,
   })

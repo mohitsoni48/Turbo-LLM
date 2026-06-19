@@ -81,3 +81,45 @@ test('streamToAnthropic publishes prefill % then token counts, and never forward
   // The actual text still streamed through as Anthropic text_delta events.
   assert.ok(blob.includes('Hello') && blob.includes('world'))
 })
+
+// ── streamToAnthropic usage mapping ─────────────────────────────────────────
+
+test('streamToAnthropic maps prompt_tokens/completion_tokens to Anthropic usage with cache reuse', async () => {
+  const upstream = sseStream([
+    'data: {"choices":[{"delta":{"content":"Hi"}}]}',
+    'data: {"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":50},"timings":{"prompt_n_reuse":20}}',
+    'data: [DONE]',
+  ])
+
+  const events: { event: string; data: string }[] = []
+  for await (const evt of streamToAnthropic(upstream, 'test-model', 'msg_2')) {
+    events.push(evt)
+  }
+
+  const delta = events.find((e) => e.event === 'message_delta')
+  assert.ok(delta, 'message_delta event must be emitted')
+  const parsed = JSON.parse(delta!.data) as { usage: { output_tokens: number; input_tokens: number; cache_read_input_tokens: number } }
+  assert.equal(parsed.usage.output_tokens, 50)
+  assert.equal(parsed.usage.input_tokens, 100)
+  assert.equal(parsed.usage.cache_read_input_tokens, 20)
+})
+
+test('streamToAnthropic emits cache_read_input_tokens: 0 when no timings field', async () => {
+  const upstream = sseStream([
+    'data: {"choices":[{"delta":{"content":"Hi"}}]}',
+    'data: {"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":80,"completion_tokens":30}}',
+    'data: [DONE]',
+  ])
+
+  const events: { event: string; data: string }[] = []
+  for await (const evt of streamToAnthropic(upstream, 'test-model', 'msg_3')) {
+    events.push(evt)
+  }
+
+  const delta = events.find((e) => e.event === 'message_delta')
+  assert.ok(delta, 'message_delta event must be emitted')
+  const parsed = JSON.parse(delta!.data) as { usage: { output_tokens: number; input_tokens: number; cache_read_input_tokens: number } }
+  assert.equal(parsed.usage.output_tokens, 30)
+  assert.equal(parsed.usage.input_tokens, 80)
+  assert.equal(parsed.usage.cache_read_input_tokens, 0)
+})

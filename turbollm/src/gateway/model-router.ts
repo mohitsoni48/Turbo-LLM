@@ -7,7 +7,7 @@ import type { ConfigStore, Engine } from '../config/config'
 import type { Registry } from '../engines/registry'
 import type { Scanner, ModelEntry } from '../models/scanner'
 import type { ComfyGuard } from '../engines/comfy-guard'
-import { resolveProfile, profileToArgs, type LoadProfile } from '../models/profile'
+import { resolveProfile, profileToArgs, vllmProfileToArgs, type LoadProfile } from '../models/profile'
 import { mlxSamplingArgs } from '../engines/mlx'
 import { engineAcceptsFormat } from '../engines/compat'
 import { getSysInfo } from '../sysinfo/sysinfo'
@@ -250,8 +250,13 @@ export class ModelRouter {
         engine,
         model: { key: entry.key, name: entry.name, quant: entry.quant, ctx: entry.nativeCtx, vision: false },
         modelPath: entry.path,
-        // MLX honors sampling as launch defaults; vLLM takes no extra flags here.
-        extraArgs: engine.kind === 'mlx' ? mlxSamplingArgs(savedProfile?.sampling) : [],
+        // MLX honors sampling as launch defaults; vLLM honors its own load controls (F-027).
+        extraArgs:
+          engine.kind === 'mlx'
+            ? mlxSamplingArgs(savedProfile?.sampling)
+            : engine.kind === 'vllm'
+              ? vllmProfileToArgs(resolveProfile(entry, sys, savedProfile, undefined, cfg.modelDefaults))
+              : [],
         tensorParallelSize: savedProfile?.gpu?.tensorParallelSize,
       }
     }

@@ -5,7 +5,7 @@ import { Button } from '../components/ui/button'
 import { toast } from '../components/ui/sonner'
 import { useMcpMutations, useSettings } from '../lib/queries'
 import { ApiError } from '../lib/api'
-import type { McpServer } from '../lib/api'
+import type { McpServer, DaemonSettings, DaemonSettingsPatch, SearchProvider } from '../lib/api'
 
 export function CustomizeScreen() {
   const { query: settingsQ } = useSettings()
@@ -19,7 +19,7 @@ export function CustomizeScreen() {
       />
       <div className="flex flex-col gap-6">
         <ToolsSection
-          tavilyKeySet={settings?.tavilyKeySet ?? false}
+          search={settings?.search ?? { provider: 'tavily', tavilyKeySet: false, kagiKeySet: false, searxngUrl: '' }}
           onSaved={() => void settingsQ.refetch()}
         />
         <McpSection servers={settings?.mcp?.servers ?? []} />
@@ -28,20 +28,45 @@ export function CustomizeScreen() {
   )
 }
 
-// ── Tools — Tavily web search key ────────────────────────────────────────────
+// ── Tools — web search provider (Tavily / Kagi / SearXNG, F-020) ─────────────
 
-function ToolsSection({ tavilyKeySet, onSaved }: { tavilyKeySet: boolean; onSaved: () => void }) {
+type ProviderMeta = { id: SearchProvider; label: string; blurb: string; getKey?: string }
+const PROVIDERS: ProviderMeta[] = [
+  { id: 'tavily', label: 'Tavily', blurb: 'AI-search API tuned for LLMs. Reliable default.', getKey: 'https://app.tavily.com' },
+  { id: 'kagi', label: 'Kagi', blurb: 'Premium search, no bot-blocking, no tracking ($0.012/query).', getKey: 'https://kagi.com/settings?p=api' },
+  { id: 'searxng', label: 'SearXNG', blurb: 'Your own self-hosted meta-search. Fully local — no key, just a URL.' },
+]
+
+function ToolsSection({ search, onSaved }: { search: DaemonSettings['search']; onSaved: () => void }) {
   const { save } = useSettings()
-  const [key, setKey] = useState('')
+  const [provider, setProvider] = useState<SearchProvider>(search.provider)
+  const [secret, setSecret] = useState('') // key (tavily/kagi) or URL (searxng)
+
+  const meta = PROVIDERS.find((p) => p.id === provider)!
+  const isUrl = provider === 'searxng'
+  const configured = provider === 'tavily' ? search.tavilyKeySet : provider === 'kagi' ? search.kagiKeySet : !!search.searxngUrl
+
+  // Switching the segmented control resets the input and pre-fills the SearXNG URL.
+  const pick = (p: SearchProvider) => {
+    setProvider(p)
+    setSecret(p === 'searxng' ? search.searxngUrl : '')
+  }
 
   const handleSave = () => {
-    save.mutate({ tavilyApiKey: key.trim() }, {
+    const v = secret.trim()
+    const patch: DaemonSettingsPatch['search'] = { provider }
+    // Secrets: only send when the user typed something (avoid wiping a stored key on a bare
+    // provider switch). The SearXNG URL is visible/echoed, so an empty box genuinely clears it.
+    if (isUrl) patch.searxngUrl = v
+    else if (v && provider === 'tavily') patch.tavilyApiKey = v
+    else if (v && provider === 'kagi') patch.kagiApiKey = v
+    save.mutate({ search: patch }, {
       onSuccess: () => {
-        toast.success(key.trim() ? 'Tavily API key saved' : 'Tavily API key cleared')
-        setKey('')
+        toast.success(`Search set to ${meta.label}${v ? ` — ${isUrl ? 'URL' : 'key'} saved` : ''}`)
+        if (!isUrl) setSecret('')
         onSaved()
       },
-      onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not save the key.'),
+      onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not save search settings.'),
     })
   }
 
@@ -49,38 +74,52 @@ function ToolsSection({ tavilyKeySet, onSaved }: { tavilyKeySet: boolean; onSave
     <section className="rounded-lg border border-border bg-panel p-4">
       <h2 className="mb-1 text-[13px] font-semibold uppercase tracking-wide text-faint">Web Search</h2>
       <p className="mb-3 text-[12px] text-muted">
-        Tavily AI-search API. When configured, the model can call the{' '}
-        <span className="font-mono text-ink">web_search</span> tool automatically.{' '}
-        <a
-          href="https://app.tavily.com"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-ink underline-offset-2 hover:underline"
-        >
-          Get a key
-        </a>
-        .
+        Choose a search provider. When one is configured, the model can call the{' '}
+        <span className="font-mono text-ink">web_search</span> tool automatically.
+      </p>
+
+      <div className="mb-3 inline-flex rounded-md border border-border p-0.5">
+        {PROVIDERS.map((p) => (
+          <button
+            key={p.id}
+            onClick={() => pick(p.id)}
+            className={`rounded px-3 py-1 text-[13px] transition-colors ${
+              provider === p.id ? 'bg-bg text-ink' : 'text-muted hover:text-ink'
+            }`}
+          >
+            {p.label}
+          </button>
+        ))}
+      </div>
+
+      <p className="mb-2 text-[12px] text-muted">
+        {meta.blurb}{' '}
+        {meta.getKey && (
+          <a href={meta.getKey} target="_blank" rel="noopener noreferrer" className="text-ink underline-offset-2 hover:underline">
+            Get a key
+          </a>
+        )}
       </p>
 
       <div className="mb-2 text-[13px] text-muted">
-        {tavilyKeySet ? (
+        {configured ? (
           <span className="inline-flex items-center gap-1.5 text-ink">
-            <Check size={13} style={{ color: 'var(--ok)' }} /> A key is configured
+            <Check size={13} style={{ color: 'var(--ok)' }} /> {isUrl ? 'A URL is configured' : 'A key is configured'}
           </span>
-        ) : 'No key configured'}
+        ) : isUrl ? 'No URL configured' : 'No key configured'}
       </div>
 
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <input
-          type="password"
-          value={key}
-          onChange={(e) => setKey(e.target.value)}
-          placeholder={tavilyKeySet ? 'Enter a new key to replace the current one' : 'tvly-…'}
+          type={isUrl ? 'text' : 'password'}
+          value={secret}
+          onChange={(e) => setSecret(e.target.value)}
+          placeholder={isUrl ? 'http://localhost:8888' : configured ? 'Enter a new key to replace the current one' : provider === 'tavily' ? 'tvly-…' : 'Kagi API key'}
           autoComplete="off"
           className="flex-1 rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-[13px] text-ink outline-none"
         />
         <Button size="sm" onClick={handleSave} disabled={save.isPending}>
-          {key.trim() ? 'Save key' : 'Clear key'}
+          Save
         </Button>
       </div>
 

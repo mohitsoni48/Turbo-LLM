@@ -118,7 +118,11 @@ export function getEngineBackends(): Promise<EngineBackends> {
   return request<EngineBackends>('/api/v1/engines/backends')
 }
 
-export function installBackend(backend: string): Promise<{ accepted: true; backend: string }> {
+/** Install/update a llama.cpp backend build. When the current pinned build is already installed,
+ *  the daemon returns `{ accepted: false, alreadyLatest: true, build }` (no download). */
+export function installBackend(
+  backend: string,
+): Promise<{ accepted: boolean; backend?: string; alreadyLatest?: boolean; build?: string }> {
   return request('/api/v1/engines/backends/install', { method: 'POST', json: { backend } })
 }
 
@@ -157,6 +161,37 @@ export function removeEngine(id: string): Promise<{ ok: true }> {
   return request<{ ok: true }>(`/api/v1/engines/${encodeURIComponent(id)}`, {
     method: 'DELETE',
   })
+}
+
+/** Unregister a catalog engine AND delete its installed files from disk.
+ *  Models are never touched — only the engine's install dir under engines/. */
+export function purgeEngine(id: string): Promise<{ ok: true }> {
+  return request<{ ok: true }>(`/api/v1/engines/${encodeURIComponent(id)}?purge=1`, {
+    method: 'DELETE',
+  })
+}
+
+/** Enable an installed llama.cpp backend without re-downloading (register + activate). */
+export function enableBackend(id: string): Promise<{ ok: true; engineId: string }> {
+  return request<{ ok: true; engineId: string }>(
+    `/api/v1/engines/backends/${encodeURIComponent(id)}/enable`,
+    { method: 'POST' },
+  )
+}
+
+/** Update (upgrade) the vLLM engine to the latest release (passes -U to uv pip install). */
+export function updateVllm(): Promise<{ accepted: true; engine: 'vllm' }> {
+  return request('/api/v1/engines/vllm?update=1', { method: 'POST', json: {} })
+}
+
+/** Update (upgrade) the MLX engine to the latest release (passes --upgrade to uv pip install). */
+export function updateMlx(): Promise<{ accepted: true; engine: 'mlx' }> {
+  return request('/api/v1/engines/mlx?update=1', { method: 'POST', json: {} })
+}
+
+/** Update (re-download latest release) the TurboQuant engine. */
+export function updateTurboquant(): Promise<{ accepted: true; engine: 'turboquant' }> {
+  return request('/api/v1/engines/turboquant?update=1', { method: 'POST', json: {} })
 }
 
 export function activateEngine(id: string): Promise<{ ok: true }> {
@@ -287,6 +322,11 @@ export function cancelBench(): Promise<{ ok: true }> {
   return request<{ ok: true }>('/api/v1/bench/cancel', { method: 'POST', json: {} })
 }
 
+/** Persist the finished auto-tune's winning profile (the user clicked Save). 409 if nothing to save. */
+export function saveBench(): Promise<{ ok: true }> {
+  return request<{ ok: true }>('/api/v1/bench/save', { method: 'POST', json: {} })
+}
+
 // ── Settings (daemon config UI subset) ───────────────────────────────────────
 /** Global model defaults (spec 05 §3): base load values applied to never-seen
  *  models that have no saved per-model profile. */
@@ -365,21 +405,38 @@ export type DaemonSettings = {
   hfTokenSet: boolean
   /** Gateway intelligence settings (ADR-06x): model auto-swap + keep-N pool. */
   gateway: { autoSwap: boolean; keepN: number }
-  /** Whether a Tavily API key is configured (the key itself is never echoed back). */
+  /** Whether a Tavily API key is configured (legacy mirror of `search.tavilyKeySet`). */
   tavilyKeySet: boolean
+  /** Web-search provider config (F-020). Keys are write-only — only "is it set" booleans
+   *  come back; `searxngUrl` is not a secret so it is echoed. */
+  search: {
+    provider: SearchProvider
+    tavilyKeySet: boolean
+    kagiKeySet: boolean
+    searxngUrl: string
+  }
   /** MCP server list. */
   mcp: { servers: McpServer[] }
 }
+
+export type SearchProvider = 'tavily' | 'kagi' | 'searxng'
 
 /** Settings patch: the persisted {@link DaemonSettings} fields plus a write-only
  *  `hfToken` (spec 10 §4) that sets/clears the stored Hugging Face token. `comfyui`
  *  is patchable per-field (only `enabled` is set here; `gatePath` is owned by the
  *  install endpoints). */
-export type DaemonSettingsPatch = Partial<Omit<DaemonSettings, 'comfyui' | 'tavilyKeySet' | 'mcp'>> & {
+export type DaemonSettingsPatch = Partial<Omit<DaemonSettings, 'comfyui' | 'tavilyKeySet' | 'search' | 'mcp'>> & {
   comfyui?: Partial<ComfyUiSettings>
   hfToken?: string
-  /** Write-only: set or clear the Tavily API key. */
+  /** Write-only: set or clear the Tavily API key (legacy alias for `search.tavilyApiKey`). */
   tavilyApiKey?: string
+  /** Write-only search-provider patch (F-020). Key/URL fields set or clear ('') the stored value. */
+  search?: {
+    provider?: SearchProvider
+    tavilyApiKey?: string
+    kagiApiKey?: string
+    searxngUrl?: string
+  }
 }
 
 export function getSettings(): Promise<DaemonSettings> {
@@ -532,5 +589,56 @@ export function chatCompletion(input: {
   return request<ChatCompletionResponse>('/v1/chat/completions', {
     method: 'POST',
     json: { model: input.model, messages: input.messages, stream: false },
+  })
+}
+
+// ── F-023: chat share ─────────────────────────────────────────────────────────
+
+/** Get the LAN share URL for a conversation.
+ *  Returns { url, onlyLocal } — onlyLocal=true when no LAN interface was found. */
+export function getShareUrl(convId: string): Promise<{ url: string; onlyLocal: boolean }> {
+  return request<{ url: string; onlyLocal: boolean }>(`/api/v1/conversations/${encodeURIComponent(convId)}/share-url`)
+}
+
+/** Fetch the debug snapshot JSON string for a conversation (format=debug). */
+export async function getDebugSnapshot(convId: string): Promise<string> {
+  const res = await fetch(`/api/v1/conversations/${encodeURIComponent(convId)}/export?format=debug`, {
+    headers: { Accept: 'application/json', ...authHeaders() },
+  })
+  if (!res.ok) throw new ApiError('export_failed', `Export failed with status ${res.status}.`, res.status)
+  return res.text()
+}
+
+// ── F-024: export / import chat ───────────────────────────────────────────────
+
+/** Trigger a browser download of the chat as a .turbollm-chat.json file. */
+export function downloadChatExport(convId: string): void {
+  // Build a hidden anchor with auth header isn't possible; use a form or direct href.
+  // Since the auth token may be needed, fetch the blob and trigger download via object URL.
+  const headers: Record<string, string> = { Accept: 'application/json', ...authHeaders() }
+  fetch(`/api/v1/conversations/${encodeURIComponent(convId)}/export?format=export`, { headers })
+    .then(async (res) => {
+      if (!res.ok) throw new Error(`Export failed with status ${res.status}`)
+      const cd = res.headers.get('Content-Disposition') ?? ''
+      const nameMatch = cd.match(/filename="([^"]+)"/)
+      const filename = nameMatch ? nameMatch[1] : 'chat.turbollm-chat.json'
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    })
+    .catch(() => { /* silently ignore — caller shows error via toast */ })
+}
+
+/** Import a chat from a parsed JSON object. Returns the new conversation id. */
+export function importChat(payload: unknown): Promise<{ id: string }> {
+  return request<{ id: string }>('/api/v1/conversations/import', {
+    method: 'POST',
+    json: payload,
   })
 }

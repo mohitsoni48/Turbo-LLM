@@ -46,6 +46,7 @@ export function App() {
       <Shell status={statusQ.data} online={online} version={version}>
         <Routes>
           <Route path="/chat" element={<ChatScreen />} />
+          <Route path="/chat/:convId" element={<ChatScreen />} />
           <Route path="/models" element={<ModelsScreen />} />
           <Route path="/engines" element={<EnginesScreen />} />
           <Route path="/developer" element={<DeveloperScreen />} />

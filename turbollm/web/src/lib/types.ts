@@ -82,6 +82,9 @@ export type BenchState = {
   candidates?: BenchCandidate[]
   done?: boolean
   error?: string
+  /** Winning candidate of a finished run — drives the Save/Cancel results dialog. The profile is
+   *  only persisted when the user clicks Save (POST /bench/save). */
+  result?: { params: BenchCandidate['params']; tps: number; ttftMs: number; vramMb: number | null }
 }
 
 /** Live per-request progress for the engine card (spec 11), from GET /api/v1/status.
@@ -149,11 +152,15 @@ export type EnginesList = {
 }
 
 /** A selectable llama.cpp backend variant (ADR-025). A "build" of the official
- *  engine. `engineId` is the registered engine to activate once installed. */
+ *  engine. `engineId` is the registered engine to activate once installed.
+ *  `enabled` = a registry engine entry exists for this binary (files on disk + registered).
+ *  `installed` = binary files exist on disk (superset of `enabled`). */
 export type BackendInfo = {
   id: string
   label: string
   installed: boolean
+  /** True when the binary is registered in the engine registry (installed + enabled). */
+  enabled: boolean
   recommended: boolean
   active: boolean
   engineId: string
@@ -162,6 +169,8 @@ export type BackendInfo = {
 export type MlxInfo = {
   supported: boolean
   installed: boolean
+  /** True when the MLX engine is registered in the engine registry. */
+  enabled: boolean
   active: boolean
   engineId: string
 }
@@ -194,8 +203,10 @@ export type CatalogEngine = {
   note?: string
   /** Whether this engine can run on the current OS. */
   supportedHere: boolean
-  /** For pip engines: whether one of this kind is already registered. */
+  /** Whether the engine's files exist on disk (disk-based check). */
   installed?: boolean
+  /** Whether a registry engine entry exists for this engine (files installed AND registered). */
+  enabled?: boolean
 }
 
 export type EngineCatalog = {
@@ -318,6 +329,8 @@ export type LoadProfile = {
   ropeFreqScale: number
   /** Multi-GPU split settings (ADR-054). Mirrors the daemon's GpuProfile. */
   gpu: GpuProfile
+  /** vLLM-specific load controls (F-027). Mirrors the daemon's VllmProfile. */
+  vllm: VllmProfile
   extraArgs: string[]
   tunedBy?: string
 }
@@ -335,6 +348,37 @@ export type GpuProfile = {
 
 export function defaultGpu(): GpuProfile {
   return { splitMode: 'layer', tensorSplit: [], mainGpu: -1, tensorParallelSize: 1 }
+}
+
+/** vLLM load controls (F-027). Mirrors the daemon's VllmProfile; maps to vLLM CLI flags.
+ *  Defaults match vLLM's own, so an untouched profile changes nothing at launch. */
+export type VllmProfile = {
+  /** --max-model-len (0 = derive from the model config). */
+  maxModelLen: number
+  /** --gpu-memory-utilization 0–1 (0.9 = vLLM default). */
+  gpuMemoryUtilization: number
+  /** --max-num-seqs concurrent sequences (0 = vLLM default). */
+  maxNumSeqs: number
+  /** --dtype compute precision. */
+  dtype: 'auto' | 'bfloat16' | 'float16' | 'float32'
+  /** --kv-cache-dtype (fp8 ~halves KV memory). */
+  kvCacheDtype: 'auto' | 'fp8'
+  /** --enforce-eager (skip CUDA graphs: less VRAM, slower). */
+  enforceEager: boolean
+  /** --trust-remote-code (models shipping custom modelling code). */
+  trustRemoteCode: boolean
+}
+
+export function defaultVllm(): VllmProfile {
+  return {
+    maxModelLen: 0,
+    gpuMemoryUtilization: 0.9,
+    maxNumSeqs: 0,
+    dtype: 'auto',
+    kvCacheDtype: 'auto',
+    enforceEager: false,
+    trustRemoteCode: false,
+  }
 }
 
 export type FitVerdict = 'fits' | 'tight' | 'overflow' | 'cpu' | 'unknown'

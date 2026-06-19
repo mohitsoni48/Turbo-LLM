@@ -1,6 +1,9 @@
 // Built-in tool definitions and execution (v0.7.0).
 // Tools: web_search (Tavily), fetch_url, run_code (Node vm sandbox).
 import { runInNewContext } from 'node:vm'
+import { checkSsrf, RUN_CODE_BLOCKED_MSG } from './security.js'
+import { type SearchConfig } from './search-providers.js'
+import { research, type ResearchResult } from './research-service.js'
 
 // ── Tool JSON-schema definitions (OpenAI tool format) ─────────────────────
 
@@ -11,7 +14,8 @@ export const WEB_SEARCH_TOOL = {
     description:
       'Search the web for real-time information. Call this BEFORE answering any question that depends on current events, recent data, prices, specific facts, or anything your training data may not cover accurately. ' +
       'Formulate a precise, keyword-focused query — include names, dates, or version numbers when relevant. ' +
-      'Run multiple focused searches rather than one broad one for complex questions.',
+      'Run multiple focused searches rather than one broad one for complex questions. ' +
+      'Results are pre-ranked by relevance — each entry includes a relevanceScore (0–1), a key passage, and a source URL.',
     parameters: {
       type: 'object',
       properties: {
@@ -22,7 +26,16 @@ export const WEB_SEARCH_TOOL = {
             'Good: "Python 3.13 release date new features". Bad: "Python new stuff". ' +
             'Good: "NVIDIA RTX 5090 benchmark 2025". Bad: "new GPU benchmarks".',
         },
-        max_results: { type: 'number', description: 'Number of results to return (default 5, max 10).' },
+        intent: {
+          type: 'string',
+          enum: ['factual', 'recent_news', 'comparison', 'how_to'],
+          description: 'Optional: the type of answer needed. Helps the retrieval service weight results appropriately.',
+        },
+        freshness: {
+          type: 'string',
+          enum: ['current', 'any'],
+          description: 'Optional: "current" penalises results older than 90 days. Use for breaking news or time-sensitive queries.',
+        },
       },
       required: ['query'],
     },
@@ -59,59 +72,32 @@ export const RUN_CODE_TOOL = {
   },
 }
 
-// ── Tavily web search ─────────────────────────────────────────────────────
+// ── Web search — F-021 retrieval service ──────────────────────────────────────
 
-interface TavilyResult {
-  title: string
-  url: string
-  content: string
-  score: number
-}
+export { type ResearchResult }
 
-interface TavilyResponse {
-  results?: TavilyResult[]
-  answer?: string
-}
-
-export async function execWebSearch(args: Record<string, unknown>, tavilyApiKey: string): Promise<string> {
+export async function execWebSearch(args: Record<string, unknown>, searchCfg: SearchConfig): Promise<string> {
   const query = String(args.query ?? '')
   if (!query.trim()) return 'Error: query is required.'
-  const maxResults = Math.min(10, Math.max(1, Number(args.max_results ?? 5) || 5))
 
-  let resp: Response
+  const intent = typeof args.intent === 'string' ? args.intent : undefined
+  const freshness = args.freshness === 'current' || args.freshness === 'any' ? args.freshness : undefined
+
+  let results: ResearchResult[]
   try {
-    resp = await fetch('https://api.tavily.com/search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        api_key: tavilyApiKey,
-        query,
-        max_results: maxResults,
-        search_depth: 'advanced',
-        include_answer: true,
-      }),
-      signal: AbortSignal.timeout(20_000),
-    })
+    results = await research({ query, intent, freshness }, searchCfg)
   } catch (e) {
-    return `Error: could not reach Tavily — ${(e as Error).message}`
+    return `Error: could not reach the ${searchCfg.provider} search provider — ${(e as Error).message}`
   }
 
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '')
-    return `Error: Tavily returned ${resp.status}${text ? ` — ${text.slice(0, 200)}` : ''}`
-  }
-
-  const data = (await resp.json()) as TavilyResponse
-  const results = data.results ?? []
   if (results.length === 0) return 'No results found.'
 
-  const lines: string[] = []
-  if (data.answer) lines.push(`ANSWER: ${data.answer}\n`)
-  lines.push(`SOURCES (${results.length} results for "${query}"):`)
+  const lines: string[] = [`RESEARCH RESULTS (${results.length} ranked results for "${query}"):`]
   for (const [i, r] of results.entries()) {
     lines.push(`\n[${i + 1}] ${r.title}`)
     lines.push(`Source: ${r.url}`)
-    lines.push(r.content.slice(0, 700))
+    lines.push(`Domain: ${r.domain} | Relevance: ${r.relevanceScore.toFixed(2)} | Freshness: ${r.freshnessSignal}`)
+    lines.push(`Key passage: ${r.passage}`)
   }
   return lines.join('\n').trim()
 }
@@ -122,6 +108,9 @@ export async function execFetchUrl(args: Record<string, unknown>): Promise<strin
   const url = String(args.url ?? '').trim()
   if (!url) return 'Error: url is required.'
   if (!/^https?:\/\//i.test(url)) return 'Error: URL must start with http:// or https://'
+
+  const ssrfErr = await checkSsrf(url)
+  if (ssrfErr) return ssrfErr
 
   let resp: Response
   try {
@@ -161,9 +150,10 @@ export async function execFetchUrl(args: Record<string, unknown>): Promise<strin
 
 // ── Run code ─────────────────────────────────────────────────────────────
 
-export function execRunCode(args: Record<string, unknown>): string {
+export function execRunCode(args: Record<string, unknown>, requireConfirmation = false): string {
   const code = String(args.code ?? '').trim()
   if (!code) return 'Error: code is required.'
+  if (requireConfirmation) return RUN_CODE_BLOCKED_MSG
 
   const output: string[] = []
   const sandbox = {

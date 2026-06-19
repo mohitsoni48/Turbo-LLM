@@ -25,9 +25,15 @@ import {
   getTelemetryPreview,
   cancelBackendDownload,
   cancelBench,
+  saveBench,
   createApiKey,
   deleteApiKey,
   deleteEngineBackend,
+  enableBackend,
+  purgeEngine,
+  updateVllm,
+  updateMlx,
+  updateTurboquant,
   getStatus,
   startBench,
   getSettings,
@@ -137,6 +143,13 @@ export function useBenchActions() {
       },
     }),
     cancel: useMutation({ mutationFn: () => cancelBench(), onSuccess: invalidate }),
+    save: useMutation({
+      mutationFn: () => saveBench(),
+      onSuccess: (_d, _v) => {
+        invalidate()
+        void qc.invalidateQueries({ queryKey: ['model'] })
+      },
+    }),
   }
 }
 
@@ -192,6 +205,14 @@ export function useBackendInstall() {
     turboquant: useMutation({ mutationFn: () => installTurboquant(), onSuccess: invalidate }),
     cancel: useMutation({ mutationFn: () => cancelBackendDownload(), onSuccess: invalidate }),
     remove: useMutation({ mutationFn: (id: string) => deleteEngineBackend(id), onSuccess: invalidate }),
+    // Enable registers an already-installed backend binary without re-downloading.
+    enableBackend: useMutation({ mutationFn: (id: string) => enableBackend(id), onSuccess: invalidate }),
+    // Update re-provisions each engine kind to the latest release.
+    updateVllm: useMutation({ mutationFn: () => updateVllm(), onSuccess: invalidate }),
+    updateMlx: useMutation({ mutationFn: () => updateMlx(), onSuccess: invalidate }),
+    updateTurboquant: useMutation({ mutationFn: () => updateTurboquant(), onSuccess: invalidate }),
+    // Backend update re-runs the provision (same as install, idempotent via re-download).
+    updateBackend: useMutation({ mutationFn: (id: string) => installBackend(id), onSuccess: invalidate }),
   }
 }
 
@@ -203,6 +224,7 @@ export function useEngineMutations() {
     // Activating/removing an engine changes the official backends' active/installed
     // projection too — keep the Engine→Build selector in sync.
     void qc.invalidateQueries({ queryKey: queryKeys.engineBackends })
+    void qc.invalidateQueries({ queryKey: queryKeys.engineCatalog })
   }
 
   return {
@@ -216,6 +238,11 @@ export function useEngineMutations() {
     }),
     remove: useMutation({
       mutationFn: (id: string) => removeEngine(id),
+      onSuccess: invalidate,
+    }),
+    /** Purge: unregister + delete files from disk (catalog engines only, never models). */
+    purge: useMutation({
+      mutationFn: (id: string) => purgeEngine(id),
       onSuccess: invalidate,
     }),
     activate: useMutation({

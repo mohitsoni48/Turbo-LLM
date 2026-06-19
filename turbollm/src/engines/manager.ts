@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path'
 import type { ConfigStore, Engine } from '../config/config'
 import { mlxServerCommand } from './mlx'
 import { slotCacheDir } from './slot-cache'
-import { vllmServerCommand } from './vllm'
+import { vllmServerCommand, vllmServeBlocker } from './vllm'
 
 export type State = 'stopped' | 'starting' | 'running' | 'stopping' | 'error'
 
@@ -198,6 +198,19 @@ export class Manager {
     if (!opts.engine.binPath) throw new Error('no_active_engine')
     if (!opts.modelPath) throw new Error('no_such_model')
 
+    // Engine preflight (ADR-080): refuse to spawn vLLM where it can't actually serve (e.g.
+    // Windows, where its uvloop/NCCL deps don't exist) and surface a clear, actionable error
+    // instead of letting the process crash on import with a raw Python traceback. Mirrors the
+    // engine-capability concept: know what the engine can do on this machine before launching it.
+    if (opts.engine.kind === 'vllm') {
+      const blocker = await vllmServeBlocker(opts.engine.binPath)
+      if (blocker) {
+        this.state = 'error'
+        this.errInfo = { code: 'engine_unsupported', message: blocker, exitCode: -1, logTail: [] }
+        return
+      }
+    }
+
     const port = await allocPort()
     const logPath = join(this.store.dir(), 'logs', `engine-${opts.engine.id}.log`)
     mkdirSync(dirname(logPath), { recursive: true })
@@ -308,6 +321,16 @@ export class Manager {
       if (this.state === 'starting') st.loadElapsedMs = Date.now() - this.startedAt
     }
     return st
+  }
+
+  /** Clear a terminal error so a stale failure (e.g. a vLLM load that failed because the
+   *  active engine couldn't serve here) doesn't linger in the UI after the user switches
+   *  engines. No-op unless currently in 'error' — never disturbs a running/starting engine. */
+  clearError(): void {
+    if (this.state === 'error') {
+      this.state = 'stopped'
+      this.errInfo = null
+    }
   }
 
   target(): string | null {
@@ -495,7 +518,7 @@ function engineCommand(opts: StartOpts, port: number, slotSavePath?: string): { 
     // vLLM: run the OpenAI server via the provisioned venv python. modelPath is an
     // HF repo id or a local safetensors dir; llama.cpp LoadProfile flags don't apply,
     // but the multi-GPU shard count (ADR-054) maps to --tensor-parallel-size.
-    return vllmServerCommand(opts.engine.binPath, opts.modelPath, port, '127.0.0.1', opts.tensorParallelSize)
+    return vllmServerCommand(opts.engine.binPath, opts.modelPath, port, '127.0.0.1', opts.tensorParallelSize, opts.extraArgs)
   }
   return { cmd: opts.engine.binPath, args: buildArgs(opts, port, slotSavePath) }
 }

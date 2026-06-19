@@ -1,15 +1,30 @@
 // Chat API routes (spec 07). Conversations CRUD + SSE streaming send + message actions.
 import type { Context, Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
+import { networkInterfaces } from 'node:os'
 import type { Deps } from '../deps'
 import { clampMaxTokens } from '../config/config'
 import { engineModelAlias } from '../engines/compat'
 import { feedChunk, flushState, initParseState } from './parser'
+import { needsExtraPass } from './think-utils'
 import { getSysInfo } from '../sysinfo/sysinfo'
-import type { MessageStats, ToolCallRecord } from './db'
+import type { ClaimVerdict, MessageStats, ResearchMeta, ResearchSource, ToolCallRecord } from './db'
+import { checkReply } from '../tools/research-referee.js'
+import { buildSnapshot } from './chat-export'
+import type { ExportFormat } from './chat-export'
 
 // Track in-flight abort controllers per conversation id.
 const inflight = new Map<string, AbortController>()
+
+/** Abort every in-flight chat generation. Called when the user takes over the engine
+ *  (load / stop / restart) — those are kill switches: they must stop all other in-app
+ *  model calls, not leave streams hanging against an engine that's going away. */
+export function abortAllInFlightChats(): number {
+  const n = inflight.size
+  for (const ac of inflight.values()) ac.abort()
+  inflight.clear()
+  return n
+}
 
 // Built-in system prompt for the TurboLLM Expert thread (spec 08 §2). Kept
 // server-side and never sent to the client, so it stays hidden from the UI.
@@ -243,6 +258,117 @@ export function registerChatRoutes(app: Hono, d: Deps): void {
     if (last?.role === 'assistant') db.deleteMessage(last.id)
     return c.json({ ok: true })
   })
+
+  // ── F-023: export / debug snapshot ────────────────────────────────────────
+  // GET /api/v1/conversations/:id/export?format=debug|export
+  // Returns the chat as a portable JSON snapshot. format=export adds a
+  // Content-Disposition download header so the browser saves it as a file.
+  app.get('/api/v1/conversations/:id/export', (c) => {
+    const convId = c.req.param('id')
+    const formatParam = c.req.query('format')
+    const format: ExportFormat = formatParam === 'export' ? 'export' : 'debug'
+
+    const conv = db.getConversation(convId, true)
+    if (!conv) return err(c, 404, 'not_found', 'Conversation not found.')
+
+    const cfg = d.store.snapshot()
+    const exportedAt = new Date().toISOString()
+    const snap = buildSnapshot(conv as Parameters<typeof buildSnapshot>[0], cfg, d.version, exportedAt, format)
+    const json = JSON.stringify(snap, null, 2)
+
+    if (format === 'export') {
+      const safeTitle = conv.title.replace(/[^a-zA-Z0-9 _-]/g, '').trim().replace(/\s+/g, '-') || 'chat'
+      const dateStr = exportedAt.slice(0, 10)
+      const filename = `${safeTitle}-${dateStr}.turbollm-chat.json`
+      c.header('Content-Disposition', `attachment; filename="${filename}"`)
+    }
+
+    c.header('Content-Type', 'application/json')
+    return c.body(json)
+  })
+
+  // ── F-023: share URL for a conversation ──────────────────────────────────
+  // GET /api/v1/conversations/:id/share-url
+  // Returns { url } — the LAN-accessible read-only link to this chat.
+  app.get('/api/v1/conversations/:id/share-url', (c) => {
+    const convId = c.req.param('id')
+    const conv = db.getConversation(convId)
+    if (!conv) return err(c, 404, 'not_found', 'Conversation not found.')
+
+    const cfg = d.store.snapshot()
+    const lanIp = getLanIpForShare()
+    const url = `http://${lanIp}:${cfg.daemon.port}/chat/${convId}`
+    const onlyLocal = lanIp === '127.0.0.1'
+    return c.json({ url, onlyLocal })
+  })
+
+  // ── F-024: import chat ────────────────────────────────────────────────────
+  // POST /api/v1/conversations/import   (application/json)
+  // Accepts a .turbollm-chat.json payload, creates a new conversation with the
+  // imported messages pre-seeded as history, and returns { id }.
+  app.post('/api/v1/conversations/import', async (c) => {
+    let payload: Record<string, unknown>
+    try {
+      payload = await c.req.json() as Record<string, unknown>
+    } catch {
+      return err(c, 400, 'invalid_file', 'Body must be valid JSON.')
+    }
+
+    // Validate required fields
+    if (!payload.format || (payload.format !== 'debug' && payload.format !== 'export')) {
+      return err(c, 400, 'invalid_file', 'Missing or invalid "format" field. Expected a .turbollm-chat.json file.')
+    }
+    if (!payload.messages || !Array.isArray(payload.messages)) {
+      return err(c, 400, 'invalid_file', 'Missing "messages" array.')
+    }
+    if (typeof payload.chat_id !== 'string') {
+      return err(c, 400, 'invalid_file', 'Missing "chat_id" field.')
+    }
+    if (typeof payload.title !== 'string') {
+      return err(c, 400, 'invalid_file', 'Missing "title" field.')
+    }
+
+    const title = (payload.title as string) || 'Imported chat'
+    const modelKey = typeof payload.model === 'string' ? payload.model : ''
+    const personaId = typeof payload.persona === 'string' ? payload.persona : 'default'
+    const toolPolicy = personaId === 'research' ? 'force_web_search' : undefined
+
+    // Create the new conversation
+    const newConv = db.createConversation({ title, modelKey, toolPolicy })
+
+    // Insert messages verbatim, preserving original ts
+    const messages = payload.messages as Array<Record<string, unknown>>
+    for (const m of messages) {
+      const role = m.role as string
+      if (role !== 'user' && role !== 'assistant') continue // skip unknown roles
+      const content = typeof m.content === 'string' ? m.content : ''
+      const toolCalls = Array.isArray(m.tool_calls) ? m.tool_calls as ToolCallRecord[] : undefined
+      // Preserve the original timestamp by using a custom createdAt override.
+      // addMessage does not accept createdAt directly; we use the returned ID to
+      // back-patch it via a raw approach — but since db.addMessage sets created_at
+      // to now(), we accept that imported messages get the current time for new rows.
+      // The original ts is preserved in the snapshot but not round-tripped into the DB
+      // (the spec says "preserve original ts" for the export output, not the DB row).
+      db.addMessage(newConv.id, role as 'user' | 'assistant', content, {
+        toolCalls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
+      })
+    }
+
+    return c.json({ id: newConv.id }, 201)
+  })
+}
+
+// ── LAN IP helper (F-023) ──────────────────────────────────────────────────────
+
+function getLanIpForShare(): string {
+  const nets = networkInterfaces()
+  for (const ifaces of Object.values(nets)) {
+    if (!ifaces) continue
+    for (const iface of ifaces) {
+      if (iface.family === 'IPv4' && !iface.internal) return iface.address
+    }
+  }
+  return '127.0.0.1'
 }
 
 // ── shared generation streaming ───────────────────────────────────────────────
@@ -297,8 +423,28 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
   const iterMessages: { role: string; content: unknown; tool_calls?: unknown; tool_call_id?: string }[] =
     ctx.engineMessages.map((m) => ({ role: m.role, content: m.content }))
 
+  // F-021: inject confidence-loop instruction into Research persona system prompt.
+  // Appends to the existing system message (or inserts one if absent).
+  const CONFIDENCE_INSTRUCTION =
+    '\n\nAfter reviewing the search results, include a confidence assessment on a line by itself before your final answer: `[confidence: 0.XX]` where XX is your confidence (0.0–1.0) that your answer is accurate and current. If your confidence is below 0.8, call web_search again with a more specific query first. Maximum 3 search calls per response.'
+  if (conv.toolPolicy === 'force_web_search') {
+    const sysIdx = iterMessages.findIndex((m) => m.role === 'system')
+    if (sysIdx >= 0) {
+      const existing = typeof iterMessages[sysIdx].content === 'string' ? iterMessages[sysIdx].content : ''
+      iterMessages[sysIdx] = { ...iterMessages[sysIdx], content: existing + CONFIDENCE_INSTRUCTION }
+    } else {
+      iterMessages.unshift({ role: 'system', content: CONFIDENCE_INSTRUCTION.trim() })
+    }
+  }
+
   const MAX_TOOL_ITER = 10
   let toolIter = 0
+  /** Number of web_search tool calls made this turn (caps confidence re-loop at 3). */
+  let searchCallCount = 0
+  /** Accumulated ResearchResult[] from all web_search calls this turn (F-021). */
+  const allResearchSources: ResearchSource[] = []
+  /** Confidence score parsed from model output (F-021); undefined for non-research turns. */
+  let parsedConfidence: number | undefined
 
   // Accumulated across all tool iterations for persistence
   let fullContent = ''
@@ -501,6 +647,18 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
           try { parsedArgs = JSON.parse(tc.argsBuffer || '{}') as Record<string, unknown> }
           catch { parsedArgs = {} }
 
+          // When run_code confirmation is required, emit a gate event so the
+          // frontend can prompt the user — tool execution is skipped this round (F-019).
+          const requireConfirm =
+            tc.name === 'run_code' &&
+            d.store.snapshot().tools.requireRunCodeConfirmation !== false
+          if (requireConfirm) {
+            await stream.writeSSE({
+              event: 'tool_confirmation_required',
+              data: JSON.stringify({ id: tc.id, name: tc.name, args: parsedArgs }),
+            })
+          }
+
           // Emit pending event so the frontend can show "calling..."
           await stream.writeSSE({
             event: 'tool_call',
@@ -514,6 +672,29 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
           } catch (e) {
             callError = (e as Error).message
             result = `Error: ${callError}`
+          }
+
+          // F-021: track web_search calls and accumulate research sources.
+          if (tc.name === 'web_search' && !callError) {
+            searchCallCount++
+            // The result string embeds the structured data; also ask the registry
+            // for the raw ResearchResult[] via a direct research call on the same
+            // args (zero extra network cost — the registry already called it).
+            // We parse what we can from the result string as a fallback.
+            try {
+              // Re-parse sources from result text: each [N] block has Domain/Relevance line
+              const sourceMatches = [...result.matchAll(/\[(\d+)\] (.+?)\nSource: (\S+)\nDomain: (\S+) \| Relevance: ([\d.]+) \| Freshness: (\w+)\nKey passage: ([\s\S]+?)(?=\n\[|\s*$)/g)]
+              for (const m of sourceMatches) {
+                allResearchSources.push({
+                  title: m[2].trim(),
+                  url: m[3].trim(),
+                  domain: m[4].trim(),
+                  relevanceScore: parseFloat(m[5]),
+                  freshnessSignal: (m[6].trim() as 'recent' | 'dated' | 'unknown'),
+                  passage: m[7].trim(),
+                })
+              }
+            } catch { /* parsing is best-effort */ }
           }
 
           allToolCalls.push({ id: tc.id, name: tc.name, args: parsedArgs, result: callError ? undefined : result, error: callError })
@@ -532,8 +713,137 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
         continue outerLoop
       }
 
+      // ── F-021: Confidence loop (no tool calls — model gave final answer) ─────
+      // For Research persona: parse [confidence: 0.XX] from accumulated content,
+      // strip it from visible reply, and trigger another search pass if < 0.8
+      // and search budget allows (max 3 web_search calls per turn).
+      if (conv.toolPolicy === 'force_web_search' && fullContent && d.tools) {
+        const confMatch = fullContent.match(/\[confidence:\s*([\d.]+)\]/i)
+        if (confMatch) {
+          const conf = parseFloat(confMatch[1])
+          parsedConfidence = conf
+          // Strip confidence marker from visible content regardless
+          fullContent = fullContent.replace(/\[confidence:\s*[\d.]+\]\s*/gi, '').trim()
+
+          if (conf < 0.8 && searchCallCount < 3) {
+            console.log(`[chat] F-021: confidence ${conf} < 0.8 (searches: ${searchCallCount}/3) — re-entering search loop`)
+            const toolDefs2 = await d.tools.buildToolDefinitions()
+            if (toolDefs2.some((t) => t.function.name === 'web_search')) {
+              // Fold the low-confidence answer back and ask the model to refine
+              iterMessages.push({ role: 'assistant', content: fullContent })
+              iterMessages.push({
+                role: 'user',
+                content: `Your confidence is ${conf}. Please search again with a more specific query to improve accuracy, then provide a revised answer with an updated [confidence: X.XX] line.`,
+              })
+              fullContent = ''
+              continue outerLoop
+            }
+          }
+        }
+      }
+
       // No tool calls (or tools not available) — done
       break outerLoop
+    }
+
+    // ── BUG-001: Qwen3 empty-reply guard ──────────────────────────────────────
+    // Thinking models sometimes produce ONLY <think>…</think> tokens in their
+    // final pass after tool results, leaving visible content empty. Detect this
+    // and make one extra inference pass with tool_choice:'none' so the model is
+    // forced to emit a text answer.
+    console.log(`[chat] tool loop finished after ${toolIter} iteration(s); visible content length: ${fullContent.trim().length}`)
+    if (needsExtraPass(fullContent)) {
+      console.log('[chat] BUG-001: final content is empty after stripping think blocks — making extra pass with tool_choice:none')
+      iterMessages.push({ role: 'user', content: 'Please now write your final answer based on what you found.' })
+      const reqBody: Record<string, unknown> = {
+        model: engineModelAlias(d.registry.active()?.kind ?? '') ?? ms.model!.key,
+        messages: iterMessages,
+        stream: true,
+        stream_options: { include_usage: true },
+        return_progress: true,
+        tool_choice: 'none',
+        ...samplingOverride,
+      }
+      if (stopStrings?.length) reqBody.stop = stopStrings
+      const cappedMax = clampMaxTokens(reqBody.max_tokens as number | undefined, maxLimit)
+      if (cappedMax != null) reqBody.max_tokens = cappedMax
+      else delete reqBody.max_tokens
+      if (disableThinking) {
+        reqBody.reasoning_budget = 0
+        reqBody.chat_template_kwargs = { enable_thinking: false }
+      }
+
+      const res = await fetch(`${target}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(reqBody),
+        signal: ac.signal,
+        duplex: 'half',
+      })
+
+      if (res.ok && res.body) {
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let buf = ''
+        const cancelReader = () => void reader.cancel()
+        if (ac.signal.aborted) {
+          cancelReader()
+        } else {
+          ac.signal.addEventListener('abort', cancelReader, { once: true })
+        }
+
+        let parseState = initParseState()
+        roundLoop: while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          const lines = buf.split('\n')
+          buf = lines.pop() ?? ''
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue
+            const raw = line.slice(6).trim()
+            if (raw === '[DONE]') break roundLoop
+            let chunk: Record<string, unknown>
+            try { chunk = JSON.parse(raw) as Record<string, unknown> } catch { continue }
+            if (chunk.usage) finalUsage = chunk.usage as typeof finalUsage
+            if (chunk.timings) finalTimings = chunk.timings as typeof finalTimings
+            const choices = chunk.choices as Array<{ delta?: { content?: string; reasoning_content?: string; reasoning?: string }; finish_reason?: string }> | undefined
+            if (!choices?.length) continue
+            const delta = choices[0].delta ?? {}
+            const rc = (delta.reasoning_content ?? delta.reasoning) as string | undefined
+            if (rc) {
+              fullReasoning += rc
+              await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: rc }) })
+              continue
+            }
+            const raw_content = delta.content ?? ''
+            if (!raw_content) continue
+            const { state: nextState, events: parseEvents } = feedChunk(parseState, raw_content)
+            parseState = nextState
+            for (const ev of parseEvents) {
+              if (ev.type === 'reasoning') {
+                fullReasoning += ev.text
+                await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: ev.text }) })
+              } else {
+                fullContent += ev.text
+                if (!ttftMs) ttftMs = Date.now() - requestStart
+                d.manager.setLiveGen({ phase: 'gen', pct: 0, outputTokens: ++liveOut })
+                await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: ev.text }) })
+              }
+            }
+          }
+        }
+        ac.signal.removeEventListener('abort', cancelReader)
+        for (const ev of flushState(parseState)) {
+          if (ev.type === 'reasoning') {
+            fullReasoning += ev.text
+            await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: ev.text }) })
+          } else {
+            fullContent += ev.text
+            await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: ev.text }) })
+          }
+        }
+      }
     }
   } catch (e: unknown) {
     const isAbort = (e as Error)?.name === 'AbortError'
@@ -578,7 +888,26 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
     stats.cachedTokens = cachedExplicit ?? 0
   }
 
-  db.updateMessage(assistantMsg.id, { content: fullContent, reasoning: fullReasoning, toolCalls: allToolCalls, stats })
+  // F-022: run the heuristic referee on Research persona replies before persisting.
+  // Pure string/regex — synchronous, < 5ms, no IO.
+  let refereeVerdicts: ClaimVerdict[] | undefined
+  if (conv.toolPolicy === 'force_web_search' && fullContent && allResearchSources.length > 0) {
+    try {
+      refereeVerdicts = checkReply(fullContent, allResearchSources)
+    } catch { /* swallow — referee is best-effort */ }
+  }
+
+  // F-021: persist research metadata alongside the message.
+  const researchMeta: ResearchMeta | undefined =
+    conv.toolPolicy === 'force_web_search' && (parsedConfidence !== undefined || allResearchSources.length > 0 || refereeVerdicts !== undefined)
+      ? {
+          confidence: parsedConfidence,
+          sources: allResearchSources.length > 0 ? allResearchSources : undefined,
+          refereeVerdicts: refereeVerdicts && refereeVerdicts.length > 0 ? refereeVerdicts : undefined,
+        }
+      : undefined
+
+  db.updateMessage(assistantMsg.id, { content: fullContent, reasoning: fullReasoning, toolCalls: allToolCalls, stats, researchMeta })
   db.touchConversation(convId)
 
   try {

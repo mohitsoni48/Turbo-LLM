@@ -38,8 +38,9 @@ function venvPython(envDir: string): string {
  * Provision an isolated vLLM runtime: uv → venv (pinned python) → `uv pip
  * install vllm`. The install pulls torch + CUDA wheels and is multi-GB, so the
  * caller should surface indeterminate progress. Returns the venv python + version.
+ * When `upgrade` is true, passes `-U` to force an upgrade to the latest release.
  */
-export async function ensureVllmEnv(root: string, onProgress?: (p: ProvisionProgress) => void): Promise<VllmRuntime> {
+export async function ensureVllmEnv(root: string, onProgress?: (p: ProvisionProgress) => void, upgrade = false): Promise<VllmRuntime> {
   const uv = await ensureUv(root, onProgress)
   const envDir = join(root, 'vllm', 'venv')
   const py = venvPython(envDir)
@@ -52,14 +53,39 @@ export async function ensureVllmEnv(root: string, onProgress?: (p: ProvisionProg
   }
   // Install (or no-op if already satisfied) vllm into the venv. Large download;
   // generous buffer + no timeout (pip resolves + compiles for minutes).
+  // `-U` forces an upgrade to the latest release when requested.
   onProgress?.({ phase: 'extracting', pct: -1 })
-  await execFileP(uv, ['pip', 'install', '--python', py, 'vllm'], {
+  const installArgs = ['pip', 'install', '--python', py, ...(upgrade ? ['-U'] : []), 'vllm']
+  await execFileP(uv, installArgs, {
     cwd: root,
     maxBuffer: 64 * 1024 * 1024,
   })
 
   const version = await probeVllm(py)
   return { python: py, version }
+}
+
+/**
+ * Preflight (ADR-080): can vLLM's OpenAI server actually run on this machine? Its entrypoint
+ * hard-imports `uvloop` (POSIX-only) plus other Linux-only deps (NCCL, Triton, CUDA-graph capture),
+ * so on Windows it crashes on import before loading anything. We probe the *concrete* blocker — can
+ * the venv import uvloop — rather than guessing from `process.platform`, so this stays correct if a
+ * future vLLM/uvloop ever gains Windows support. Returns a clear, actionable message when vLLM can't
+ * serve here, or null when it can. Fast (~1s) and run once per load, before spawn.
+ */
+export async function vllmServeBlocker(python: string): Promise<string | null> {
+  try {
+    await execFileP(python, ['-c', 'import uvloop'], { timeout: 20_000 })
+    return null
+  } catch {
+    const plat =
+      process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : process.platform
+    return (
+      `vLLM cannot run on ${plat}: its OpenAI server requires uvloop (and other Linux-only ` +
+      `components such as NCCL/Triton), which have no ${plat} build. Use the llama.cpp / TurboQuant ` +
+      `engine for GGUF models here, or run vLLM under WSL2 / Linux.`
+    )
+  }
 }
 
 /** Read the installed vllm version (also a smoke test that it imports). */
@@ -82,6 +108,10 @@ export async function probeVllm(python: string): Promise<string> {
  * `tensorParallelSize` (ADR-054) shards the model across N GPUs via vLLM's
  * `--tensor-parallel-size`. 1 (or undefined) is vLLM's single-GPU default and emits
  * no flag, so existing single-GPU launches are unchanged.
+ *
+ * `extraArgs` (F-027) carries the model's vLLM load controls (max-model-len,
+ * gpu-memory-utilization, dtype, …) built by the caller via `vllmProfileToArgs`,
+ * mirroring how llama.cpp and MLX pass their flags through `extraArgs`.
  */
 export function vllmServerCommand(
   python: string,
@@ -89,6 +119,7 @@ export function vllmServerCommand(
   port: number,
   host: string,
   tensorParallelSize = 1,
+  extraArgs: string[] = [],
 ): { cmd: string; args: string[] } {
   const args = [
     '-m', 'vllm.entrypoints.openai.api_server',
@@ -101,5 +132,6 @@ export function vllmServerCommand(
     '--port', String(port),
   ]
   if (tensorParallelSize > 1) args.push('--tensor-parallel-size', String(tensorParallelSize))
+  args.push(...extraArgs)
   return { cmd: python, args }
 }

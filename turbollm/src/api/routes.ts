@@ -6,9 +6,10 @@ import { basename, dirname, join, resolve, sep } from 'node:path'
 import { GATE_VERSION, gateNodeSource } from '../comfyui/gate-template'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { homedir, networkInterfaces } from 'node:os'
-import { ValueError, type ApiKey, type McpServer } from '../config/config'
+import { ValueError, type ApiKey, type Engine, type McpServer } from '../config/config'
 import type { Deps } from '../deps'
 import { type ModelInfo, type StartOpts } from '../engines/manager'
+import { abortAllInFlightChats } from '../chat/chat-routes'
 import { NameTakenError, NotFoundError } from '../engines/registry'
 import { ProbeError } from '../engines/probe'
 import {
@@ -25,7 +26,7 @@ import { ensureVllmEnv } from '../engines/vllm'
 import { catalogForPlatform, catalogEngine } from '../engines/catalog'
 import { engineAcceptsFormat } from '../engines/compat'
 import { ScannerError, type ModelEntry } from '../models/scanner'
-import { estimateVram, type LoadProfile, profileToArgs, resolveProfile } from '../models/profile'
+import { estimateVram, type LoadProfile, profileToArgs, resolveProfile, vllmProfileToArgs } from '../models/profile'
 import { getSysInfo, primaryVendor } from '../sysinfo/sysinfo'
 import { HfError } from '../hf/hf'
 import { DownloadError } from '../downloads/downloads'
@@ -118,20 +119,26 @@ export function registerApi(app: Hono, d: Deps): void {
     const regEngines = d.registry.list().engines
     const backends = availableBackends().map((b) => {
       const bin = installedBackendServer(root, b.id)
+      // `enabled` = a registry engine is registered with this binary path.
       const eng = bin ? regEngines.find((e) => e.binPath === bin) : undefined
       return {
         id: b.id,
         label: b.label,
         installed: !!bin,
+        enabled: !!eng,
         recommended: b.id === recommended,
         active: !!bin && !!active && active.binPath === bin,
         engineId: eng?.id ?? '',
       }
     })
+    // MLX: disk-installed = venv python exists; enabled = registered in registry.
+    const mlxVenvPy = join(root, 'mlx', 'venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python')
+    const mlxInstalledOnDisk = existsSync(mlxVenvPy)
     const mlxEngine = regEngines.find((e) => e.kind === 'mlx')
     const mlx = {
       supported: process.platform === 'darwin',
-      installed: !!mlxEngine,
+      installed: mlxInstalledOnDisk,
+      enabled: !!mlxEngine,
       active: !!mlxEngine && !!active && active.id === mlxEngine.id,
       engineId: mlxEngine?.id ?? '',
     }
@@ -144,8 +151,15 @@ export function registerApi(app: Hono, d: Deps): void {
     const b = await body<{ backend?: string }>(c)
     const def = availableBackends().find((x) => x.id === b.backend)
     if (!def) return err(c, 400, 'invalid_config_value', 'Unknown backend for this platform.')
-    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
     const root = join(d.store.dir(), 'engines')
+    // Already at the current pinned build → nothing to download. llama.cpp backends are pinned to
+    // LLAMA_BUILD; a newer build only ships when TurboLLM bumps it (which changes the install dir,
+    // so the row would show Download again). Report 'already latest' so Update gives clear feedback
+    // instead of silently re-running.
+    if (installedBackendServer(root, def.id)) {
+      return c.json({ accepted: false, alreadyLatest: true, build: LLAMA_BUILD })
+    }
+    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
     const ac = new AbortController()
     provisionAbort = ac
     void (async () => {
@@ -179,6 +193,21 @@ export function registerApi(app: Hono, d: Deps): void {
     return c.json({ ok: false })
   })
 
+  // Enable (register without re-downloading) an installed llama.cpp backend.
+  // Fast path: the binary already exists on disk; we just add it to the registry
+  // and activate it. Returns 409 when the backend is not installed on disk.
+  app.post('/api/v1/engines/backends/:id/enable', async (c) => {
+    const def = availableBackends().find((x) => x.id === c.req.param('id'))
+    if (!def) return err(c, 400, 'invalid_config_value', 'Unknown backend for this platform.')
+    const root = join(d.store.dir(), 'engines')
+    const bin = installedBackendServer(root, def.id)
+    if (!bin) return err(c, 409, 'not_installed', 'Backend is not installed on disk — download it first.')
+    let eng = d.registry.list().engines.find((e) => e.binPath === bin)
+    if (!eng) eng = (await d.registry.add(`llama.cpp ${LLAMA_BUILD} (${def.id})`, bin)).engine
+    d.registry.activate(eng.id)
+    return c.json({ ok: true, engineId: eng.id })
+  })
+
   // Delete an installed backend's files + unregister its engine. Stops the engine
   // first if it's the active, running one.
   app.delete('/api/v1/engines/backends/:id', async (c) => {
@@ -195,16 +224,18 @@ export function registerApi(app: Hono, d: Deps): void {
 
   // Provision the MLX engine (macOS-only, ADR-025 Phase 3): uv → venv → mlx-lm,
   // then register as a kind='mlx' engine. 202 + progress via /status.
+  // ?update=1 upgrades mlx-lm to the latest release (passes --upgrade to uv pip install).
   app.post('/api/v1/engines/mlx', (c) => {
     if (process.platform !== 'darwin') {
       return err(c, 409, 'unsupported_platform', 'MLX is only available on macOS (Apple Silicon).')
     }
     if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
     const root = join(d.store.dir(), 'engines')
+    const upgrade = c.req.query('update') === '1'
     void (async () => {
       try {
         d.provision.start('mlx')
-        const rt = await ensureMlxEnv(root, (p) => d.provision.progress(p.phase, p.pct, p.part, p.parts))
+        const rt = await ensureMlxEnv(root, (p) => d.provision.progress(p.phase, p.pct, p.part, p.parts), upgrade)
         const eng = d.registry.addMlx(`MLX (${rt.version})`, rt.python, rt.version)
         d.registry.activate(eng.id)
         d.provision.done()
@@ -216,21 +247,29 @@ export function registerApi(app: Hono, d: Deps): void {
   })
 
   // Engine catalog (ADR-044): the hardcoded, browsable list of installable
-  // engines for this platform. The list ships in app code; concrete versions
-  // resolve at install time. Per-entry `installed` is computed from the registry.
+  // engines for this platform. Per-entry `installed` is disk-based (files exist);
+  // `enabled` is registry-based (a registered engine entry exists for this kind).
   app.get('/api/v1/engines/catalog', (c) => {
-    const engines = d.registry.list().engines
+    const regEngines = d.registry.list().engines
+    const enginesRoot = join(d.store.dir(), 'engines')
     const items = catalogForPlatform().map((e) => {
       let installed: boolean | undefined
+      let enabled: boolean | undefined
       if (e.provision === 'pip') {
-        // pip engines (vLLM, MLX) register under their own kind.
-        installed = engines.some((x) => x.kind === e.kind)
+        // pip engines: installed = venv python exists on disk; enabled = registered in registry.
+        const venvSubdir = e.id === 'mlx' ? 'mlx' : 'vllm'
+        const pyPath = join(enginesRoot, venvSubdir, 'venv',
+          process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python')
+        installed = existsSync(pyPath)
+        enabled = regEngines.some((x) => x.kind === e.kind)
       } else if (e.id === 'turboquant') {
-        // TurboQuant is a llama-server fork (same kind as the default), so detect
-        // it by its install dir, not by kind.
-        installed = engines.some((x) => /[\\/]engines[\\/]turboquant[\\/]/.test(x.binPath))
+        // TurboQuant is a llama-server fork: installed = its dir exists on disk;
+        // enabled = a registry engine has a binPath inside engines/turboquant/.
+        const tqDir = join(enginesRoot, 'turboquant')
+        installed = existsSync(tqDir)
+        enabled = regEngines.some((x) => /[\\/]engines[\\/]turboquant[\\/]/.test(x.binPath))
       }
-      return { ...e, installed }
+      return { ...e, installed, enabled }
     })
     return c.json({ engines: items })
   })
@@ -239,13 +278,15 @@ export function registerApi(app: Hono, d: Deps): void {
   // register as a kind='vllm' engine. 202 + progress via GET /status engineProvision.
   // Not platform-blocked (vLLM fails loudly where unsupported); the catalog marks
   // support level so the UI can warn before the user commits to a multi-GB install.
+  // ?update=1 upgrades vllm to the latest release (passes -U to uv pip install).
   app.post('/api/v1/engines/vllm', (c) => {
     if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
     const root = join(d.store.dir(), 'engines')
+    const upgrade = c.req.query('update') === '1'
     void (async () => {
       try {
         d.provision.start('vllm')
-        const rt = await ensureVllmEnv(root, (p) => d.provision.progress(p.phase, p.pct, p.part, p.parts))
+        const rt = await ensureVllmEnv(root, (p) => d.provision.progress(p.phase, p.pct, p.part, p.parts), upgrade)
         const eng = d.registry.addVllm(`vLLM (${rt.version})`, rt.python, rt.version)
         d.registry.activate(eng.id)
         d.provision.done()
@@ -261,6 +302,7 @@ export function registerApi(app: Hono, d: Deps): void {
   // compatible), and registers it as a kind='llama-server' engine. 202 + progress
   // via /status. The fork currently ships macOS prebuilts only, so the install is
   // platform-guarded to where an asset actually exists (matches the OS prefilter).
+  // ?update=1 removes the existing install dir so the latest release is re-downloaded.
   app.post('/api/v1/engines/turboquant', (c) => {
     const entry = catalogEngine('turboquant')
     if (!entry?.repo) return err(c, 500, 'internal', 'TurboQuant catalog entry is misconfigured.')
@@ -269,9 +311,15 @@ export function registerApi(app: Hono, d: Deps): void {
     }
     if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
     const root = join(d.store.dir(), 'engines')
+    const upgrade = c.req.query('update') === '1'
     void (async () => {
       try {
         d.provision.start('turboquant')
+        // For update: remove existing dir so provisionForkRelease re-downloads the latest.
+        if (upgrade) {
+          const tqDir = join(root, 'turboquant')
+          if (existsSync(tqDir)) rmSync(tqDir, { recursive: true, force: true })
+        }
         const bin = await provisionForkRelease(root, entry.repo!, 'turboquant', (p) =>
           d.provision.progress(p.phase, p.pct, p.part, p.parts),
         )
@@ -320,8 +368,19 @@ export function registerApi(app: Hono, d: Deps): void {
     if (id === activeEngineId && engineBusy(d)) {
       return err(c, 409, 'engine_in_use', 'Stop the engine before removing it.')
     }
+    const purge = c.req.query('purge') === '1'
     try {
+      const eng = d.registry.get(id)
       d.registry.remove(id)
+      // ?purge=1: also delete the engine's installed files from disk.
+      // Only removes dirs under {dataDir}/engines/ — never touches model dirs.
+      if (purge && eng) {
+        const enginesRoot = join(d.store.dir(), 'engines')
+        const purgeDir = engineInstallDir(eng, enginesRoot)
+        if (purgeDir && existsSync(purgeDir)) {
+          rmSync(purgeDir, { recursive: true, force: true })
+        }
+      }
       return c.json({ ok: true })
     } catch (e) {
       return regErr(c, e)
@@ -332,6 +391,9 @@ export function registerApi(app: Hono, d: Deps): void {
     if (engineBusy(d)) return err(c, 409, 'engine_running', 'Stop the running engine before switching the active engine.')
     try {
       d.registry.activate(c.req.param('id'))
+      // Switching engines invalidates any prior load error (e.g. a failed vLLM load on an
+      // engine that can't serve here) — clear it so the UI doesn't show a stale error.
+      d.manager.clearError()
       return c.json(d.registry.get(c.req.param('id')) ?? {})
     } catch (e) {
       return regErr(c, e)
@@ -408,6 +470,12 @@ export function registerApi(app: Hono, d: Deps): void {
     // ComfyUI guard: while ComfyUI is rendering it owns the GPU, so refuse to load a
     // model (it would thrash/OOM VRAM). The guard reloads automatically once idle.
     if (d.comfy?.isBlocked()) return err(c, 409, 'comfyui_busy', 'ComfyUI is rendering — model loading is paused until its queue finishes.')
+    // Kill switch: loading a model takes over the engine — cancel any auto-tune and abort
+    // in-flight chats, then wait for auto-tune to release the engine so the load can't race
+    // the runner's teardown.
+    d.bench.cancel()
+    abortAllInFlightChats()
+    await d.bench.waitIdle()
     const cfg = d.store.snapshot()
     const sys = getSysInfo()
 
@@ -428,18 +496,22 @@ export function registerApi(app: Hono, d: Deps): void {
       }
       let opts: StartOpts
       if (entry.format !== 'gguf') {
-        // MLX / vLLM: no llama.cpp LoadProfile; the model dir is the launch target.
-        // vLLM still honors the per-model multi-GPU shard count (ADR-054) — read it
-        // straight off any saved profile (GGUF-oriented resolveProfile doesn't apply
-        // to safetensors); MLX ignores it. 1/absent = single GPU.
+        // MLX / vLLM: the model dir is the launch target (no llama.cpp -ngl/ctx knobs).
+        // MLX honors sampling defaults; vLLM honors its own load controls (F-027,
+        // --max-model-len/--gpu-memory-utilization/--dtype/…) built via vllmProfileToArgs,
+        // plus the multi-GPU shard count (ADR-054) mapped to --tensor-parallel-size below.
         const savedProfile = cfg.modelProfiles[entry.key] as Partial<LoadProfile> | undefined
+        const extraArgs =
+          active.kind === 'mlx'
+            ? mlxSamplingArgs(savedProfile?.sampling)
+            : active.kind === 'vllm'
+              ? vllmProfileToArgs(resolveProfile(entry, sys, savedProfile, b.profileOverrides, cfg.modelDefaults))
+              : []
         opts = {
           engine: active,
           model: { key: entry.key, name: entry.name, quant: entry.quant, ctx: entry.nativeCtx, vision: false },
           modelPath: entry.path,
-          // MLX honors sampling as launch defaults; vLLM gets no extra flags here
-          // (its multi-GPU shard count maps to --tensor-parallel-size below).
-          extraArgs: active.kind === 'mlx' ? mlxSamplingArgs(savedProfile?.sampling) : [],
+          extraArgs,
           tensorParallelSize: savedProfile?.gpu?.tensorParallelSize,
         }
       } else {
@@ -485,12 +557,23 @@ export function registerApi(app: Hono, d: Deps): void {
   })
 
   app.post('/api/v1/engine/stop', (c) => {
+    // Kill switch: stopping the engine cancels auto-tune and aborts in-flight chats too —
+    // they all depend on the engine that's going away.
+    d.bench.cancel()
+    abortAllInFlightChats()
     d.manager.stop()
     return c.json({ ok: true }, 202)
   })
 
   app.post('/api/v1/engine/restart', (c) => {
-    void d.manager.restart().catch(() => {})
+    // Kill switch: cancel auto-tune + abort chats, wait for the runner to release the engine,
+    // then restart — so the reload doesn't race auto-tune's teardown.
+    d.bench.cancel()
+    abortAllInFlightChats()
+    void (async () => {
+      await d.bench.waitIdle()
+      await d.manager.restart()
+    })().catch(() => {})
     return c.json({ ok: true }, 202)
   })
 
@@ -635,6 +718,13 @@ export function registerApi(app: Hono, d: Deps): void {
     return c.json({ ok: true })
   })
 
+  // Persist the finished auto-tune's winning profile (the user clicked Save in the results dialog).
+  app.post('/api/v1/bench/save', (c) => {
+    const saved = d.bench.saveResult()
+    if (!saved) return err(c, 409, 'no_bench_result', 'No auto-tune result to save.')
+    return c.json({ ok: true })
+  })
+
   // ---- models (A3, spec 04) ----
   app.get('/api/v1/models', (c) => {
     const { models, scanning, lastScanAt } = d.scanner.list()
@@ -739,6 +829,7 @@ export function registerApi(app: Hono, d: Deps): void {
       comfyui?: { enabled?: boolean; url?: string; reverseGate?: boolean }
       gateway?: { autoSwap?: boolean; keepN?: number }
       tavilyApiKey?: string
+      search?: { provider?: string; tavilyApiKey?: string; kagiApiKey?: string; searxngUrl?: string }
     }>(c)
 
     const updates: Record<string, unknown> = {}
@@ -842,14 +933,26 @@ export function registerApi(app: Hono, d: Deps): void {
       if (telemetryLevel !== undefined) cfg.telemetry.level = telemetryLevel
       // HF token (spec 10 §4): write-only. An explicit '' clears it. Never logged.
       if (b.hfToken !== undefined) cfg.hf.token = String(b.hfToken).trim()
-      // Tavily API key (v0.7.0): write-only. An explicit '' clears it.
+      // Search provider config (F-020). All key/URL fields are write-only; '' clears them.
+      // `search` is the canonical block; legacy top-level `tavilyApiKey` still works as an alias.
+      cfg.tools.search ??= { provider: 'tavily' }
+      const s = cfg.tools.search
+      if (b.search?.provider === 'tavily' || b.search?.provider === 'kagi' || b.search?.provider === 'searxng') {
+        s.provider = b.search.provider
+      }
+      const trimmed = (v: string): string | undefined => v.trim() || undefined
+      if (b.search?.tavilyApiKey !== undefined) s.tavilyApiKey = trimmed(b.search.tavilyApiKey)
+      if (b.search?.kagiApiKey !== undefined) s.kagiApiKey = trimmed(b.search.kagiApiKey)
+      if (b.search?.searxngUrl !== undefined) s.searxngUrl = trimmed(b.search.searxngUrl)
+      // Legacy alias: top-level tavilyApiKey maps onto search.tavilyApiKey + keeps tools.tavily for read.
       if (b.tavilyApiKey !== undefined) {
         const key = String(b.tavilyApiKey).trim()
         cfg.tools.tavily = key ? { apiKey: key } : undefined
+        s.tavilyApiKey = key || undefined
       }
     })
     // Keep ToolRegistry in sync when tools config changes.
-    if (b.tavilyApiKey !== undefined) {
+    if (b.tavilyApiKey !== undefined || b.search !== undefined) {
       d.tools?.updateConfig(d.store.snapshot().tools)
     }
     const after = d.store.snapshot().daemon
@@ -1249,8 +1352,16 @@ function settingsPayload(d: Deps) {
     // The HF token is write-only over the wire (spec 10 §4): we never echo it back,
     // only whether one is set, so the UI can show "configured" without leaking it.
     hfTokenSet: cfg.hf.token.length > 0,
-    // Tavily API key is write-only: expose only whether it is set.
-    tavilyKeySet: !!(cfg.tools.tavily?.apiKey),
+    // Tavily API key is write-only: expose only whether it is set (legacy field, kept for compat).
+    tavilyKeySet: !!(cfg.tools.search?.tavilyApiKey ?? cfg.tools.tavily?.apiKey),
+    // Search provider config (F-020): provider + which credentials are set. Keys are write-only
+    // (booleans only); searxngUrl is not a secret so it is echoed for the form to display.
+    search: {
+      provider: cfg.tools.search?.provider ?? 'tavily',
+      tavilyKeySet: !!cfg.tools.search?.tavilyApiKey,
+      kagiKeySet: !!cfg.tools.search?.kagiApiKey,
+      searxngUrl: cfg.tools.search?.searxngUrl ?? '',
+    },
     mcp: cfg.mcp,
   }
 }
@@ -1358,6 +1469,45 @@ function regErr(c: Context, e: unknown) {
   if (e instanceof NotFoundError) return err(c, 404, 'engine_not_found', 'No engine with that id.')
   if (e instanceof ValueError) return err(c, 400, 'invalid_config_value', e.message)
   return err(c, 500, 'internal', (e as Error).message)
+}
+
+/**
+ * Derive the on-disk install directory for a registered engine, for use with
+ * the ?purge=1 delete path. Returns a path only when it is safely inside
+ * `{enginesRoot}/` — never an arbitrary user path. Returns null for user-added
+ * engines (arbitrary binPath not under enginesRoot) so they are never purged.
+ *
+ * Mapping:
+ *   - pip kind='mlx'        → engines/mlx/venv (and its uv sibling stays; we only
+ *                             wipe the venv that holds the package)
+ *   - pip kind='vllm'       → engines/vllm/venv
+ *   - TurboQuant fork       → engines/turboquant (detected by its binPath pattern)
+ *   - llama.cpp backends    → engines/llama.cpp-{tag}-{id} (via DELETE /backends/:id)
+ *
+ * For safety: the returned path MUST start with `{enginesRoot}{sep}`.
+ */
+function engineInstallDir(eng: Engine, enginesRoot: string): string | null {
+  const norm = enginesRoot.replace(/[\\/]+$/, '')
+  const inside = (p: string) => {
+    const n = p.replace(/[\\/]+$/, '')
+    return n.startsWith(norm + '/') || n.startsWith(norm + '\\')
+  }
+  // pip: mlx venv
+  if (eng.kind === 'mlx') {
+    const d = join(enginesRoot, 'mlx', 'venv')
+    return inside(d) ? d : null
+  }
+  // pip: vllm venv
+  if (eng.kind === 'vllm') {
+    const d = join(enginesRoot, 'vllm', 'venv')
+    return inside(d) ? d : null
+  }
+  // TurboQuant fork (llama-server kind, binPath under engines/turboquant/)
+  if (/[\\/]engines[\\/]turboquant[\\/]/.test(eng.binPath)) {
+    const d = join(enginesRoot, 'turboquant')
+    return inside(d) ? d : null
+  }
+  return null
 }
 
 function deriveModel(modelPath: string, name: string, extraArgs: string[]): ModelInfo {
