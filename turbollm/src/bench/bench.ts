@@ -329,10 +329,8 @@ export class BenchRunner {
       return fail('crash')
     }
 
-    // Use a large bench prompt so the measurement reflects realistic context usage:
-    // at least 50k tokens, or half the configured ctx — whichever is smaller after
-    // clamping to fit within ctx. For small-ctx models this fills nearly the whole
-    // context window; for large-ctx models it uses ≥50k tokens.
+    // Bench prompt = 75% of the configured ctx — a realistic fraction of the window the user
+    // will actually use, leaving room for generation (see benchPromptTokens).
     const promptContent = makeBenchContent(benchPromptTokens(profile.ctx))
 
     // Warmup (discarded) then the measured request — both bounded by the remaining per-test time.
@@ -482,12 +480,12 @@ function makeBenchContent(targetTokens: number): string {
   return BENCH_BASE.repeat(reps).slice(0, targetChars) + '\n\nSummarize the passage above in one sentence.'
 }
 
-/** How many prompt tokens to use for a bench trial at a given ctx size.
- *  Target: max(ctx/2, 50_000) — fills nearly the full window for small-ctx models,
- *  uses at least 50k tokens for large-ctx models. Always leaves room for generation. */
+/** How many prompt tokens to use for a bench trial at a given ctx size: 75% of the configured
+ *  context. A realistic fraction of the window the user will actually use, leaving the remaining
+ *  25% for generation. (KV/VRAM is allocated for the full ctx at load regardless of prompt size,
+ *  so this only sizes the prefill-speed measurement — not the VRAM-fit decision.) */
 function benchPromptTokens(ctx: number): number {
-  const target = Math.max(Math.floor(ctx / 2), 50_000)
-  return Math.min(target, Math.max(1, ctx - 128))
+  return Math.max(256, Math.floor(ctx * 0.75))
 }
 
 /** True when a measured VRAM figure exceeds 95% of the primary GPU's VRAM. */
