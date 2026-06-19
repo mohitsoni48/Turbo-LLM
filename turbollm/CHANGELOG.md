@@ -25,6 +25,33 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
+## [0.7.2] - 2026-06-19
+
+### Fixed
+- **Engine load lock** — a static `Manager.loadGate` gate (shared across every Manager
+  instance, including the gateway keep-N pool) ensures at most one model load/reload is ever
+  in flight at a time. New `load()` method is the single entry point: stops the current engine,
+  runs the ComfyUI reverse gate, spawns, and awaits readiness — all as one atomic operation.
+  Eliminates the double-VRAM-allocation race when gateway auto-swap and a concurrent HTTP load
+  fire simultaneously.
+- **Orphan-engine reaping** — each engine records a pidfile (`run/engine-{pid}.pid`) carrying
+  its port and owner-daemon pid. On startup, `reapStaleEngines()` kills any engine whose port
+  is still live but whose owner daemon is gone (terminal closed, killed, crashed). A sync
+  `killTrackedEnginesSync()` on process `exit` covers exits that bypass signal handlers.
+  Owner-aware: a restarting daemon never reaps engines owned by the incoming process.
+- **Client-cancel propagation** — the gateway wires an `AbortController` into every upstream
+  engine fetch (`/v1/messages` and the OpenAI passthrough). `stream.onAbort` fires `ac.abort()`
+  so a cancelled Claude turn actually stops the engine generating instead of running to
+  completion and clogging its queue slot. `streamToAnthropic` uses `reader.cancel()` (not
+  `releaseLock()`) so the upstream body tears down on client disconnect.
+- **Daemon crash on client disconnect** — guarded the final `writeSSE('done')` in chat routes
+  with a try/catch; added an `unhandledRejection` handler in the CLI that swallows expected
+  `AbortError`s. A disconnecting client can no longer crash the daemon and orphan the engine.
+- **`SIGHUP` handled** — added to the graceful-shutdown signal set so daemon manager restarts
+  don't leave engines running.
+- **ModelRouter `waitReady` eliminated** — readiness is now awaited inside `Manager.load()`
+  under the load lock; `ModelRouter` just reads `status().state` after `load()` resolves.
+
 ## [0.7.1] - 2026-06-18
 
 ### Fixed
