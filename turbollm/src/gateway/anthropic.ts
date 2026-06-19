@@ -353,7 +353,10 @@ export async function* streamToAnthropic(
     failed = true
     yield sse('error', { error: { type: 'api_error', message: 'engine stopped' } })
   } finally {
-    reader.releaseLock()
+    // cancel() (not releaseLock()) propagates teardown to the upstream engine body, so
+    // a client that disconnects mid-stream actually stops the engine generating rather
+    // than leaving the request occupying a slot. Safe to call after normal completion.
+    await reader.cancel().catch(() => {})
   }
 
   if (!failed) {

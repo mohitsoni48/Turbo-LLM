@@ -140,18 +140,19 @@ export class ModelRouter {
           : new Manager(this.store))
       : this.evictChatLru()
 
-    await targetManager.stopAndWait()
-    await this.comfy?.freeComfyUIBeforeLoad()
-
+    // Single chokepoint (rule 3): load() stops whatever this slot held, runs the
+    // reverse gate (free ComfyUI VRAM), spawns, and waits for readiness — all under
+    // the global load lock, so concurrent swaps can't spin up two engines at once.
     try {
-      await targetManager.start(opts)
+      await targetManager.load(opts, {
+        beforeStart: () => this.comfy?.freeComfyUIBeforeLoad() ?? Promise.resolve(),
+      })
     } catch (e) {
       return { status: 503, message: `Engine start failed: ${(e as Error).message}` }
     }
 
-    const ready = await this.waitReady(targetManager, active.kind)
-    if (!ready) {
-      const s = targetManager.status()
+    const s = targetManager.status()
+    if (s.state !== 'running') {
       return { status: 503, message: s.err?.message ?? 'Model failed to become ready.' }
     }
 
@@ -264,21 +265,4 @@ export class ModelRouter {
     }
   }
 
-  /** Poll until the manager's engine process becomes ready or fails.
-   *  Mirrors the Manager's internal readiness timeout by engine kind. */
-  private async waitReady(manager: Manager, engineKind: string): Promise<boolean> {
-    const timeoutMs = engineKind === 'vllm' ? 600_000 : 120_000
-    const deadline = Date.now() + timeoutMs
-    while (Date.now() < deadline) {
-      const s = manager.status()
-      if (s.state === 'running') return true
-      if (s.state === 'error' || s.state === 'stopped') return false
-      await sleep(250)
-    }
-    return false
-  }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(r => setTimeout(r, ms))
 }

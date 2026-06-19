@@ -1,9 +1,9 @@
 // Engine lifecycle state machine (A2, spec 03 §4): stopped → starting → running
 // → stopping → stopped, plus error. Owns the single running engine process.
 // Ports the verified Go manager to node:child_process.
-import { ChildProcess, execFile, spawn } from 'node:child_process'
-import { createWriteStream, existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { createServer } from 'node:net'
+import { ChildProcess, execFile, spawn, spawnSync } from 'node:child_process'
+import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createConnection, createServer } from 'node:net'
 import { dirname, join } from 'node:path'
 import type { ConfigStore, Engine } from '../config/config'
 import { mlxServerCommand } from './mlx'
@@ -112,6 +112,29 @@ export class BusyError extends Error {
 }
 
 export class Manager {
+  /** Global single-load lock (rules 1 & 2). Shared across EVERY Manager instance —
+   *  including the gateway keep-N pool's extra slots — so at most ONE model load /
+   *  reload is ever in flight at a time, no matter who requests it. Holding it
+   *  through readiness (not just spawn) guarantees two engines never spin up at
+   *  once and double-allocate VRAM. All load paths funnel through start()/load(),
+   *  the only entry points that touch the engine — nothing spawns an engine without
+   *  passing this gate (rule 3). */
+  private static loadGate: Promise<void> = Promise.resolve()
+
+  /** Acquire the global load gate, run `fn` exclusively, then release it. Queued
+   *  callers run in FIFO order; a thrown fn still releases the gate. */
+  private static async runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const prev = Manager.loadGate
+    let release!: () => void
+    Manager.loadGate = new Promise<void>((r) => { release = r })
+    await prev
+    try {
+      return await fn()
+    } finally {
+      release()
+    }
+  }
+
   private state: State = 'stopped'
   private opts: StartOpts | null = null
   private port = 0
@@ -131,7 +154,44 @@ export class Manager {
     setInterval(() => this.watchdogTick(), 60_000).unref()
   }
 
+  /** Load a model, freeing any currently-loaded one first — the single atomic
+   *  swap entry point (rules 1–3). Runs under the global load gate so the stop +
+   *  optional pre-start hook (e.g. the ComfyUI VRAM free) + spawn + readiness wait
+   *  are one indivisible operation; no other load can interleave. Never throws on a
+   *  model that simply fails to load — callers read status() for the running/error
+   *  outcome. */
+  async load(opts: StartOpts, hooks?: { beforeStart?: () => Promise<void> }): Promise<void> {
+    await Manager.runExclusive(async () => {
+      if (this.state === 'running' || this.state === 'starting' || this.state === 'stopping') {
+        await this.stopAndWait()
+      }
+      if (hooks?.beforeStart) await hooks.beforeStart()
+      await this.startInternal(opts)
+      await this.awaitNotStarting()
+    })
+  }
+
+  /** Start a model assuming nothing is loaded (throws BusyError otherwise). Held by
+   *  the global load gate through readiness so concurrent loads can't spin up two
+   *  engines at once. Most callers want load() (which stops first); this exists for
+   *  paths that have already ensured the engine is free (bench, ComfyUI reload). */
   async start(opts: StartOpts): Promise<void> {
+    await Manager.runExclusive(async () => {
+      await this.startInternal(opts)
+      await this.awaitNotStarting()
+    })
+  }
+
+  /** Wait until the engine leaves the 'starting' state (→ running or error/stopped),
+   *  bounded by the engine kind's readiness window plus a small grace. The internal
+   *  readiness loop flips the state and surfaces errors; this just keeps the load
+   *  gate held until that resolves. */
+  private async awaitNotStarting(): Promise<void> {
+    const deadline = Date.now() + readinessTimeoutMs(this.opts?.engine.kind ?? 'llama-server') + 5_000
+    while (this.state === 'starting' && Date.now() < deadline) await sleep(200)
+  }
+
+  private async startInternal(opts: StartOpts): Promise<void> {
     if (this.state === 'starting' || this.state === 'running' || this.state === 'stopping') {
       throw new BusyError()
     }
@@ -178,6 +238,11 @@ export class Manager {
     this.opts = opts
     this.port = port
     this.pid = child.pid ?? 0
+    // Track the OS process on disk so a daemon that dies WITHOUT running its signal
+    // handlers (terminal window closed, killed, crashed) can't leave llama-server
+    // orphaned: the next startup reaps it (reapStaleEngines), and the exit handler
+    // kills it synchronously (killTrackedEnginesSync). Cleared in onTerminated.
+    if (this.pid) writeEnginePid(this.store.dir(), this.pid, port)
     this.child = child
     this.startedAt = Date.now()
     this.errInfo = null
@@ -230,14 +295,10 @@ export class Manager {
 
   async restart(): Promise<void> {
     const opts = this.opts
-    const running = this.state === 'running' || this.state === 'starting'
-    const exited = this.exited
     if (!opts?.modelPath) throw new Error('no_such_model')
-    if (running) {
-      this.stop()
-      await Promise.race([exited, sleep(10_000)])
-    }
-    await this.start(opts)
+    // load() stops the current engine (if any) and starts the same opts again, all
+    // under the global load gate — so a restart can't race a concurrent swap.
+    await this.load(opts)
   }
 
   status(): Status {
@@ -331,6 +392,9 @@ export class Manager {
 
   private onTerminated(child: ChildProcess, code: number, logStream: NodeJS.WritableStream, errMsg: string | null): void {
     if (this.child !== child) return
+    // The process is gone — drop its pidfile so the next startup doesn't try to reap
+    // a dead pid (and, on Windows, can't kill a recycled one).
+    if (child.pid) clearEnginePid(this.store.dir(), child.pid)
     // Terminal marker so the live engine log can't keep "looking connected" after
     // the process dies. Without it the last line stays "...server is listening on
     // <port>" forever, contradicting the Error state shown above it (the reported bug).
@@ -566,6 +630,158 @@ function forceKill(child: ChildProcess): void {
     execFile('taskkill', ['/PID', String(child.pid), '/F', '/T'], () => {})
   } else {
     child.kill('SIGKILL')
+  }
+}
+
+// ── Engine process tracking (orphan prevention) ─────────────────────────────
+// Each running engine records a pidfile under <dataDir>/run named by its OS pid and
+// carrying its loopback port AND its owner — the pid of the daemon that spawned it.
+// This is the safety net for the case the signal handlers can't cover: a daemon killed
+// without a clean shutdown (terminal window closed on Windows, SIGKILL, crash, a
+// force-exiting restart watchdog) would otherwise orphan llama-server — it keeps the
+// model in RAM/VRAM and drains its request queue while a freshly started daemon reports
+// "no model loaded". The next startup reaps these.
+//
+// The run dir is SHARED across daemon instances, and during a self-restart the old and
+// new daemons are briefly alive together. So both operations are OWNER-AWARE: an engine
+// is an orphan only when its owner daemon is gone (reapStaleEngines), and a daemon's exit
+// handler kills only the engines IT owns (killTrackedEnginesSync). That keeps a dying old
+// daemon from reaping the new daemon's freshly-loaded engine, and vice-versa.
+
+interface EnginePidRecord {
+  pid: number
+  port: number
+  owner: number
+  file: string
+}
+
+function enginePidDir(dataDir: string): string {
+  return join(dataDir, 'run')
+}
+
+function writeEnginePid(dataDir: string, pid: number, port: number): void {
+  try {
+    const dir = enginePidDir(dataDir)
+    mkdirSync(dir, { recursive: true })
+    // owner = this daemon's pid, so another instance can tell "managed by a live daemon"
+    // apart from "true orphan whose daemon is gone".
+    writeFileSync(join(dir, `engine-${pid}.pid`), JSON.stringify({ pid, port, owner: process.pid }))
+  } catch {
+    /* best-effort — tracking is a safety net, never block a load on it */
+  }
+}
+
+function clearEnginePid(dataDir: string, pid: number): void {
+  try {
+    rmSync(join(enginePidDir(dataDir), `engine-${pid}.pid`), { force: true })
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** True if a pid is currently a running process. signal 0 only probes existence; EPERM
+ *  means it exists but is owned elsewhere (still "alive" for our purposes). */
+function pidAlive(pid: number): boolean {
+  if (!pid) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+/** Parse the run dir into engine records, skipping/cleaning anything malformed. `owner`
+ *  is 0 for legacy pidfiles written before owner tracking (treated as ownerless). */
+function readEnginePidFiles(dataDir: string): EnginePidRecord[] {
+  const dir = enginePidDir(dataDir)
+  let names: string[]
+  try {
+    names = readdirSync(dir).filter((n) => /^engine-\d+\.pid$/.test(n))
+  } catch {
+    return [] // no run dir yet → nothing to reap
+  }
+  const out: EnginePidRecord[] = []
+  for (const name of names) {
+    const file = join(dir, name)
+    try {
+      const { pid, port, owner } = JSON.parse(readFileSync(file, 'utf8')) as { pid?: number; port?: number; owner?: number }
+      if (typeof pid === 'number' && pid > 0) {
+        out.push({ pid, port: typeof port === 'number' ? port : 0, owner: typeof owner === 'number' ? owner : 0, file })
+      } else rmSync(file, { force: true })
+    } catch {
+      try { rmSync(file, { force: true }) } catch { /* best-effort */ }
+    }
+  }
+  return out
+}
+
+/** True if something is currently listening on 127.0.0.1:port (a quick TCP connect).
+ *  Used to confirm a tracked pid is really our orphaned engine before we kill it —
+ *  guards against killing an unrelated process that recycled the pid (common on
+ *  Windows). Engine ports (8081+) belong to us, so a live one means the orphan is up. */
+function portAlive(port: number, timeoutMs = 600): Promise<boolean> {
+  if (!port) return Promise.resolve(false)
+  return new Promise((resolve) => {
+    const sock = createConnection({ host: '127.0.0.1', port })
+    const done = (alive: boolean) => {
+      sock.destroy()
+      resolve(alive)
+    }
+    sock.setTimeout(timeoutMs)
+    sock.once('connect', () => done(true))
+    sock.once('timeout', () => done(false))
+    sock.once('error', () => done(false))
+  })
+}
+
+/** Reap engine processes left behind by a previous daemon that didn't shut down
+ *  cleanly. Called once at startup BEFORE anything loads a model. An engine is an orphan
+ *  ONLY if its owner daemon is gone — an engine still owned by a live daemon (another
+ *  running instance, or the outgoing daemon during a restart overlap) is left untouched.
+ *  Among true orphans we still kill only when the recorded engine port is alive, so we
+ *  never kill a recycled pid; otherwise just clear the stale file. Returns orphans killed. */
+export async function reapStaleEngines(dataDir: string): Promise<number> {
+  let killed = 0
+  for (const { pid, port, owner, file } of readEnginePidFiles(dataDir)) {
+    // Owner still running → a live daemon manages this engine; not ours to reap.
+    if (owner && pidAlive(owner)) continue
+    if (await portAlive(port)) {
+      killPidTree(pid)
+      killed++
+    }
+    try { rmSync(file, { force: true }) } catch { /* best-effort */ }
+  }
+  return killed
+}
+
+/** Synchronous best-effort kill of the engines THIS daemon owns, for a process 'exit'
+ *  handler (which can't await). A last line of defence on top of the signal handlers; the
+ *  startup reap is the real guarantee. Owner-scoped so a daemon exiting during a restart
+ *  overlap never kills the incoming daemon's engine. */
+export function killTrackedEnginesSync(dataDir: string): void {
+  for (const { pid, owner, file } of readEnginePidFiles(dataDir)) {
+    if (owner !== process.pid) continue // not ours — leave another daemon's engine + file alone
+    try {
+      if (process.platform === 'win32') {
+        spawnSync('taskkill', ['/PID', String(pid), '/F', '/T'])
+      } else {
+        process.kill(pid, 'SIGKILL')
+      }
+    } catch {
+      /* process already gone */
+    }
+    try { rmSync(file, { force: true }) } catch { /* best-effort */ }
+  }
+}
+
+/** Kill a process tree by pid (async, fire-and-forget). taskkill /T on Windows takes
+ *  the whole tree; SIGKILL on POSIX. */
+function killPidTree(pid: number): void {
+  if (process.platform === 'win32') {
+    execFile('taskkill', ['/PID', String(pid), '/F', '/T'], () => {})
+  } else {
+    try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
   }
 }
 

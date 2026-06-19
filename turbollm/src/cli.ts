@@ -4,7 +4,7 @@ import { serve } from '@hono/node-server'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ConfigStore, defaultConfigPath, migrateLegacyDataDir } from './config/config'
-import { Manager, type StartOpts } from './engines/manager'
+import { Manager, killTrackedEnginesSync, reapStaleEngines, type StartOpts } from './engines/manager'
 import { ComfyGuard } from './engines/comfy-guard'
 import { Registry } from './engines/registry'
 import { ProvisionState } from './engines/provision-state'
@@ -47,6 +47,18 @@ if (nodeMajor < 22) {
   )
   process.exit(1)
 }
+
+// ── Crash safety net ────────────────────────────────────────────────────────────
+// A client that disconnects mid-stream (Claude cancels a turn, a browser tab closes,
+// `curl | head` exits) can surface a stray AbortError as an UNHANDLED rejection. Node
+// makes that fatal by default — and a dying daemon orphans its llama-server child, which
+// keeps the model loaded and its queue draining while the UI shows nothing. That cascade
+// is the heart of the reported bug. A local inference daemon must outlive any single
+// client: swallow the expected abort, log anything genuinely unexpected, and keep serving.
+process.on('unhandledRejection', (reason) => {
+  if ((reason as { name?: string } | null)?.name === 'AbortError') return
+  console.warn('unhandledRejection (continuing):', reason)
+})
 
 // ── Arg helpers ───────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2)
@@ -107,6 +119,13 @@ const store = ConfigStore.load(argValue('--config', defaultConfigPath()))
 if (store.brokenBackup()) {
   console.warn(`config was reset; previous file backed up at ${store.brokenBackup()}`)
 }
+
+// Reap any engine processes orphaned by a previous daemon that didn't shut down
+// cleanly (terminal closed, killed, crashed) BEFORE we load anything — otherwise a
+// stale llama-server would still hold VRAM and keep draining its queue while this new
+// daemon shows "no model loaded". Best-effort; never blocks startup.
+const reaped = await reapStaleEngines(store.dir()).catch(() => 0)
+if (reaped > 0) console.log(`reaped ${reaped} orphaned engine process(es) from a previous run`)
 
 const registry = new Registry(store)
 const pruned = registry.pruneDeadManagedBuilds()
@@ -408,16 +427,18 @@ void (async () => {
     }
   }
   if (opts) {
-    // Reverse gate (F-011): ask ComfyUI to free its VRAM before we auto-load on start,
-    // same as the HTTP/bench load paths. No-op unless enabled + ComfyUI idle; non-fatal.
-    await comfy.freeComfyUIBeforeLoad()
-    manager.start(opts).catch((e) => console.warn(`auto-load failed: ${e}`))
+    // load() runs the reverse gate (F-011: ask ComfyUI to free its VRAM first) inside
+    // the global load lock, so auto-load can't race a gateway/HTTP load. No-op unless
+    // enabled + ComfyUI idle; non-fatal.
+    manager
+      .load(opts, { beforeStart: () => comfy.freeComfyUIBeforeLoad() })
+      .catch((e) => console.warn(`auto-load failed: ${e}`))
   }
 })()
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
 let shuttingDown = false
-for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
   process.on(sig, () => {
     if (shuttingDown) return
     shuttingDown = true
@@ -428,3 +449,12 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     setTimeout(() => process.exit(0), 12_000).unref()
   })
 }
+
+// Last-resort synchronous safety net: whatever path leads here (clean exit, an
+// unhandled crash that reaches 'exit', a process.exit elsewhere), make sure no engine
+// child is left running. Graceful shutdown above already kills it on signals; this
+// covers exits that bypass them so llama-server can never outlive the daemon. The
+// startup reap is the backstop for the truly abrupt kills that skip 'exit' too.
+process.on('exit', () => {
+  try { killTrackedEnginesSync(store.dir()) } catch { /* best-effort */ }
+})

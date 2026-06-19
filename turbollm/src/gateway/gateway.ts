@@ -7,6 +7,20 @@ import { clampMaxTokens } from '../config/config'
 import { engineModelAlias } from '../engines/compat'
 import { mapToOpenAI, mapFromOpenAI, streamToAnthropic, type AnthropicRequest } from './anthropic'
 
+/** An AbortController that fires when the CLIENT disconnects (Claude Code cancels a
+ *  turn, hits ESC, times out, or closes). Wiring its signal into the upstream engine
+ *  fetch is what stops abandoned requests from running to completion and clogging the
+ *  engine's queue — the in-app chat path already does this; the gateway must too. */
+function clientAbort(c: { req: { raw: Request } }): AbortController {
+  const ac = new AbortController()
+  const sig = c.req.raw.signal
+  if (sig) {
+    if (sig.aborted) ac.abort()
+    else sig.addEventListener('abort', () => ac.abort(), { once: true })
+  }
+  return ac
+}
+
 export function registerGateway(app: Hono, d: Deps): void {
   // ── POST /v1/messages — Anthropic translation (spec 06 §2) ───────────────
 
@@ -55,12 +69,18 @@ export function registerGateway(app: Hono, d: Deps): void {
     // below pairs this with generationEnd so the counter can never leak.
     d.manager.generationStart()
 
+    // Propagate client cancellation to the engine: if Claude Code drops this turn, the
+    // upstream request is aborted instead of running to completion and queuing behind
+    // the engine's slots forever.
+    const ac = clientAbort(c)
+
     let res: Response
     try {
       res = await fetch(`${target}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(oaiBody),
+        signal: ac.signal,
       })
     } catch (e) {
       d.manager.generationEnd()
@@ -101,11 +121,15 @@ export function registerGateway(app: Hono, d: Deps): void {
       // Raw ReadableStream does not — chunks buffer until the response completes,
       // which makes Claude CLI (and any Anthropic-protocol client) appear "slow".
       return streamSSE(c, async (stream) => {
+        // Client went away mid-stream → abort the engine fetch so it stops generating
+        // (the generator's finally then cancels the upstream body reader).
+        stream.onAbort(() => ac.abort())
         try {
           for await (const evt of gen) {
             await stream.writeSSE({ event: evt.event, data: evt.data })
           }
         } finally {
+          ac.abort() // also tear down the upstream on normal completion / write error
           d.manager.generationEnd()
         }
       })
@@ -189,7 +213,11 @@ export function registerGateway(app: Hono, d: Deps): void {
     headers.delete('host')
 
     const maxLimit = d.store.snapshot().modelDefaults.maxTokens ?? 0
-    const init: RequestInit & { duplex?: 'half' } = { method: c.req.method, headers }
+    // Cancel the upstream engine request if the client disconnects (same reason as
+    // /v1/messages above) — abandoned OpenAI-protocol requests would otherwise keep
+    // generating and occupy engine slots.
+    const ac = clientAbort(c)
+    const init: RequestInit & { duplex?: 'half' } = { method: c.req.method, headers, signal: ac.signal }
 
     if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {
       if (isChat) {

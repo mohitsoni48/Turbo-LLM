@@ -8,7 +8,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { homedir, networkInterfaces } from 'node:os'
 import { ValueError, type ApiKey, type McpServer } from '../config/config'
 import type { Deps } from '../deps'
-import { BusyError, type ModelInfo, type StartOpts } from '../engines/manager'
+import { type ModelInfo, type StartOpts } from '../engines/manager'
 import { NameTakenError, NotFoundError } from '../engines/registry'
 import { ProbeError } from '../engines/probe'
 import {
@@ -452,16 +452,14 @@ export function registerApi(app: Hono, d: Deps): void {
           extraArgs: profileToArgs(profile, entry, active.capabilities, sys.cores),
         }
       }
-      await d.manager.stopAndWait()
-      // Reverse gate (F-011): before we take the GPU, ask ComfyUI to free its VRAM.
-      // No-op unless the reverse gate is enabled and ComfyUI is idle; non-fatal on
-      // failure (loads anyway). Forward direction stays guarded by isBlocked() above.
-      await d.comfy?.freeComfyUIBeforeLoad()
-      try {
-        await d.manager.start(opts)
-      } catch (e) {
-        return startError(c, e)
-      }
+      // Single chokepoint (rule 3): load() stops the current model, runs the reverse
+      // gate (F-011: ask ComfyUI to free VRAM first), spawns, and waits for readiness —
+      // all under the global load lock so this can't race another load. Fire-and-forget:
+      // the UI polls /status for the starting→running/error transition, so we return 202
+      // immediately rather than blocking the HTTP request on a multi-second load.
+      void d.manager
+        .load(opts, { beforeStart: () => d.comfy?.freeComfyUIBeforeLoad() ?? Promise.resolve() })
+        .catch((e) => console.warn(`engine load failed: ${e}`))
       d.store.update((x) => {
         x.lastLoaded = { modelKey: entry.key, engineId: active.id }
       })
@@ -479,13 +477,10 @@ export function registerApi(app: Hono, d: Deps): void {
     }
     if (!modelPath) return err(c, 409, 'no_such_model', 'No model specified. Pick one from the Models screen.')
     const opts: StartOpts = { engine: active, model: deriveModel(modelPath, name, extra), modelPath, extraArgs: extra }
-    await d.manager.stopAndWait()
-    await d.comfy?.freeComfyUIBeforeLoad() // reverse gate (F-011) — see note above
-    try {
-      await d.manager.start(opts)
-    } catch (e) {
-      return startError(c, e)
-    }
+    // Same single-chokepoint, fire-and-forget load as the resolved-model branch above.
+    void d.manager
+      .load(opts, { beforeStart: () => d.comfy?.freeComfyUIBeforeLoad() ?? Promise.resolve() })
+      .catch((e) => console.warn(`engine load failed: ${e}`))
     return c.json({ ok: true }, 202)
   })
 
@@ -1363,12 +1358,6 @@ function regErr(c: Context, e: unknown) {
   if (e instanceof NotFoundError) return err(c, 404, 'engine_not_found', 'No engine with that id.')
   if (e instanceof ValueError) return err(c, 400, 'invalid_config_value', e.message)
   return err(c, 500, 'internal', (e as Error).message)
-}
-
-function startError(c: Context, e: unknown) {
-  if (e instanceof BusyError) return err(c, 409, 'engine_already_running', 'An engine is already running.')
-  if ((e as Error).message === 'no_free_port') return err(c, 409, 'no_free_port', 'No free port for the engine (8081–8181 all in use).')
-  return err(c, 500, 'engine_start_failed', (e as Error).message)
 }
 
 function deriveModel(modelPath: string, name: string, extraArgs: string[]): ModelInfo {

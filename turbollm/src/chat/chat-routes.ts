@@ -591,7 +591,13 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
   } catch { /* swallow — stats are best-effort */ }
 
   const finalMsg = db.getMessage(assistantMsg.id)!
-  await stream.writeSSE({ event: 'done', data: JSON.stringify({ message: finalMsg }) })
+  // The client may have already disconnected (cancelled turn / closed tab); writing to a
+  // torn-down stream rejects. Swallow it — the assistant message is persisted above
+  // regardless, and an unhandled rejection here would crash the daemon (and orphan the
+  // engine), which is the root of the reported "requests never end / model stays loaded".
+  try {
+    await stream.writeSSE({ event: 'done', data: JSON.stringify({ message: finalMsg }) })
+  } catch { /* client gone — nothing to flush to */ }
 
   if (!aborted && conv.title === 'New chat' && d.store.snapshot().daemon.autoGenerateTitles) {
     setTimeout(() => { void autoTitle(d, convId, ctx.engineMessages, fullContent, target) }, 1000)
