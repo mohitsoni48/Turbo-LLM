@@ -118,7 +118,11 @@ export function getEngineBackends(): Promise<EngineBackends> {
   return request<EngineBackends>('/api/v1/engines/backends')
 }
 
-export function installBackend(backend: string): Promise<{ accepted: true; backend: string }> {
+/** Install/update a llama.cpp backend build. When the current pinned build is already installed,
+ *  the daemon returns `{ accepted: false, alreadyLatest: true, build }` (no download). */
+export function installBackend(
+  backend: string,
+): Promise<{ accepted: boolean; backend?: string; alreadyLatest?: boolean; build?: string }> {
   return request('/api/v1/engines/backends/install', { method: 'POST', json: { backend } })
 }
 

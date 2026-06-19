@@ -68,9 +68,14 @@ export function LlamaCppBackendRows() {
       onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not disable backend.'),
     })
 
-  // Update = re-run provision (re-downloads the build). backend id (e.g. 'cuda').
+  // Update: the daemon reports 'already latest' when the pinned build is present (no download),
+  // otherwise it provisions the newer build (progress shows via the engineProvision channel).
   const doUpdate = (id: string) =>
     install.updateBackend.mutate(id, {
+      onSuccess: (res) =>
+        res?.alreadyLatest
+          ? toast.success(`You're on the latest build${res.build ? ` (${res.build})` : ''}`)
+          : toast.success('Downloading the latest build…'),
       onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not update backend.'),
     })
 
@@ -125,11 +130,6 @@ export function LlamaCppBackendRows() {
               </Button>
             ) : (
               <>
-                {b.enabled && (
-                  <span className="flex items-center gap-1 text-[12px] font-medium text-accent">
-                    <Check size={13} /> Installed
-                  </span>
-                )}
                 <DropdownMenu>
                   <DropdownMenuTrigger
                     aria-label={`Actions for ${b.label}`}
@@ -285,6 +285,7 @@ export function DiscoverEngines() {
     const m = updateFor(e)
     if (!m) return
     m.mutate(undefined, {
+      onSuccess: () => toast.success(`Updating ${e.name} to the latest release…`),
       onError: (err) =>
         toast.error(err instanceof ApiError ? err.message : `Could not update ${e.name}.`),
     })
@@ -355,11 +356,6 @@ export function DiscoverEngines() {
             <div className="flex shrink-0 items-center gap-2 pt-0.5">
               {isInstalled ? (
                 <>
-                  {isEnabled && (
-                    <span className="flex items-center gap-1 text-[12px] font-medium text-accent">
-                      <Check size={13} /> Installed
-                    </span>
-                  )}
                   <DropdownMenu>
                     <DropdownMenuTrigger
                       aria-label={`Actions for ${e.name}`}

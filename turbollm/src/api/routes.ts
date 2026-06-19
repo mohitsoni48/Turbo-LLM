@@ -150,8 +150,15 @@ export function registerApi(app: Hono, d: Deps): void {
     const b = await body<{ backend?: string }>(c)
     const def = availableBackends().find((x) => x.id === b.backend)
     if (!def) return err(c, 400, 'invalid_config_value', 'Unknown backend for this platform.')
-    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
     const root = join(d.store.dir(), 'engines')
+    // Already at the current pinned build → nothing to download. llama.cpp backends are pinned to
+    // LLAMA_BUILD; a newer build only ships when TurboLLM bumps it (which changes the install dir,
+    // so the row would show Download again). Report 'already latest' so Update gives clear feedback
+    // instead of silently re-running.
+    if (installedBackendServer(root, def.id)) {
+      return c.json({ accepted: false, alreadyLatest: true, build: LLAMA_BUILD })
+    }
+    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
     const ac = new AbortController()
     provisionAbort = ac
     void (async () => {
