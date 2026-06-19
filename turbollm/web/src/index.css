@@ -123,6 +123,17 @@ body {
   animation: tllm-pulse 1.2s ease-in-out infinite;
 }
 
+/* Slim scrollbar — used on panels that need a non-intrusive scroll indicator.
+   Covers webkit (Chrome/Edge/Safari) and Firefox. */
+.slim-scroll::-webkit-scrollbar { width: 5px; }
+.slim-scroll::-webkit-scrollbar-track { background: transparent; }
+.slim-scroll::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background-color: var(--border-strong);
+}
+.slim-scroll::-webkit-scrollbar-thumb:hover { background-color: var(--muted); }
+.slim-scroll { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+
 /* sonner toast tokens → our palette */
 [data-sonner-toaster] {
   --normal-bg: var(--panel);
