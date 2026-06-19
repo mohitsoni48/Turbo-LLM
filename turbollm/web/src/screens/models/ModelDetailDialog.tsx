@@ -4,7 +4,7 @@ import { ChevronDown, ExternalLink, Gauge, RotateCcw, Save, X, Zap } from 'lucid
 import { ApiError } from '../../lib/api'
 import { useBenchActions, useBenchState, useEngines, useModelActions, useModelDetail, useStatus } from '../../lib/queries'
 import type { LoadProfile, SysGpu } from '../../lib/types'
-import { defaultGpu } from '../../lib/types'
+import { defaultGpu, defaultVllm } from '../../lib/types'
 import { estimateVram, gpuBudgetMb } from '../../lib/vram'
 import { Button } from '../../components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../components/ui/dialog'
@@ -110,6 +110,8 @@ export function ModelDetailDialog({
     setDraft((d) => (d ? { ...d, sampling: { ...d.sampling, [k]: v } } : d))
   const setG = <K extends keyof LoadProfile['gpu']>(k: K, v: LoadProfile['gpu'][K]) =>
     setDraft((d) => (d ? { ...d, gpu: { ...(d.gpu ?? defaultGpu()), [k]: v } } : d))
+  const setV = <K extends keyof LoadProfile['vllm']>(k: K, v: LoadProfile['vllm'][K]) =>
+    setDraft((d) => (d ? { ...d, vllm: { ...(d.vllm ?? defaultVllm()), [k]: v } } : d))
 
   const loadError = actions.load.error instanceof ApiError ? actions.load.error.message : null
 
@@ -200,12 +202,32 @@ export function ModelDetailDialog({
             )}
 
             {isVllm && (
-              <div className="rounded-md border border-border bg-panel-2 px-3 py-2.5 text-[12px] text-muted">
-                vLLM manages context length and KV cache automatically — there are no context/GPU-layer/KV
-                knobs to set here. Use <span className="text-ink">tensor parallel size</span> (below, on multi-GPU
-                hosts) to shard the model; <span className="text-ink">sampling defaults</span> apply at load and
-                per-conversation overrides still work in chat.
-              </div>
+              <Section>
+                <Row label="Max model length" hint="vLLM --max-model-len. Max context tokens. 0 = derive from the model config.">
+                  <NumberInput value={draft.vllm?.maxModelLen ?? 0} min={0} max={Math.max(0, detail.nativeCtx || 0)} step={1024} onChange={(v) => setV('maxModelLen', v)} />
+                </Row>
+                <Slider
+                  label="GPU memory utilization"
+                  hint="vLLM --gpu-memory-utilization. Fraction of VRAM vLLM may reserve. Lower it to share the GPU."
+                  value={Math.round((draft.vllm?.gpuMemoryUtilization ?? 0.9) * 100)}
+                  min={10}
+                  max={100}
+                  step={5}
+                  onChange={(v) => setV('gpuMemoryUtilization', v / 100)}
+                  fmt={(v) => `${v}%`}
+                />
+                <Row label="Max concurrent sequences" hint="vLLM --max-num-seqs. Requests served in parallel. 0 = vLLM default.">
+                  <NumberInput value={draft.vllm?.maxNumSeqs ?? 0} min={0} max={1024} step={1} onChange={(v) => setV('maxNumSeqs', v)} />
+                </Row>
+                <Row label="Compute dtype" hint="vLLM --dtype. 'auto' follows the model's config.">
+                  <Select value={draft.vllm?.dtype ?? 'auto'} options={['auto', 'bfloat16', 'float16', 'float32']} onChange={(v) => setV('dtype', v as LoadProfile['vllm']['dtype'])} />
+                </Row>
+                <Row label="KV cache dtype" hint="vLLM --kv-cache-dtype. fp8 roughly halves KV-cache memory.">
+                  <Select value={draft.vllm?.kvCacheDtype ?? 'auto'} options={['auto', 'fp8']} onChange={(v) => setV('kvCacheDtype', v as LoadProfile['vllm']['kvCacheDtype'])} />
+                </Row>
+                <Toggle label="Enforce eager" hint="vLLM --enforce-eager. Skips CUDA graphs: less VRAM, somewhat slower." value={draft.vllm?.enforceEager ?? false} onChange={(v) => setV('enforceEager', v)} />
+                <Toggle label="Trust remote code" hint="vLLM --trust-remote-code. Needed for models that ship custom modelling code." value={draft.vllm?.trustRemoteCode ?? false} onChange={(v) => setV('trustRemoteCode', v)} />
+              </Section>
             )}
 
             {isLlamaCpp && (

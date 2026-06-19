@@ -82,6 +82,10 @@ export async function probeVllm(python: string): Promise<string> {
  * `tensorParallelSize` (ADR-054) shards the model across N GPUs via vLLM's
  * `--tensor-parallel-size`. 1 (or undefined) is vLLM's single-GPU default and emits
  * no flag, so existing single-GPU launches are unchanged.
+ *
+ * `extraArgs` (F-027) carries the model's vLLM load controls (max-model-len,
+ * gpu-memory-utilization, dtype, …) built by the caller via `vllmProfileToArgs`,
+ * mirroring how llama.cpp and MLX pass their flags through `extraArgs`.
  */
 export function vllmServerCommand(
   python: string,
@@ -89,6 +93,7 @@ export function vllmServerCommand(
   port: number,
   host: string,
   tensorParallelSize = 1,
+  extraArgs: string[] = [],
 ): { cmd: string; args: string[] } {
   const args = [
     '-m', 'vllm.entrypoints.openai.api_server',
@@ -101,5 +106,6 @@ export function vllmServerCommand(
     '--port', String(port),
   ]
   if (tensorParallelSize > 1) args.push('--tensor-parallel-size', String(tensorParallelSize))
+  args.push(...extraArgs)
   return { cmd: python, args }
 }

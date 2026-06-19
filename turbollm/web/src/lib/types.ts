@@ -318,6 +318,8 @@ export type LoadProfile = {
   ropeFreqScale: number
   /** Multi-GPU split settings (ADR-054). Mirrors the daemon's GpuProfile. */
   gpu: GpuProfile
+  /** vLLM-specific load controls (F-027). Mirrors the daemon's VllmProfile. */
+  vllm: VllmProfile
   extraArgs: string[]
   tunedBy?: string
 }
@@ -335,6 +337,37 @@ export type GpuProfile = {
 
 export function defaultGpu(): GpuProfile {
   return { splitMode: 'layer', tensorSplit: [], mainGpu: -1, tensorParallelSize: 1 }
+}
+
+/** vLLM load controls (F-027). Mirrors the daemon's VllmProfile; maps to vLLM CLI flags.
+ *  Defaults match vLLM's own, so an untouched profile changes nothing at launch. */
+export type VllmProfile = {
+  /** --max-model-len (0 = derive from the model config). */
+  maxModelLen: number
+  /** --gpu-memory-utilization 0–1 (0.9 = vLLM default). */
+  gpuMemoryUtilization: number
+  /** --max-num-seqs concurrent sequences (0 = vLLM default). */
+  maxNumSeqs: number
+  /** --dtype compute precision. */
+  dtype: 'auto' | 'bfloat16' | 'float16' | 'float32'
+  /** --kv-cache-dtype (fp8 ~halves KV memory). */
+  kvCacheDtype: 'auto' | 'fp8'
+  /** --enforce-eager (skip CUDA graphs: less VRAM, slower). */
+  enforceEager: boolean
+  /** --trust-remote-code (models shipping custom modelling code). */
+  trustRemoteCode: boolean
+}
+
+export function defaultVllm(): VllmProfile {
+  return {
+    maxModelLen: 0,
+    gpuMemoryUtilization: 0.9,
+    maxNumSeqs: 0,
+    dtype: 'auto',
+    kvCacheDtype: 'auto',
+    enforceEager: false,
+    trustRemoteCode: false,
+  }
 }
 
 export type FitVerdict = 'fits' | 'tight' | 'overflow' | 'cpu' | 'unknown'

@@ -495,7 +495,7 @@ function engineCommand(opts: StartOpts, port: number, slotSavePath?: string): { 
     // vLLM: run the OpenAI server via the provisioned venv python. modelPath is an
     // HF repo id or a local safetensors dir; llama.cpp LoadProfile flags don't apply,
     // but the multi-GPU shard count (ADR-054) maps to --tensor-parallel-size.
-    return vllmServerCommand(opts.engine.binPath, opts.modelPath, port, '127.0.0.1', opts.tensorParallelSize)
+    return vllmServerCommand(opts.engine.binPath, opts.modelPath, port, '127.0.0.1', opts.tensorParallelSize, opts.extraArgs)
   }
   return { cmd: opts.engine.binPath, args: buildArgs(opts, port, slotSavePath) }
 }

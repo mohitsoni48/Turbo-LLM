@@ -43,6 +43,41 @@ export function defaultGpu(): GpuProfile {
   return { splitMode: 'layer', tensorSplit: [], mainGpu: -1, tensorParallelSize: 1 }
 }
 
+/** vLLM-specific load controls (F-027). vLLM is a full server with richer load-time config
+ *  than llama.cpp — these map to its CLI flags in {@link vllmProfileToArgs}. Defaults are
+ *  deliberate no-ops (match vLLM's own defaults) so a fresh profile emits no extra flags:
+ *
+ *    maxModelLen          → --max-model-len N            (0 = derive from the model config)
+ *    gpuMemoryUtilization → --gpu-memory-utilization F   (0.90 = vLLM default; lower to share VRAM)
+ *    maxNumSeqs           → --max-num-seqs N             (0 = vLLM default; concurrent sequences)
+ *    dtype                → --dtype {auto,bfloat16,float16,float32}
+ *    kvCacheDtype         → --kv-cache-dtype {auto,fp8}  (fp8 ~halves KV memory)
+ *    enforceEager         → --enforce-eager              (skip CUDA graphs: less VRAM, slower)
+ *    trustRemoteCode      → --trust-remote-code          (models that ship custom modelling code)
+ *
+ *  Tensor-parallel (multi-GPU shard count) stays on {@link GpuProfile.tensorParallelSize}. */
+export interface VllmProfile {
+  maxModelLen: number
+  gpuMemoryUtilization: number
+  maxNumSeqs: number
+  dtype: 'auto' | 'bfloat16' | 'float16' | 'float32'
+  kvCacheDtype: 'auto' | 'fp8'
+  enforceEager: boolean
+  trustRemoteCode: boolean
+}
+
+export function defaultVllm(): VllmProfile {
+  return {
+    maxModelLen: 0,
+    gpuMemoryUtilization: 0.9,
+    maxNumSeqs: 0,
+    dtype: 'auto',
+    kvCacheDtype: 'auto',
+    enforceEager: false,
+    trustRemoteCode: false,
+  }
+}
+
 export interface LoadProfile {
   ctx: number
   ngl: number
@@ -81,6 +116,8 @@ export interface LoadProfile {
   ropeFreqScale: number
   /** Multi-GPU split settings (ADR-054). See {@link GpuProfile}. */
   gpu: GpuProfile
+  /** vLLM-specific load controls (F-027). See {@link VllmProfile}. Ignored by llama.cpp/MLX. */
+  vllm: VllmProfile
   /** GBNF grammar enforced at startup (--grammar). Empty string = no constraint.
    *  Power-user override for models that should always respond in a fixed format. */
   grammar: string
@@ -192,6 +229,7 @@ export function deriveDefault(m: ModelEntry, sys: SysInfo): LoadProfile {
     ropeFreqBase: 0,
     ropeFreqScale: 0,
     gpu: defaultGpu(),
+    vllm: defaultVllm(),
     grammar: '',
     extraArgs: [],
   }
@@ -248,6 +286,8 @@ export function resolveProfile(
     // gpu is deep-merged like sampling so a partial override (or an old saved profile
     // missing some fields) keeps the rest of the defaults instead of going undefined.
     gpu: { ...base.gpu, ...(saved?.gpu ?? {}), ...(overrides?.gpu ?? {}) },
+    // vllm deep-merged for the same reason — old/partial profiles keep the defaults.
+    vllm: { ...base.vllm, ...(saved?.vllm ?? {}), ...(overrides?.vllm ?? {}) },
   }
 }
 
@@ -333,6 +373,27 @@ export function profileToArgs(p: LoadProfile, m: ModelEntry, caps: Capabilities,
   if (m.embedding && has('--embeddings')) a.push('--embeddings')
   // Startup GBNF grammar constraint — only emitted when the user has set one.
   if (p.grammar && has('--grammar')) a.push('--grammar', p.grammar)
+  a.push(...p.extraArgs)
+  return a
+}
+
+/** Map a profile's vLLM block to vLLM OpenAI-server CLI flags (F-027). The manager injects
+ *  -m/--model/--served-model-name/--host/--port and the tensor-parallel flag; this returns the
+ *  rest. Each flag is emitted only when it deviates from vLLM's own default, so a fresh profile
+ *  produces no extra args (launch is unchanged from before this feature). User `extraArgs` pass
+ *  through last so they can override anything. */
+export function vllmProfileToArgs(p: LoadProfile): string[] {
+  const v = p.vllm ?? defaultVllm()
+  const a: string[] = []
+  if (v.maxModelLen > 0) a.push('--max-model-len', String(v.maxModelLen))
+  if (v.gpuMemoryUtilization > 0 && v.gpuMemoryUtilization !== 0.9) {
+    a.push('--gpu-memory-utilization', String(v.gpuMemoryUtilization))
+  }
+  if (v.maxNumSeqs > 0) a.push('--max-num-seqs', String(v.maxNumSeqs))
+  if (v.dtype !== 'auto') a.push('--dtype', v.dtype)
+  if (v.kvCacheDtype !== 'auto') a.push('--kv-cache-dtype', v.kvCacheDtype)
+  if (v.enforceEager) a.push('--enforce-eager')
+  if (v.trustRemoteCode) a.push('--trust-remote-code')
   a.push(...p.extraArgs)
   return a
 }

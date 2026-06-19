@@ -25,7 +25,7 @@ import { ensureVllmEnv } from '../engines/vllm'
 import { catalogForPlatform, catalogEngine } from '../engines/catalog'
 import { engineAcceptsFormat } from '../engines/compat'
 import { ScannerError, type ModelEntry } from '../models/scanner'
-import { estimateVram, type LoadProfile, profileToArgs, resolveProfile } from '../models/profile'
+import { estimateVram, type LoadProfile, profileToArgs, resolveProfile, vllmProfileToArgs } from '../models/profile'
 import { getSysInfo, primaryVendor } from '../sysinfo/sysinfo'
 import { HfError } from '../hf/hf'
 import { DownloadError } from '../downloads/downloads'
@@ -428,18 +428,22 @@ export function registerApi(app: Hono, d: Deps): void {
       }
       let opts: StartOpts
       if (entry.format !== 'gguf') {
-        // MLX / vLLM: no llama.cpp LoadProfile; the model dir is the launch target.
-        // vLLM still honors the per-model multi-GPU shard count (ADR-054) — read it
-        // straight off any saved profile (GGUF-oriented resolveProfile doesn't apply
-        // to safetensors); MLX ignores it. 1/absent = single GPU.
+        // MLX / vLLM: the model dir is the launch target (no llama.cpp -ngl/ctx knobs).
+        // MLX honors sampling defaults; vLLM honors its own load controls (F-027,
+        // --max-model-len/--gpu-memory-utilization/--dtype/…) built via vllmProfileToArgs,
+        // plus the multi-GPU shard count (ADR-054) mapped to --tensor-parallel-size below.
         const savedProfile = cfg.modelProfiles[entry.key] as Partial<LoadProfile> | undefined
+        const extraArgs =
+          active.kind === 'mlx'
+            ? mlxSamplingArgs(savedProfile?.sampling)
+            : active.kind === 'vllm'
+              ? vllmProfileToArgs(resolveProfile(entry, sys, savedProfile, b.profileOverrides, cfg.modelDefaults))
+              : []
         opts = {
           engine: active,
           model: { key: entry.key, name: entry.name, quant: entry.quant, ctx: entry.nativeCtx, vision: false },
           modelPath: entry.path,
-          // MLX honors sampling as launch defaults; vLLM gets no extra flags here
-          // (its multi-GPU shard count maps to --tensor-parallel-size below).
-          extraArgs: active.kind === 'mlx' ? mlxSamplingArgs(savedProfile?.sampling) : [],
+          extraArgs,
           tensorParallelSize: savedProfile?.gpu?.tensorParallelSize,
         }
       } else {
