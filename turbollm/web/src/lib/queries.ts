@@ -25,6 +25,7 @@ import {
   getTelemetryPreview,
   cancelBackendDownload,
   cancelBench,
+  saveBench,
   createApiKey,
   deleteApiKey,
   deleteEngineBackend,
@@ -142,6 +143,13 @@ export function useBenchActions() {
       },
     }),
     cancel: useMutation({ mutationFn: () => cancelBench(), onSuccess: invalidate }),
+    save: useMutation({
+      mutationFn: () => saveBench(),
+      onSuccess: (_d, _v) => {
+        invalidate()
+        void qc.invalidateQueries({ queryKey: ['model'] })
+      },
+    }),
   }
 }
 

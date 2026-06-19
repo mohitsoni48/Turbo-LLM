@@ -82,6 +82,9 @@ export type BenchState = {
   candidates?: BenchCandidate[]
   done?: boolean
   error?: string
+  /** Winning candidate of a finished run — drives the Save/Cancel results dialog. The profile is
+   *  only persisted when the user clicks Save (POST /bench/save). */
+  result?: { params: BenchCandidate['params']; tps: number; ttftMs: number; vramMb: number | null }
 }
 
 /** Live per-request progress for the engine card (spec 11), from GET /api/v1/status.

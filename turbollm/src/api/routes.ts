@@ -718,6 +718,13 @@ export function registerApi(app: Hono, d: Deps): void {
     return c.json({ ok: true })
   })
 
+  // Persist the finished auto-tune's winning profile (the user clicked Save in the results dialog).
+  app.post('/api/v1/bench/save', (c) => {
+    const saved = d.bench.saveResult()
+    if (!saved) return err(c, 409, 'no_bench_result', 'No auto-tune result to save.')
+    return c.json({ ok: true })
+  })
+
   // ---- models (A3, spec 04) ----
   app.get('/api/v1/models', (c) => {
     const { models, scanning, lastScanAt } = d.scanner.list()

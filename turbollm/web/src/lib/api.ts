@@ -322,6 +322,11 @@ export function cancelBench(): Promise<{ ok: true }> {
   return request<{ ok: true }>('/api/v1/bench/cancel', { method: 'POST', json: {} })
 }
 
+/** Persist the finished auto-tune's winning profile (the user clicked Save). 409 if nothing to save. */
+export function saveBench(): Promise<{ ok: true }> {
+  return request<{ ok: true }>('/api/v1/bench/save', { method: 'POST', json: {} })
+}
+
 // ── Settings (daemon config UI subset) ───────────────────────────────────────
 /** Global model defaults (spec 05 §3): base load values applied to never-seen
  *  models that have no saved per-model profile. */

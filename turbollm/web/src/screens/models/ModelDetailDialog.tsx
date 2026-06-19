@@ -8,6 +8,16 @@ import { defaultGpu, defaultVllm } from '../../lib/types'
 import { estimateVram, gpuBudgetMb } from '../../lib/vram'
 import { Button } from '../../components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../components/ui/dialog'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '../../components/ui/alert-dialog'
 import { toast } from '../../components/ui/sonner'
 
 /**
@@ -150,7 +160,22 @@ export function ModelDetailDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [benchDone, detail?.key])
 
+  // Auto-tune results dialog (shown on a finished run). Both buttons close the whole model dialog;
+  // Save persists the tuned profile (POST /bench/save), Cancel discards it.
+  const onTuneSave = () => {
+    bench.save.mutate(undefined, {
+      onSuccess: () => toast.success('Tuned settings saved'),
+      onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not save tuned settings.'),
+    })
+    onClose()
+  }
+  const onTuneCancel = () => {
+    bench.cancel.mutate()
+    onClose()
+  }
+
   return (
+    <>
     <Dialog open={!!modelKey} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-[560px] slim-scroll">
         <DialogHeader>
@@ -455,6 +480,61 @@ export function ModelDetailDialog({
         )}
       </DialogContent>
     </Dialog>
+    <AutoTuneResultDialog
+      result={benchDone && benchHere ? benchState?.result : undefined}
+      modelName={detail?.name}
+      onSave={onTuneSave}
+      onCancel={onTuneCancel}
+    />
+    </>
+  )
+}
+
+/** Shown when an auto-tune run finishes: the winning config + Save/Cancel. Both close the model
+ *  dialog (handled by the parent); Save persists the tuned profile, Cancel discards it. */
+function AutoTuneResultDialog({
+  result,
+  modelName,
+  onSave,
+  onCancel,
+}: {
+  result?: { params: { ctx: number; ngl: number; nCpuMoe: number }; tps: number; vramMb: number | null }
+  modelName?: string
+  onSave: () => void
+  onCancel: () => void
+}) {
+  return (
+    <AlertDialog open={!!result} onOpenChange={(o) => { if (!o) onCancel() }}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Auto-tune complete</AlertDialogTitle>
+          <AlertDialogDescription asChild>
+            <div className="flex flex-col gap-2 text-[13px]">
+              <span>
+                Fastest config found:{' '}
+                <span className="font-mono font-medium" style={{ color: 'var(--ok)' }}>{result?.tps.toFixed(1)} tok/s</span>{' '}
+                on your machine.
+              </span>
+              {result && (
+                <span className="text-muted">
+                  GPU layers <span className="font-mono text-ink">{result.params.ngl}</span>
+                  {result.params.nCpuMoe > 0 && (
+                    <> · MoE experts on CPU <span className="font-mono text-ink">{result.params.nCpuMoe}</span></>
+                  )}
+                  {' '}· <span className="font-mono text-ink">{result.params.ctx.toLocaleString()}</span> ctx
+                  {result.vramMb != null && <> · ~<span className="font-mono text-ink">{result.vramMb}</span> MB VRAM</>}
+                </span>
+              )}
+              <span className="text-faint">Save applies these settings to {modelName ?? 'this model'} and closes.</span>
+            </div>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel onClick={onCancel}>Cancel</AlertDialogCancel>
+          <AlertDialogAction onClick={onSave}>Save</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   )
 }
 

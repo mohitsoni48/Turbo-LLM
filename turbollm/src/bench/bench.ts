@@ -37,6 +37,9 @@ export interface BenchState {
   candidates?: BenchCandidate[]
   done?: boolean
   error?: string
+  /** The winning candidate, surfaced when a run finishes so the UI can show a Save/Cancel
+   *  results dialog. The profile is NOT persisted until the user clicks Save (POST /bench/save). */
+  result?: { params: BenchCandidate['params']; tps: number; ttftMs: number; vramMb: number | null }
 }
 
 // Hard limits (spec 09 §1).
@@ -79,6 +82,10 @@ export class BenchRunner {
   // stop/restart/load (kill switches) interrupts auto-tune immediately rather than
   // waiting out the current candidate's request.
   private abort: AbortController | null = null
+  // The finished run's winning candidate, held (not persisted) until the user clicks Save.
+  private winning:
+    | { modelKey: string; profile: LoadProfile; cand: BenchCandidate; entry: ModelEntry; sys: SysInfo; engineVersion: string }
+    | null = null
 
   constructor(
     private manager: Manager,
@@ -102,9 +109,23 @@ export class BenchRunner {
    *  current step, leaves the engine stopped, and keeps the partial results gathered so far
    *  (AC#3). A no-op when nothing is running. */
   cancel(): void {
+    this.winning = null // discard any unsaved result too
+    this.state = { ...this.state, result: undefined } // don't re-show the results dialog
     if (!this.state.running) return
     this.cancelled = true
     this.abort?.abort()
+  }
+
+  /** Persist the finished run's winning profile (the user clicked Save). Returns false if there is
+   *  nothing to save (no completed run, or it was already saved / discarded). */
+  saveResult(): boolean {
+    const w = this.winning
+    if (!w) return false
+    const record = this.persistBest(w.modelKey, w.profile, w.cand)
+    this.queueTelemetry(record, w.entry, w.sys, this.version, w.engineVersion)
+    this.winning = null
+    this.state = { ...this.state, result: undefined } // consumed — don't re-show the dialog
+    return true
   }
 
   /** Resolve once no run is in flight (the runner has finished its teardown), or after
@@ -134,6 +155,7 @@ export class BenchRunner {
 
     this.cancelled = false
     this.abort = new AbortController()
+    this.winning = null
     this.deadline = Date.now() + TOTAL_BUDGET_MS
     this.state = { running: true, modelKey, step: 'Preparing…', candidates: [] }
     void this.run(modelKey, entry, base).catch((e) => {
@@ -172,9 +194,17 @@ export class BenchRunner {
     await this.manager.stopAndWait().catch(() => {})
 
     if (best) {
-      const record = this.persistBest(modelKey, best.profile, best.cand)
-      this.queueTelemetry(record, entry, sys, this.version, active?.version ?? '')
-      this.state = { running: false, modelKey, done: true, bestTps: best.cand.tps ?? undefined, candidates: results }
+      // Hold the winner instead of auto-saving — the UI shows a Save/Cancel results dialog and
+      // persists via POST /bench/save only when the user clicks Save.
+      this.winning = { modelKey, profile: best.profile, cand: best.cand, entry, sys, engineVersion: active?.version ?? '' }
+      this.state = {
+        running: false,
+        modelKey,
+        done: true,
+        bestTps: best.cand.tps ?? undefined,
+        result: { params: best.cand.params, tps: best.cand.tps ?? 0, ttftMs: best.cand.ttftMs ?? 0, vramMb: best.cand.vramMb },
+        candidates: results,
+      }
     } else {
       // No candidate measured successfully — keep the partial results, surface a soft error
       // (every candidate's outcome is visible in `candidates`). When every trial ran out of VRAM,
