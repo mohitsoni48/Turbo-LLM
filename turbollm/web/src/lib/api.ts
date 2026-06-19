@@ -534,3 +534,54 @@ export function chatCompletion(input: {
     json: { model: input.model, messages: input.messages, stream: false },
   })
 }
+
+// ── F-023: chat share ─────────────────────────────────────────────────────────
+
+/** Get the LAN share URL for a conversation.
+ *  Returns { url, onlyLocal } — onlyLocal=true when no LAN interface was found. */
+export function getShareUrl(convId: string): Promise<{ url: string; onlyLocal: boolean }> {
+  return request<{ url: string; onlyLocal: boolean }>(`/api/v1/conversations/${encodeURIComponent(convId)}/share-url`)
+}
+
+/** Fetch the debug snapshot JSON string for a conversation (format=debug). */
+export async function getDebugSnapshot(convId: string): Promise<string> {
+  const res = await fetch(`/api/v1/conversations/${encodeURIComponent(convId)}/export?format=debug`, {
+    headers: { Accept: 'application/json', ...authHeaders() },
+  })
+  if (!res.ok) throw new ApiError('export_failed', `Export failed with status ${res.status}.`, res.status)
+  return res.text()
+}
+
+// ── F-024: export / import chat ───────────────────────────────────────────────
+
+/** Trigger a browser download of the chat as a .turbollm-chat.json file. */
+export function downloadChatExport(convId: string): void {
+  // Build a hidden anchor with auth header isn't possible; use a form or direct href.
+  // Since the auth token may be needed, fetch the blob and trigger download via object URL.
+  const headers: Record<string, string> = { Accept: 'application/json', ...authHeaders() }
+  fetch(`/api/v1/conversations/${encodeURIComponent(convId)}/export?format=export`, { headers })
+    .then(async (res) => {
+      if (!res.ok) throw new Error(`Export failed with status ${res.status}`)
+      const cd = res.headers.get('Content-Disposition') ?? ''
+      const nameMatch = cd.match(/filename="([^"]+)"/)
+      const filename = nameMatch ? nameMatch[1] : 'chat.turbollm-chat.json'
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    })
+    .catch(() => { /* silently ignore — caller shows error via toast */ })
+}
+
+/** Import a chat from a parsed JSON object. Returns the new conversation id. */
+export function importChat(payload: unknown): Promise<{ id: string }> {
+  return request<{ id: string }>('/api/v1/conversations/import', {
+    method: 'POST',
+    json: payload,
+  })
+}
