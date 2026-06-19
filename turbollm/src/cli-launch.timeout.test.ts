@@ -37,14 +37,33 @@ function stubFetch(model = 'qwen3-8b'): () => void {
   return () => { globalThis.fetch = original }
 }
 
+/** Silence process stdout/stderr for the duration of a launchCli call. launchCli writes
+ *  a "▸ Launching…" banner to stdout; under the full `node --test` suite each file runs in
+ *  a subprocess whose stdout IS the V8-serialized result channel the parent runner parses,
+ *  so raw writes corrupt that stream ("Unable to deserialize cloned data"). Capturing the
+ *  writes keeps the channel clean and the test deterministic. */
+function silenceOutput(): () => void {
+  const outW = process.stdout.write.bind(process.stdout)
+  const errW = process.stderr.write.bind(process.stderr)
+  const noop = (() => true) as typeof process.stdout.write
+  process.stdout.write = noop
+  process.stderr.write = noop
+  return () => {
+    process.stdout.write = outW
+    process.stderr.write = errW
+  }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 test('launchCli passes ANTHROPIC_TIMEOUT=300000 to Claude Code spawn', async () => {
   const { calls, fn } = makeSpawn()
   const restore = stubFetch()
+  const unsilence = silenceOutput()
   try {
     await launchCli('claude', 6996, [], fn)
   } finally {
+    unsilence()
     restore()
   }
   assert.equal(calls.length, 1, 'spawn should be called once')
@@ -58,9 +77,11 @@ test('launchCli passes ANTHROPIC_TIMEOUT=300000 to Claude Code spawn', async () 
 test('launchCli passes ANTHROPIC_MAX_RETRIES=0 to Claude Code spawn', async () => {
   const { calls, fn } = makeSpawn()
   const restore = stubFetch()
+  const unsilence = silenceOutput()
   try {
     await launchCli('claude', 6996, [], fn)
   } finally {
+    unsilence()
     restore()
   }
   assert.equal(calls.length, 1, 'spawn should be called once')
