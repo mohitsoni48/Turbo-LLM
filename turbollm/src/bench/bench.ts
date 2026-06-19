@@ -259,7 +259,8 @@ export class BenchRunner {
       await this.settleGpu()
 
       if (cand.outcome === 'ok' && cand.tps !== null) {
-        // More GPU layers is always faster; the last ok in the search has the highest ngl.
+        // More GPU layers is faster UP TO the no-spill edge; record and try higher. confirmPeak()
+        // afterward walks back down if the highest "ok" was actually spilling over PCIe.
         if (!best || cand.tps > (best.cand.tps ?? 0)) best = { cand, profile }
         this.state = { ...this.state, bestTps: best.cand.tps ?? undefined }
         lo = mid + 1  // try higher
@@ -270,7 +271,7 @@ export class BenchRunner {
         hi = mid - 1
       }
     }
-    return best
+    return best ? await this.confirmPeak(entry, sys, base, caps, results, best, 'ngl', 0) : null
   }
 
   /** Binary search over nCpuMoe to find the minimum number of MoE experts kept on CPU
@@ -308,6 +309,43 @@ export class BenchRunner {
         hi = mid - 1
       } else {
         lo = mid + 1  // crash / timeout → treat as memory pressure
+      }
+    }
+    return best ? await this.confirmPeak(entry, sys, base, caps, results, best, 'nCpuMoe', maxN) : null
+  }
+
+  /** Spill correction (unimodal throughput). The binary search picks the config that "fits", but a
+   *  config that overflows VRAM into shared memory passes the fit/prefill check yet is PCIe-bottlenecked
+   *  — so t/s actually PEAKS at the no-spill edge and drops once spilling. After the search, step ONE
+   *  toward LESS GPU (moe: +1 expert on CPU; dense: -1 GPU layer) and keep it only while it's faster:
+   *  if the pick was spilling, this follows the curve up to the real peak; if not, it confirms the pick
+   *  in one extra trial. */
+  private async confirmPeak(
+    entry: ModelEntry,
+    sys: SysInfo,
+    base: LoadProfile,
+    caps: Engine['capabilities'],
+    results: BenchCandidate[],
+    best: { cand: BenchCandidate; profile: LoadProfile },
+    knob: 'ngl' | 'nCpuMoe',
+    maxNCpuMoe: number,
+  ): Promise<{ cand: BenchCandidate; profile: LoadProfile }> {
+    for (let guard = 0; guard < 8 && !this.cancelled && Date.now() <= this.deadline; guard++) {
+      const cur = knob === 'nCpuMoe' ? best.cand.params.nCpuMoe : best.cand.params.ngl
+      const next = knob === 'nCpuMoe' ? cur + 1 : cur - 1 // one step toward LESS GPU
+      if (knob === 'nCpuMoe' ? next > maxNCpuMoe : next < 0) break
+      const label = `${knob}=${next}`
+      this.state = { ...this.state, step: `Confirming ${label} (spill check)…`, candidates: results }
+      const profile: LoadProfile = knob === 'nCpuMoe' ? { ...base, nCpuMoe: next } : { ...base, ngl: next }
+      const cand = await this.measure(entry, sys, profile, caps, label, `Confirming ${label}`)
+      results.push(cand)
+      this.state = { ...this.state, candidates: results }
+      await this.settleGpu()
+      if (cand.outcome === 'ok' && cand.tps !== null && cand.tps > (best.cand.tps ?? 0)) {
+        best = { cand, profile } // the previous pick was spilling — this one's faster
+        this.state = { ...this.state, bestTps: best.cand.tps ?? undefined }
+      } else {
+        break // no improvement → the previous pick is the peak
       }
     }
     return best
