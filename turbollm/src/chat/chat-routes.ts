@@ -5,6 +5,7 @@ import type { Deps } from '../deps'
 import { clampMaxTokens } from '../config/config'
 import { engineModelAlias } from '../engines/compat'
 import { feedChunk, flushState, initParseState } from './parser'
+import { needsExtraPass } from './think-utils'
 import { getSysInfo } from '../sysinfo/sysinfo'
 import type { MessageStats, ToolCallRecord } from './db'
 
@@ -534,6 +535,106 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
 
       // No tool calls (or tools not available) — done
       break outerLoop
+    }
+
+    // ── BUG-001: Qwen3 empty-reply guard ──────────────────────────────────────
+    // Thinking models sometimes produce ONLY <think>…</think> tokens in their
+    // final pass after tool results, leaving visible content empty. Detect this
+    // and make one extra inference pass with tool_choice:'none' so the model is
+    // forced to emit a text answer.
+    console.log(`[chat] tool loop finished after ${toolIter} iteration(s); visible content length: ${fullContent.trim().length}`)
+    if (needsExtraPass(fullContent)) {
+      console.log('[chat] BUG-001: final content is empty after stripping think blocks — making extra pass with tool_choice:none')
+      iterMessages.push({ role: 'user', content: 'Please now write your final answer based on what you found.' })
+      const reqBody: Record<string, unknown> = {
+        model: engineModelAlias(d.registry.active()?.kind ?? '') ?? ms.model!.key,
+        messages: iterMessages,
+        stream: true,
+        stream_options: { include_usage: true },
+        return_progress: true,
+        tool_choice: 'none',
+        ...samplingOverride,
+      }
+      if (stopStrings?.length) reqBody.stop = stopStrings
+      const cappedMax = clampMaxTokens(reqBody.max_tokens as number | undefined, maxLimit)
+      if (cappedMax != null) reqBody.max_tokens = cappedMax
+      else delete reqBody.max_tokens
+      if (disableThinking) {
+        reqBody.reasoning_budget = 0
+        reqBody.chat_template_kwargs = { enable_thinking: false }
+      }
+
+      const res = await fetch(`${target}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(reqBody),
+        signal: ac.signal,
+        duplex: 'half',
+      })
+
+      if (res.ok && res.body) {
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let buf = ''
+        const cancelReader = () => void reader.cancel()
+        if (ac.signal.aborted) {
+          cancelReader()
+        } else {
+          ac.signal.addEventListener('abort', cancelReader, { once: true })
+        }
+
+        let parseState = initParseState()
+        roundLoop: while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          const lines = buf.split('\n')
+          buf = lines.pop() ?? ''
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue
+            const raw = line.slice(6).trim()
+            if (raw === '[DONE]') break roundLoop
+            let chunk: Record<string, unknown>
+            try { chunk = JSON.parse(raw) as Record<string, unknown> } catch { continue }
+            if (chunk.usage) finalUsage = chunk.usage as typeof finalUsage
+            if (chunk.timings) finalTimings = chunk.timings as typeof finalTimings
+            const choices = chunk.choices as Array<{ delta?: { content?: string; reasoning_content?: string; reasoning?: string }; finish_reason?: string }> | undefined
+            if (!choices?.length) continue
+            const delta = choices[0].delta ?? {}
+            const rc = (delta.reasoning_content ?? delta.reasoning) as string | undefined
+            if (rc) {
+              fullReasoning += rc
+              await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: rc }) })
+              continue
+            }
+            const raw_content = delta.content ?? ''
+            if (!raw_content) continue
+            const { state: nextState, events: parseEvents } = feedChunk(parseState, raw_content)
+            parseState = nextState
+            for (const ev of parseEvents) {
+              if (ev.type === 'reasoning') {
+                fullReasoning += ev.text
+                await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: ev.text }) })
+              } else {
+                fullContent += ev.text
+                if (!ttftMs) ttftMs = Date.now() - requestStart
+                d.manager.setLiveGen({ phase: 'gen', pct: 0, outputTokens: ++liveOut })
+                await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: ev.text }) })
+              }
+            }
+          }
+        }
+        ac.signal.removeEventListener('abort', cancelReader)
+        for (const ev of flushState(parseState)) {
+          if (ev.type === 'reasoning') {
+            fullReasoning += ev.text
+            await stream.writeSSE({ event: 'reasoning', data: JSON.stringify({ delta: ev.text }) })
+          } else {
+            fullContent += ev.text
+            await stream.writeSSE({ event: 'delta', data: JSON.stringify({ delta: ev.text }) })
+          }
+        }
+      }
     }
   } catch (e: unknown) {
     const isAbort = (e as Error)?.name === 'AbortError'
