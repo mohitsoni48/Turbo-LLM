@@ -1,6 +1,7 @@
 // Built-in tool definitions and execution (v0.7.0).
 // Tools: web_search (Tavily), fetch_url, run_code (Node vm sandbox).
 import { runInNewContext } from 'node:vm'
+import { checkSsrf, RUN_CODE_BLOCKED_MSG } from './security'
 
 // ── Tool JSON-schema definitions (OpenAI tool format) ─────────────────────
 
@@ -123,6 +124,9 @@ export async function execFetchUrl(args: Record<string, unknown>): Promise<strin
   if (!url) return 'Error: url is required.'
   if (!/^https?:\/\//i.test(url)) return 'Error: URL must start with http:// or https://'
 
+  const ssrfErr = await checkSsrf(url)
+  if (ssrfErr) return ssrfErr
+
   let resp: Response
   try {
     resp = await fetch(url, {
@@ -161,9 +165,10 @@ export async function execFetchUrl(args: Record<string, unknown>): Promise<strin
 
 // ── Run code ─────────────────────────────────────────────────────────────
 
-export function execRunCode(args: Record<string, unknown>): string {
+export function execRunCode(args: Record<string, unknown>, requireConfirmation = false): string {
   const code = String(args.code ?? '').trim()
   if (!code) return 'Error: code is required.'
+  if (requireConfirmation) return RUN_CODE_BLOCKED_MSG
 
   const output: string[] = []
   const sandbox = {

@@ -68,6 +68,9 @@ export interface HF {
 /** Built-in tool configuration (v0.7.0). */
 export interface ToolsConfig {
   tavily?: { apiKey: string }
+  /** When true (default), run_code emits a confirmation-required message instead of
+   *  executing immediately, giving the user a chance to approve (F-019). */
+  requireRunCodeConfirmation?: boolean
 }
 
 /** One MCP server the daemon manages as a tool provider (v0.7.0). */
@@ -449,6 +452,8 @@ function normalize(c: Config): void {
   if (tl.tavily && typeof tl.tavily.apiKey === 'string') {
     c.tools.tavily = { apiKey: tl.tavily.apiKey }
   }
+  // requireRunCodeConfirmation (F-019): absent in pre-F-019 configs → true (safe default).
+  c.tools.requireRunCodeConfirmation = tl.requireRunCodeConfirmation !== false
   // MCP host (v0.7.0): absent in pre-v0.7.0 configs → empty server list.
   const mc = (c.mcp ?? {}) as Partial<McpConfig>
   c.mcp = {

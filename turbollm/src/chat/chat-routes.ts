@@ -502,6 +502,18 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
           try { parsedArgs = JSON.parse(tc.argsBuffer || '{}') as Record<string, unknown> }
           catch { parsedArgs = {} }
 
+          // When run_code confirmation is required, emit a gate event so the
+          // frontend can prompt the user — tool execution is skipped this round (F-019).
+          const requireConfirm =
+            tc.name === 'run_code' &&
+            d.store.snapshot().tools.requireRunCodeConfirmation !== false
+          if (requireConfirm) {
+            await stream.writeSSE({
+              event: 'tool_confirmation_required',
+              data: JSON.stringify({ id: tc.id, name: tc.name, args: parsedArgs }),
+            })
+          }
+
           // Emit pending event so the frontend can show "calling..."
           await stream.writeSSE({
             event: 'tool_call',
