@@ -1,20 +1,11 @@
 // F-022: heuristic research referee (Tier 1 only).
 // Checks each cited sentence in the model's reply against the retrieved source
 // passages to detect unsupported claims. Pure string/regex — no IO, no LLM calls.
-import type { ResearchSource } from './research-service.js'
+import type { ResearchSource, ClaimVerdict } from '../chat/db.js'
 
-export type { ResearchSource }
-
-export interface ClaimVerdict {
-  /** The sentence being evaluated. */
-  sentence: string
-  /** The source URL this sentence cited (undefined = no citation detected). */
-  citedUrl?: string
-  /** verified: key terms found in source; unverified: cited but terms missing; uncited: no citation. */
-  verdict: 'verified' | 'unverified' | 'uncited'
-  /** The passage from the cited source that was matched (only on 'verified'). */
-  matchedPassage?: string
-}
+// ResearchSource + ClaimVerdict are owned by chat/db.ts (persisted with the message);
+// re-exported here so callers can import them alongside checkReply.
+export type { ResearchSource, ClaimVerdict }
 
 // ── Stop words for key-term extraction ───────────────────────────────────────
 

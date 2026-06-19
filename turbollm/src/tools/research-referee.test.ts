@@ -2,8 +2,8 @@
 // Pure string/regex — no IO, no network.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { checkReply, type ClaimVerdict } from './research-referee.js'
-import type { ResearchSource } from './research-service.js'
+import { checkReply } from './research-referee.js'
+import type { ResearchSource } from '../chat/db.js'
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 

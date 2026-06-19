@@ -8,7 +8,6 @@ import { feedChunk, flushState, initParseState } from './parser'
 import { needsExtraPass } from './think-utils'
 import { getSysInfo } from '../sysinfo/sysinfo'
 import type { ClaimVerdict, MessageStats, ResearchMeta, ResearchSource, ToolCallRecord } from './db'
-import type { ResearchResult } from '../tools/builtin.js'
 import { checkReply } from '../tools/research-referee.js'
 
 // Track in-flight abort controllers per conversation id.
