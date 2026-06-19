@@ -5,7 +5,7 @@ import { continueConversation, sendMessage } from '../lib/chat-api'
 import { useConversation, useConversationMutations } from '../lib/chat-queries'
 import { useModelActions, useModels, useStatus } from '../lib/queries'
 import type { ChatSseEvent, LiveToolCall, Message } from '../lib/chat-types'
-import { ApiError, downloadChatExport, getDebugSnapshot, getShareUrl } from '../lib/api'
+import { ApiError, downloadChatExport, getDebugSnapshot, getShareUrl, importChat } from '../lib/api'
 import { Button } from '../components/ui/button'
 import { toast } from '../components/ui/sonner'
 import { useQueryClient } from '@tanstack/react-query'
@@ -55,6 +55,10 @@ export function ChatScreen() {
   const [shareMenuOpen, setShareMenuOpen] = useState(false)
   const [clipboardFallback, setClipboardFallback] = useState<{ text: string; title: string } | null>(null)
   const shareMenuRef = useRef<HTMLDivElement>(null)
+  // Import state (F-024)
+  const importFileRef = useRef<HTMLInputElement>(null)
+  const [importError, setImportError] = useState<string | null>(null)
+  const [importModelMismatch, setImportModelMismatch] = useState<string | null>(null)
 
   // Thinking toggle — per-conversation, persisted in localStorage. When OFF the
   // model is told to skip reasoning entirely (answers directly), not merely to
@@ -224,6 +228,39 @@ export function ChatScreen() {
     if (!activeId) return
     setShareMenuOpen(false)
     downloadChatExport(activeId)
+  }
+
+  // ── Import handler (F-024) ────────────────────────────────────────────────
+
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    setImportError(null)
+    setImportModelMismatch(null)
+    let payload: unknown
+    try {
+      const text = await file.text()
+      payload = JSON.parse(text)
+    } catch {
+      setImportError('Invalid file — could not parse JSON.')
+      return
+    }
+    // Check model mismatch before importing
+    const exportModel = (payload as Record<string, unknown>)?.model as string | undefined
+    if (exportModel) {
+      const models = modelsQ.data?.models ?? []
+      const found = models.some((m) => m.key === exportModel)
+      if (!found) setImportModelMismatch(exportModel)
+    }
+    try {
+      const { id } = await importChat(payload)
+      void qc.invalidateQueries({ queryKey: ['conversations'] })
+      handleSelect(id)
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Import failed. Check the file is a valid .turbollm-chat.json.'
+      setImportError(msg)
+    }
   }
 
   const handleNew = () => {
@@ -417,6 +454,7 @@ export function ChatScreen() {
           activeId={activeId}
           onSelect={handleSelect}
           onNew={handleNew}
+          onImport={readonly ? undefined : () => importFileRef.current?.click()}
           collapsed={!sidebarOpen}
           onToggle={() => setSidebarOpen((o) => !o)}
         />
@@ -535,6 +573,36 @@ export function ChatScreen() {
         {/* Message list — always visible; empty state shown only when no messages */}
         <div ref={scrollerRef} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
           <div className="flex w-full flex-col gap-6 px-8 py-6">
+            {/* Hidden import file input (F-024) */}
+            <input
+              ref={importFileRef}
+              type="file"
+              accept=".json,.turbollm-chat.json"
+              hidden
+              onChange={(e) => void handleImportFile(e)}
+            />
+
+            {/* Model mismatch banner (F-024): shown after a successful import when the
+                exported model isn't available on this machine. Inline, not a toast. */}
+            {importModelMismatch && (
+              <div className="mb-2 flex items-start gap-2 rounded-md border border-[color:var(--warn,#ca8a04)] bg-[color-mix(in_srgb,var(--warn,#ca8a04)_8%,transparent)] px-3 py-2 text-[13px]">
+                <span className="flex-1">
+                  <span className="font-medium">Model not found:</span>{' '}
+                  <span className="font-mono">{importModelMismatch}</span> is not available on this machine.
+                  The chat was imported — select a different model to continue.
+                </span>
+                <button type="button" onClick={() => setImportModelMismatch(null)} className="shrink-0 text-faint hover:text-ink"><X size={13} /></button>
+              </div>
+            )}
+
+            {/* Import error (F-024): inline, not toast */}
+            {importError && (
+              <div className="mb-2 flex items-start gap-2 rounded-md border border-[color:var(--err)] bg-[color-mix(in_srgb,var(--err)_8%,transparent)] px-3 py-2 text-[13px]">
+                <span className="flex-1 text-[color:var(--err)]">{importError}</span>
+                <button type="button" onClick={() => setImportError(null)} className="shrink-0 text-faint hover:text-ink"><X size={13} /></button>
+              </div>
+            )}
+
             {/* Empty state */}
             {messages.length === 0 && !live && (
               <div className="flex flex-col items-center gap-4 py-16">
@@ -557,6 +625,17 @@ export function ChatScreen() {
                   </>
                 ) : (
                   <p className="text-[14px] text-muted">Select a model above to begin</p>
+                )}
+                {/* Import chat button — always shown on new-chat empty state */}
+                {!readonly && (
+                  <button
+                    type="button"
+                    onClick={() => importFileRef.current?.click()}
+                    className="mt-2 flex items-center gap-1.5 rounded-full border border-border px-4 py-1.5 text-[13px] text-muted hover:border-accent hover:text-ink transition-colors"
+                  >
+                    <Download size={13} />
+                    Import chat
+                  </button>
                 )}
               </div>
             )}
