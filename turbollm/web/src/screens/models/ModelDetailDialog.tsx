@@ -10,6 +10,26 @@ import { Button } from '../../components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../components/ui/dialog'
 import { toast } from '../../components/ui/sonner'
 
+/**
+ * Which load-config UI a model gets is decided by the engine that will load it — NOT by the
+ * model format (safetensors dirs report format 'mlx' under any engine, so format can't tell
+ * MLX from vLLM). `'none'` covers an absent/unrecognised engine: show sampling only, assume nothing.
+ */
+type LoadMode = 'llamacpp' | 'mlx' | 'vllm' | 'none'
+
+function loadModeForEngine(engineKind: string | undefined): LoadMode {
+  switch (engineKind) {
+    case 'llama-server':
+      return 'llamacpp'
+    case 'mlx':
+      return 'mlx'
+    case 'vllm':
+      return 'vllm'
+    default:
+      return 'none'
+  }
+}
+
 export function ModelDetailDialog({
   modelKey,
   onClose,
@@ -101,25 +121,11 @@ export function ModelDetailDialog({
   const benchRunning = !!benchState?.running && benchHere
   const benchDone = !!benchState?.done && benchHere && !benchState.running
   const benchErr = bench.start.error instanceof ApiError ? bench.start.error.message : null
-  // Which engine will load this model decides which knobs apply (BUG-004). Switch on the active
-  // engine kind rather than inferring from the model format: safetensors dirs report format 'mlx'
-  // under any engine, so a vLLM load would otherwise show MLX (Apple Silicon) copy. Each kind is
-  // handled explicitly; an unrecognised/absent engine shows neither note and no engine-specific
-  // knobs (sampling still applies) rather than assuming a default.
-  let isLlamaCpp = false
-  let isMlx = false
-  let isVllm = false
-  switch (activeEngine?.kind) {
-    case 'llama-server':
-      isLlamaCpp = true
-      break
-    case 'mlx':
-      isMlx = true
-      break
-    case 'vllm':
-      isVllm = true
-      break
-  }
+  // The load knobs follow the engine that will load the model (BUG-004), not the model format.
+  const loadMode = loadModeForEngine(activeEngine?.kind)
+  const isLlamaCpp = loadMode === 'llamacpp'
+  const isMlx = loadMode === 'mlx'
+  const isVllm = loadMode === 'vllm'
   // The runner requires a free engine (409 otherwise). When this model is loaded,
   // stop it first, then start the sweep once the engine has settled.
   const startBenchRun = () => {
