@@ -233,6 +233,7 @@ export async function* streamToAnthropic(
   let stopReason = 'end_turn'
   let outputTokens = 0
   let inputTokens = 0
+  let cacheReadTokens = 0
   let liveOut = 0 // running generated-token count for the live engine-card row
 
   yield sse('message_start', {
@@ -284,6 +285,8 @@ export async function* streamToAnthropic(
         const usage = chunk.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined
         if (usage?.completion_tokens) outputTokens = usage.completion_tokens
         if (usage?.prompt_tokens) inputTokens = usage.prompt_tokens
+        const timings = chunk.timings as { prompt_n_reuse?: number } | undefined
+        if (timings?.prompt_n_reuse != null) cacheReadTokens = timings.prompt_n_reuse
 
         const choices = chunk.choices as Array<{ delta?: OAIDelta; finish_reason?: string | null }> | undefined
         if (!choices?.length) continue
@@ -374,7 +377,7 @@ export async function* streamToAnthropic(
     }
     yield sse('message_delta', {
       delta: { stop_reason: stopReason, stop_sequence: null },
-      usage: { output_tokens: outputTokens },
+      usage: { input_tokens: inputTokens, output_tokens: outputTokens, cache_read_input_tokens: cacheReadTokens },
     })
     yield sse('message_stop', {})
     // Best-effort session stats (B4): hand off the final usage. Never throws.
