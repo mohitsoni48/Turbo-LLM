@@ -626,17 +626,6 @@ export function ChatScreen() {
                 ) : (
                   <p className="text-[14px] text-muted">Select a model above to begin</p>
                 )}
-                {/* Import chat button — always shown on new-chat empty state */}
-                {!readonly && (
-                  <button
-                    type="button"
-                    onClick={() => importFileRef.current?.click()}
-                    className="mt-2 flex items-center gap-1.5 rounded-full border border-border px-4 py-1.5 text-[13px] text-muted hover:border-accent hover:text-ink transition-colors"
-                  >
-                    <Download size={13} />
-                    Import chat
-                  </button>
-                )}
               </div>
             )}
 

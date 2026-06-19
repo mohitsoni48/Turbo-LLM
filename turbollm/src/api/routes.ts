@@ -332,6 +332,9 @@ export function registerApi(app: Hono, d: Deps): void {
     if (engineBusy(d)) return err(c, 409, 'engine_running', 'Stop the running engine before switching the active engine.')
     try {
       d.registry.activate(c.req.param('id'))
+      // Switching engines invalidates any prior load error (e.g. a failed vLLM load on an
+      // engine that can't serve here) — clear it so the UI doesn't show a stale error.
+      d.manager.clearError()
       return c.json(d.registry.get(c.req.param('id')) ?? {})
     } catch (e) {
       return regErr(c, e)

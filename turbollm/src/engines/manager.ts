@@ -323,6 +323,16 @@ export class Manager {
     return st
   }
 
+  /** Clear a terminal error so a stale failure (e.g. a vLLM load that failed because the
+   *  active engine couldn't serve here) doesn't linger in the UI after the user switches
+   *  engines. No-op unless currently in 'error' — never disturbs a running/starting engine. */
+  clearError(): void {
+    if (this.state === 'error') {
+      this.state = 'stopped'
+      this.errInfo = null
+    }
+  }
+
   target(): string | null {
     return this.state === 'running' ? `http://127.0.0.1:${this.port}` : null
   }
