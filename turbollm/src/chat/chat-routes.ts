@@ -7,8 +7,9 @@ import { engineModelAlias } from '../engines/compat'
 import { feedChunk, flushState, initParseState } from './parser'
 import { needsExtraPass } from './think-utils'
 import { getSysInfo } from '../sysinfo/sysinfo'
-import type { MessageStats, ResearchMeta, ResearchSource, ToolCallRecord } from './db'
+import type { ClaimVerdict, MessageStats, ResearchMeta, ResearchSource, ToolCallRecord } from './db'
 import type { ResearchResult } from '../tools/builtin.js'
+import { checkReply } from '../tools/research-referee.js'
 
 // Track in-flight abort controllers per conversation id.
 const inflight = new Map<string, AbortController>()
@@ -764,10 +765,23 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
     stats.cachedTokens = cachedExplicit ?? 0
   }
 
+  // F-022: run the heuristic referee on Research persona replies before persisting.
+  // Pure string/regex — synchronous, < 5ms, no IO.
+  let refereeVerdicts: ClaimVerdict[] | undefined
+  if (conv.toolPolicy === 'force_web_search' && fullContent && allResearchSources.length > 0) {
+    try {
+      refereeVerdicts = checkReply(fullContent, allResearchSources)
+    } catch { /* swallow — referee is best-effort */ }
+  }
+
   // F-021: persist research metadata alongside the message.
   const researchMeta: ResearchMeta | undefined =
-    conv.toolPolicy === 'force_web_search' && (parsedConfidence !== undefined || allResearchSources.length > 0)
-      ? { confidence: parsedConfidence, sources: allResearchSources.length > 0 ? allResearchSources : undefined }
+    conv.toolPolicy === 'force_web_search' && (parsedConfidence !== undefined || allResearchSources.length > 0 || refereeVerdicts !== undefined)
+      ? {
+          confidence: parsedConfidence,
+          sources: allResearchSources.length > 0 ? allResearchSources : undefined,
+          refereeVerdicts: refereeVerdicts && refereeVerdicts.length > 0 ? refereeVerdicts : undefined,
+        }
       : undefined
 
   db.updateMessage(assistantMsg.id, { content: fullContent, reasoning: fullReasoning, toolCalls: allToolCalls, stats, researchMeta })
