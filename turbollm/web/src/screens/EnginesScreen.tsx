@@ -629,6 +629,18 @@ function CatalogFitRow({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+        ) : !catalog.comingSoon && !installFor(catalog) ? (
+          // Build-it-yourself fork (no prebuilt + no installer, e.g. ik_llama.cpp):
+          // link to the repo and funnel to "Add your own engine" — not a dead Install.
+          <a
+            href={catalog.homepage}
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center gap-1 text-[12px] text-muted hover:text-ink"
+            title="No prebuilt binary — build it from source, then use “Add your own engine” below."
+          >
+            Build from source <ExternalLink size={12} />
+          </a>
         ) : (
           <Button
             size="sm"

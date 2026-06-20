@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, basename } from 'node:path'
-import { resolveServerBinary, suggestEngineName } from './scan'
+import { resolveServerBinary, suggestEngineName, meaningfulFolder, cleanVersionLabel } from './scan'
 import { findFile } from './download'
 
 const BIN = 'llama-server-test-bin'
@@ -73,4 +73,26 @@ test('suggestEngineName: folder + version, folder-only when version unknown', ()
   assert.equal(suggestEngineName(bin, 'b1234'), `${basename('turboquant')} (b1234)`)
   assert.equal(suggestEngineName(bin, 'unknown'), 'turboquant')
   assert.equal(suggestEngineName(bin, ''), 'turboquant')
+})
+
+test('meaningfulFolder: skips generic build dirs (bin/build/release/x64)', () => {
+  assert.equal(meaningfulFolder(join('x', 'atomic', 'build', 'bin', BIN)), 'atomic')
+  assert.equal(meaningfulFolder(join('x', 'ik_llama.cpp', 'build', 'bin', 'Release', BIN)), 'ik_llama.cpp')
+  // Every ancestor generic → fall back to the immediate parent rather than crash.
+  assert.equal(meaningfulFolder(join('build', 'bin', BIN)), 'bin')
+})
+
+test('cleanVersionLabel: prefers build tag, then short hash, then first token', () => {
+  assert.equal(cleanVersionLabel('1 (0a635dc)'), '0a635dc') // messy raw version → clean hash
+  assert.equal(cleanVersionLabel('version: 1.2.3 (b9608)'), 'b9608') // build tag wins
+  assert.equal(cleanVersionLabel('0.31.2'), '0.31.2') // plain version token
+  assert.equal(cleanVersionLabel('unknown'), '')
+  assert.equal(cleanVersionLabel(''), '')
+})
+
+test('suggestEngineName: real-world atomic/build/bin + messy version → clean name', () => {
+  assert.equal(
+    suggestEngineName(join('D:', 'llama-turbo', 'atomic', 'build', 'bin', BIN), '1 (0a635dc)'),
+    'atomic (0a635dc)',
+  )
 })
