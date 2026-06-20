@@ -3,6 +3,7 @@
 // daemon's error envelope { code, message } (spec 00 §3).
 
 import type {
+  BuildPrereqs,
   ChatCompletionResponse,
   ChatMessage,
   DownloadRecord,
@@ -157,6 +158,12 @@ export function getEngineCatalog(): Promise<EngineCatalog> {
  *  engines come back WITH a reason so the UI greys them ("grey + reason, don't hide"). */
 export function getEngineRecommendation(): Promise<EngineRecommendationResult> {
   return request<EngineRecommendationResult>('/api/v1/engines/recommendation')
+}
+
+/** Guided compile-from-source prereq check (ADR-089). Read-only: detects the
+ *  Windows + CUDA build toolchain. `supported:false` off Windows (parked elsewhere). */
+export function getBuildPrereqs(): Promise<BuildPrereqs> {
+  return request<BuildPrereqs>('/api/v1/build/prereqs')
 }
 
 export function installVllm(): Promise<{ accepted: true; engine: 'vllm' }> {

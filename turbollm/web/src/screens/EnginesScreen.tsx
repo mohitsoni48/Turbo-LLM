@@ -63,6 +63,7 @@ import {
   AlertDialogTitle,
 } from '../components/ui/alert-dialog'
 import { AddEngineDialog } from './engines/AddEngineDialog'
+import { BuildGuideDialog } from './engines/BuildGuideDialog'
 import { EngineStatusHeader } from './engines/EngineStatusHeader'
 import { EngineLogPanel } from './engines/EngineLogPanel'
 import { LlamaCppBackendRows } from './engines/ManagedEngines'
@@ -533,6 +534,7 @@ function CatalogFitRow({
   onSetPolicy: (e: CatalogEngine, policy: UpdatePolicy) => void
 }) {
   const e = fit.engine
+  const [guideOpen, setGuideOpen] = useState(false)
   const isLlama = e.id === 'llama.cpp'
   const incompatible = fit.compatible.length === 0
   // Compatible here, but no prebuilt for this OS (e.g. ik_llama everywhere, TurboQuant
@@ -655,17 +657,25 @@ function CatalogFitRow({
           </DropdownMenu>
         ) : buildYourself ? (
           // Build-it-yourself fork — compatible here but no prebuilt for this OS
-          // (ik_llama everywhere; TurboQuant on Windows/Linux). Link to the repo and
-          // funnel to "Add your own engine" — not a dead Install button.
-          <a
-            href={catalog.homepage}
-            target="_blank"
-            rel="noreferrer"
-            className="flex items-center gap-1 text-[12px] text-muted hover:text-ink"
-            title="No prebuilt binary — build it from source, then use “Add your own engine” below."
-          >
-            Build from source <ExternalLink size={12} />
-          </a>
+          // (ik_llama everywhere; TurboQuant on Windows/Linux). Open the guided build
+          // flow (ADR-089): prereq check + exact commands + hand-off to "Add your own
+          // engine" with the repo prefilled. The repo link stays reachable inside it.
+          <>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setGuideOpen(true)}
+              title="No prebuilt binary — build it from source with a guided walkthrough."
+            >
+              Build from source
+            </Button>
+            <BuildGuideDialog
+              open={guideOpen}
+              onOpenChange={setGuideOpen}
+              repoUrl={catalog.homepage}
+              engineName={e.name}
+            />
+          </>
         ) : (
           <Button
             size="sm"

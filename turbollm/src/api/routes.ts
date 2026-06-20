@@ -35,6 +35,7 @@ import { ensureVllmEnv } from '../engines/vllm'
 import { ensureKoboldcpp, koboldcppBinPath, koboldcppDir, koboldcppProfileToArgs } from '../engines/koboldcpp'
 import { ensureLlamafile, llamafileBinPath, llamafileDir } from '../engines/llamafile'
 import { catalogForPlatform, catalogEngine } from '../engines/catalog'
+import { checkBuildPrereqs } from '../engines/build-prereqs'
 import { detectHardware } from '../engines/hardware'
 import { recommendEngines } from '../engines/recommend'
 import { engineAcceptsFormat } from '../engines/compat'
@@ -374,6 +375,12 @@ export function registerApi(app: Hono, d: Deps): void {
     const rec = recommendEngines(hw, catalogForPlatform().map(({ supportedHere, ...e }) => e))
     return c.json({ hardware: hw, recommendation: rec })
   })
+
+  // Guided compile-from-source prereq check (ADR-089). Read-only: detects the
+  // Windows + CUDA build toolchain (git / cmake / CUDA / MSVC) so the build guide can
+  // show what's missing + install links. Off Windows it reports `supported:false`
+  // (Linux/macOS guided build is parked).
+  app.get('/api/v1/build/prereqs', async (c) => c.json(await checkBuildPrereqs()))
 
   // Provision the vLLM engine (ADR-044): uv → venv → `uv pip install vllm`, then
   // register as a kind='vllm' engine. 202 + progress via GET /status engineProvision.

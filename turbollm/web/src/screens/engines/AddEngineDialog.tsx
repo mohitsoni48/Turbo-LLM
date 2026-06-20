@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { ArrowLeft, CheckCircle2, FolderOpen, Loader2, Plus, SearchX } from 'lucide-react'
 import { ApiError } from '../../lib/api'
 import { useEngineMutations, useEngineScan } from '../../lib/queries'
@@ -25,9 +25,31 @@ type Step = 'choose' | 'scanning' | 'confirm' | 'notfound'
  *  (2) confirm the auto-detected version + a pre-filled name, then Add. Graceful
  *  fallback when nothing is found. Registration still goes through POST
  *  /api/v1/engines; scan is read-only. Same exported name + trigger as before — the
- *  EnginesScreen call sites are unchanged. */
-export function AddEngineDialog() {
-  const [open, setOpen] = useState(false)
+ *  EnginesScreen call sites are unchanged.
+ *
+ *  ADR-089 (guided build hand-off): callers can drive the dialog in CONTROLLED mode
+ *  (`open` + `onOpenChange`) and prefill the source-repo via `defaultSourceRepo` so the
+ *  build guide can hand off with the repo already filled. A custom `trigger` replaces the
+ *  default "Add engine" button; pass `trigger={null}` for a controlled, trigger-less dialog.
+ *  Uncontrolled self-triggered usage (no `open`) is unchanged. */
+export function AddEngineDialog({
+  open: controlledOpen,
+  onOpenChange,
+  defaultSourceRepo,
+  trigger,
+}: {
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
+  defaultSourceRepo?: string
+  trigger?: ReactNode
+} = {}) {
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false)
+  const isControlled = controlledOpen !== undefined
+  const open = isControlled ? controlledOpen : uncontrolledOpen
+  const setOpen = (o: boolean) => {
+    if (!isControlled) setUncontrolledOpen(o)
+    onOpenChange?.(o)
+  }
   const [step, setStep] = useState<Step>('choose')
   const [browse, setBrowse] = useState<null | 'folder' | 'file'>(null)
   // Confirm-step state, set from a successful scan.
@@ -44,6 +66,12 @@ export function AddEngineDialog() {
 
   const { add } = useEngineMutations()
   const scan = useEngineScan()
+
+  // ADR-089: when opened with a prefilled source repo (the build-guide hand-off), seed
+  // the field so the rebuild-tracking provenance is attached without re-typing it.
+  useEffect(() => {
+    if (open && defaultSourceRepo) setSourceRepo(defaultSourceRepo)
+  }, [open, defaultSourceRepo])
 
   const reset = () => {
     setStep('choose')
@@ -115,11 +143,15 @@ export function AddEngineDialog() {
         if (!o) reset()
       }}
     >
-      <DialogTrigger asChild>
-        <Button>
-          <Plus size={16} /> Add engine
-        </Button>
-      </DialogTrigger>
+      {trigger !== undefined ? (
+        trigger !== null && <DialogTrigger asChild>{trigger}</DialogTrigger>
+      ) : (
+        <DialogTrigger asChild>
+          <Button>
+            <Plus size={16} /> Add engine
+          </Button>
+        </DialogTrigger>
+      )}
       <DialogContent>
         {step === 'choose' && (
           <>

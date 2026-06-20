@@ -55,6 +55,7 @@ import {
   installLlamafile,
   getEngineCatalog,
   getEngineRecommendation,
+  getBuildPrereqs,
   listDownloads,
   listEngines,
   loadModel,
@@ -83,6 +84,7 @@ import {
 } from './api'
 import type {
   BenchState,
+  BuildPrereqs,
   DownloadsList,
   EngineBackends,
   EngineCatalog,
@@ -212,6 +214,19 @@ export function useEngineRecommendation(provisioning: boolean): UseQueryResult<E
     queryKey: queryKeys.engineRecommendation,
     queryFn: getEngineRecommendation,
     refetchInterval: provisioning ? 2000 : false,
+    retry: false,
+  })
+}
+
+/** Guided compile-from-source prereqs (ADR-089). Detects the Windows + CUDA build
+ *  toolchain. Disabled until the build guide opens so it doesn't probe on mount; the
+ *  result is stable for the session, so cache it. */
+export function useBuildPrereqs(enabled = true): UseQueryResult<BuildPrereqs> {
+  return useQuery({
+    queryKey: ['build-prereqs'],
+    queryFn: getBuildPrereqs,
+    enabled,
+    staleTime: 60_000,
     retry: false,
   })
 }

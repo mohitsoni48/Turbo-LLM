@@ -259,6 +259,24 @@ export type EngineCatalog = {
   engines: CatalogEngine[]
 }
 
+// ── Guided compile-from-source prereqs (ADR-089) ─────────────────────────────
+/** One build-toolchain prerequisite from GET /api/v1/build/prereqs. Mirrors
+ *  src/engines/build-prereqs.ts BuildPrereqTool. */
+export type BuildPrereqTool = {
+  id: 'git' | 'cmake' | 'cuda' | 'msvc'
+  name: string
+  found: boolean
+  version?: string
+  installUrl: string
+}
+
+/** GET /api/v1/build/prereqs payload. `supported` is false off Windows (guided build is
+ *  Windows + CUDA only for now); `tools` is empty there. */
+export type BuildPrereqs = {
+  supported: boolean
+  tools: BuildPrereqTool[]
+}
+
 // ── Engine recommendation (engine overhaul, Phase 2) ─────────────────────────
 // Mirrors the backend shapes from src/engines/{hardware,catalog,recommend}.ts.
 // Returned by GET /api/v1/engines/recommendation.
