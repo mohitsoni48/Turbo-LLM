@@ -1,0 +1,99 @@
+name: Engine request
+description: Nominate an inference engine or llama.cpp fork to add to TurboLLM's built-in catalog.
+title: "[Engine] <name>"
+labels: ["engine-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an engine! TurboLLM ships a curated, hardware-aware
+        catalog of engines you can install in one click. Use this form to nominate a
+        new one (a llama.cpp fork, or any server that speaks an OpenAI-compatible API).
+
+        The clearer you are about **what hardware it runs on** and **whether it ships
+        prebuilt binaries**, the faster it can land. If it has no prebuilts yet, it can
+        still be listed as "build it yourself, then Add your own engine."
+  - type: input
+    id: name
+    attributes:
+      label: Engine / fork name
+      placeholder: e.g. ik_llama.cpp
+    validations:
+      required: true
+  - type: input
+    id: repo
+    attributes:
+      label: Repo URL
+      description: The project's original (upstream) repository.
+      placeholder: https://github.com/owner/repo
+    validations:
+      required: true
+  - type: dropdown
+    id: based_on
+    attributes:
+      label: What is it based on?
+      options:
+        - llama.cpp fork (llama-server compatible)
+        - OpenAI-compatible server (other)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: good_for
+    attributes:
+      label: What's it good for?
+      description: Why add it? Performance, quant types, hardware niche, long context, etc.
+      placeholder: e.g. SOTA quants + faster hybrid CPU/GPU inference than mainline.
+    validations:
+      required: true
+  - type: dropdown
+    id: prebuilt
+    attributes:
+      label: Prebuilt binaries?
+      description: One-click install needs prebuilt release assets; source-only forks are listed as "build it yourself."
+      options:
+        - Yes — published on GitHub Releases
+        - No — source build only
+        - Unsure
+    validations:
+      required: true
+  - type: input
+    id: asset_example
+    attributes:
+      label: Prebuilt asset example (optional)
+      description: If it ships prebuilts, paste an example release-asset filename so we can match it.
+      placeholder: e.g. llama-bXXXX-bin-win-cuda-x64.zip
+    validations:
+      required: false
+  - type: checkboxes
+    id: os
+    attributes:
+      label: Supported operating systems
+      options:
+        - label: Windows
+        - label: macOS
+        - label: Linux
+  - type: checkboxes
+    id: gpu
+    attributes:
+      label: Supported GPUs / accelerators
+      options:
+        - label: NVIDIA (CUDA)
+        - label: AMD (ROCm)
+        - label: Intel (SYCL)
+        - label: Apple Silicon (Metal)
+        - label: CPU only
+  - type: checkboxes
+    id: arch
+    attributes:
+      label: Supported CPU architecture
+      options:
+        - label: x86-64 (x64)
+        - label: ARM64 (aarch64 / Apple Silicon)
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else?
+      description: Caveats, model formats, links to benchmarks, etc.
+    validations:
+      required: false

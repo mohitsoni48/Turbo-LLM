@@ -67,7 +67,8 @@ import { EngineStatusHeader } from './engines/EngineStatusHeader'
 import { EngineLogPanel } from './engines/EngineLogPanel'
 import { LlamaCppBackendRows } from './engines/ManagedEngines'
 
-const ISSUE_URL = 'https://github.com/mohitsoni48/Turbo-LLM/issues/new'
+const ISSUE_URL =
+  'https://github.com/mohitsoni48/Turbo-LLM/issues/new?template=engine-request.yml'
 
 /** Auto-downloaded official llama.cpp builds live in
  *  `<config>/engines/llama.cpp-<tag>-<backend>/`; everything else is a user fork. */
