@@ -512,10 +512,13 @@ export function registerApi(app: Hono, d: Deps): void {
   })
 
   app.post('/api/v1/engines', async (c) => {
-    const b = await body<{ name?: string; binPath?: string }>(c)
+    const b = await body<{ name?: string; binPath?: string; sourceRepo?: string; sourceBranch?: string }>(c)
     if (!b.binPath || !b.binPath.trim()) return err(c, 400, 'invalid_config_value', 'binPath is required.')
     try {
-      const { engine, warning } = await d.registry.add(b.name ?? '', b.binPath)
+      const { engine, warning } = await d.registry.add(b.name ?? '', b.binPath, {
+        sourceRepo: b.sourceRepo,
+        sourceBranch: b.sourceBranch,
+      })
       // `probe_no_version` is non-blocking (spec 03 §2): the engine is saved, but
       // the response carries a warning flag so the dialog can prompt the user.
       return c.json({ ...engine, warning: warning ?? null }, 201)
@@ -552,9 +555,23 @@ export function registerApi(app: Hono, d: Deps): void {
   })
 
   app.put('/api/v1/engines/:id', async (c) => {
-    const b = await body<{ name?: string }>(c)
+    const b = await body<{ name?: string; sourceRepo?: string; sourceBranch?: string }>(c)
+    const id = c.req.param('id')
     try {
-      return c.json(d.registry.rename(c.req.param('id'), b.name ?? ''))
+      // Source-repo provenance (ADR-088): a user can attach the GitHub repo an existing
+      // build came from so TurboLLM can detect "newer source available → rebuild". Set
+      // it (alone or alongside a rename) when either source field is present.
+      if (b.sourceRepo !== undefined || b.sourceBranch !== undefined) {
+        d.registry.setSource(id, { sourceRepo: b.sourceRepo, sourceBranch: b.sourceBranch })
+      }
+      // Only rename when a name was supplied (rename rejects an empty name); a
+      // source-only PUT just returns the updated engine.
+      if (b.name !== undefined && b.name.trim()) {
+        return c.json(d.registry.rename(id, b.name))
+      }
+      const eng = d.registry.get(id)
+      if (!eng) throw new NotFoundError()
+      return c.json(eng)
     } catch (e) {
       return regErr(c, e)
     }

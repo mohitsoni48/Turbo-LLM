@@ -180,6 +180,7 @@ function StatusHero({
 }) {
   const mut = useEngineMutations()
   const { data: sys } = useSysInfo()
+  const { data: updates } = useEngineUpdates()
 
   // Hardware line — prefer the recommendation's hardware, fall back to sysinfo.
   const hw = rec?.hardware
@@ -246,17 +247,28 @@ function StatusHero({
               {installed.length === 0 && (
                 <div className="px-2 py-1.5 text-[12px] text-muted">Install an engine below to get started.</div>
               )}
-              {installed.map((e) => (
-                <DropdownMenuItem key={e.id} onSelect={() => activate(e.id)} className="flex items-center gap-2">
-                  <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-                    {e.id === activeEngine?.id && <Check size={14} className="text-accent" />}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-ink">{e.name}</span>
-                  {e.id === activeEngine?.id && (
-                    <span className="shrink-0 text-[11px] text-accent">active</span>
-                  )}
-                </DropdownMenuItem>
-              ))}
+              {installed.map((e) => {
+                // Source-built engines (ADR-088): surface a notify-only "rebuild" hint
+                // when a newer commit is on the source repo. We can't recompile, so this
+                // is a badge only (the repo link lives on the catalog/engine card).
+                const rebuild = !!updates?.updates[e.id]?.rebuild && !!updates?.updates[e.id]?.hasUpdate
+                return (
+                  <DropdownMenuItem key={e.id} onSelect={() => activate(e.id)} className="flex items-center gap-2">
+                    <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                      {e.id === activeEngine?.id && <Check size={14} className="text-accent" />}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-ink">{e.name}</span>
+                    {rebuild && (
+                      <span className="shrink-0 text-[11px]" style={{ color: 'var(--accent)' }}>
+                        rebuild
+                      </span>
+                    )}
+                    {e.id === activeEngine?.id && (
+                      <span className="shrink-0 text-[11px] text-accent">active</span>
+                    )}
+                  </DropdownMenuItem>
+                )
+              })}
               <DropdownMenuSeparator />
               <div className="px-2 py-1.5 text-[11px] text-faint">Install more engines below ↓</div>
             </DropdownMenuContent>
@@ -558,7 +570,9 @@ function CatalogFitRow({
           {experimental && <Badge variant="mono">experimental</Badge>}
           {e.id === 'vllm' && <Badge variant="mono">For power users</Badge>}
           {isDisabled && <Badge variant="mono">Disabled</Badge>}
-          {isEnabled && updateStatus?.hasUpdate && <Badge variant="accent">Update available</Badge>}
+          {isEnabled && updateStatus?.hasUpdate && !updateStatus?.rebuild && (
+            <Badge variant="accent">Update available</Badge>
+          )}
           {incompatible && fit.incompatibleReason && (
             <Badge variant="mono">{fit.incompatibleReason}</Badge>
           )}
@@ -806,13 +820,27 @@ function relativeTime(iso: string): string {
 
 /** Honest one-line update status for a catalog row (ADR-085). Never claims "up to date"
  *  without a real upstream check; offline/uncheckable says so explicitly. */
-function CatalogUpdateStatusLine({ st }: { st: EngineUpdateStatus | undefined }) {
+function CatalogUpdateStatusLine({ st, repoUrl }: { st: EngineUpdateStatus | undefined; repoUrl?: string }) {
   if (!st) return null
   if (st.error === 'offline') {
     return <span className="text-[11px] text-faint">Couldn&apos;t check for updates (offline)</span>
   }
   if (st.error === 'no_source' || !st.comparable) {
     return <span className="text-[11px] text-faint">Update status unavailable</span>
+  }
+  // Source-built engines (ADR-088): notify-only — we can't recompile, so link the repo
+  // instead of offering a one-click update.
+  if (st.rebuild && st.hasUpdate) {
+    return (
+      <span className="text-[11px]" style={{ color: 'var(--accent)' }}>
+        Newer source available · rebuild{' '}
+        {repoUrl && (
+          <a href={repoUrl} target="_blank" rel="noreferrer" className="underline-offset-2 hover:underline">
+            (open repo)
+          </a>
+        )}
+      </span>
+    )
   }
   if (st.hasUpdate && st.latest) {
     return (

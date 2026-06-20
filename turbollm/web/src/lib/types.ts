@@ -144,6 +144,12 @@ export type Engine = {
   version: string
   capabilities: EngineCapabilities
   addedAt?: string
+  /** Optional source-repo URL this engine was built from (ADR-088). When set, the
+   *  update check compares the built commit against the repo's latest commit and shows
+   *  a notify-only "newer source available → rebuild". */
+  sourceRepo?: string
+  /** Optional branch to compare commits against (ADR-088). Empty → default branch. */
+  sourceBranch?: string
 }
 
 export type EnginesList = {
@@ -215,6 +221,10 @@ export type EngineUpdateStatus = {
   checkedAt: string
   error?: 'offline' | 'no_source'
   comparable: boolean
+  /** Set for source-built engines (ADR-088): the update is a source change that can't be
+   *  auto-applied (TurboLLM can't recompile). The UI shows "newer source available →
+   *  rebuild" + a repo link instead of a one-click Update. Absent for release/pip. */
+  rebuild?: boolean
 }
 
 /** GET /api/v1/engines/updates payload: per-engine-id status + current policy. */

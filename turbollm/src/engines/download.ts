@@ -330,6 +330,21 @@ export async function latestReleaseTag(repo: string, signal?: AbortSignal): Prom
   return rel.tag_name ?? ''
 }
 
+/** Resolve the latest commit SHA on a branch of `repo` (ADR-088). `branch` empty →
+ *  the repo's default branch (the `HEAD` commits ref resolves it). Used by the honest
+ *  source-built update check to detect "newer source available → rebuild". Throws on a
+ *  non-2xx response (caller maps it to an offline/error state — never fabricates a sha). */
+export async function latestCommitSha(repo: string, branch = '', signal?: AbortSignal): Promise<string> {
+  const ref = branch.trim() ? encodeURIComponent(branch.trim()) : 'HEAD'
+  const res = await fetch(`https://api.github.com/repos/${repo}/commits/${ref}`, {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'turbollm' },
+    signal,
+  })
+  if (!res.ok) throw new Error(`could not query ${repo} commits: HTTP ${res.status}`)
+  const data = (await res.json()) as { sha?: string }
+  return data.sha ?? ''
+}
+
 /** Resolve the latest release of `repo` and provision its platform-matching
  *  `llama-server` into `<enginesRoot>/<destName>/`. Returns the server binary path.
  *  Throws `no_release_asset` (Error.message) when the latest release has no asset

@@ -12,6 +12,8 @@ import {
   tagFromManagedBinPath,
   tagFromVersionString,
   versionFromPipString,
+  parseGitRepo,
+  commitFromVersionString,
   computeUpdateStatus,
   UpdateChecker,
   type ResolvedSource,
@@ -310,6 +312,104 @@ test('engineIsIdle: stopped/running-idle are idle; starting/stopping/generating 
   assert.equal(engineIsIdle(managerStub('running', 2)), false) // mid-generation
   assert.equal(engineIsIdle(managerStub('starting')), false)
   assert.equal(engineIsIdle(managerStub('stopping')), false)
+})
+
+// ─── source-built engines (ADR-088): commit-hash update detection ─────────────
+
+test('parseGitRepo: https / .git / trailing-slash variants → owner/repo', () => {
+  assert.equal(parseGitRepo('https://github.com/owner/repo'), 'owner/repo')
+  assert.equal(parseGitRepo('https://github.com/owner/repo.git'), 'owner/repo')
+  assert.equal(parseGitRepo('https://github.com/owner/repo/'), 'owner/repo')
+  assert.equal(parseGitRepo('http://github.com/owner/repo'), 'owner/repo')
+  assert.equal(parseGitRepo('https://www.github.com/owner/repo'), 'owner/repo')
+  assert.equal(parseGitRepo('github.com/owner/repo'), 'owner/repo')
+  assert.equal(parseGitRepo('  https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant  '), 'AtomicBot-ai/atomic-llama-cpp-turboquant')
+})
+
+test('parseGitRepo: non-GitHub or malformed → null', () => {
+  assert.equal(parseGitRepo('https://gitlab.com/owner/repo'), null)
+  assert.equal(parseGitRepo('https://github.com/owner'), null) // no repo
+  assert.equal(parseGitRepo('not a url'), null)
+  assert.equal(parseGitRepo(''), null)
+})
+
+test('commitFromVersionString: pulls the first 7+ hex token, else empty', () => {
+  assert.equal(commitFromVersionString('1 (0a635dc)'), '0a635dc')
+  assert.equal(commitFromVersionString('version: x (abcdef1234)'), 'abcdef1234')
+  assert.equal(commitFromVersionString('b9608'), '') // numeric build tag (too short / no commit)
+  assert.equal(commitFromVersionString(''), '')
+  assert.equal(commitFromVersionString('no hash here just words'), '')
+})
+
+test('resolveUpdateSource: sourceRepo takes precedence → source mode with branch + commit', () => {
+  const src = resolveUpdateSource(
+    eng({
+      kind: 'llama-server',
+      binPath: '/opt/my/llama-server',
+      version: 'build (0a635dc)',
+      sourceRepo: 'https://github.com/owner/repo.git',
+      sourceBranch: 'main',
+    }),
+  )
+  assert.deepEqual(src, { source: 'source', ref: 'owner/repo', branch: 'main', installed: '0a635dc' })
+})
+
+test('resolveUpdateSource: sourceRepo with no branch → empty branch (default branch)', () => {
+  const src = resolveUpdateSource(
+    eng({ binPath: '/opt/my/llama-server', version: '1 (0a635dc)', sourceRepo: 'https://github.com/owner/repo' }),
+  )
+  assert.equal(src?.source, 'source')
+  assert.equal(src?.branch, '')
+  assert.equal(src?.installed, '0a635dc')
+})
+
+test('resolveUpdateSource: non-GitHub sourceRepo falls through to existing behavior', () => {
+  // A turboquant fork engine with a non-parseable sourceRepo keeps the fork release source.
+  const src = resolveUpdateSource(
+    eng({ binPath: '/root/engines/turboquant/llama-server', version: 'build b9000', sourceRepo: 'not-a-repo' }),
+  )
+  assert.equal(src?.source, 'github-release')
+  assert.equal(src?.ref, 'AtomicBot-ai/atomic-llama-cpp-turboquant')
+})
+
+test('computeUpdateStatus: source mode — different sha → hasUpdate + rebuild', async () => {
+  const e = eng({ binPath: '/opt/my/llama-server', version: 'build (0a635dc)', sourceRepo: 'https://github.com/owner/repo' })
+  const st = await computeUpdateStatus(e, async () => '9f8e7d6c5b4a392817')
+  assert.equal(st.installed, '0a635dc')
+  assert.equal(st.latest, '9f8e7d6') // 7-char short sha
+  assert.equal(st.hasUpdate, true)
+  assert.equal(st.rebuild, true)
+  assert.equal(st.comparable, true)
+  assert.equal(st.error, undefined)
+})
+
+test('computeUpdateStatus: source mode — same short sha → up to date', async () => {
+  const e = eng({ binPath: '/opt/my/llama-server', version: '1 (0a635dc)', sourceRepo: 'https://github.com/owner/repo' })
+  const st = await computeUpdateStatus(e, async () => '0a635dcffffffff')
+  assert.equal(st.hasUpdate, false)
+  assert.equal(st.rebuild, true)
+  assert.equal(st.comparable, true)
+  assert.equal(st.latest, '0a635dc')
+})
+
+test('computeUpdateStatus: source mode — empty installed commit → no_source', async () => {
+  // version carries only a numeric build tag → no commit hash to compare.
+  const e = eng({ binPath: '/opt/my/llama-server', version: 'b9608', sourceRepo: 'https://github.com/owner/repo' })
+  const st = await computeUpdateStatus(e, async () => '9f8e7d6c5b4a')
+  assert.equal(st.installed, '')
+  assert.equal(st.hasUpdate, false)
+  assert.equal(st.error, 'no_source')
+  assert.equal(st.comparable, false)
+})
+
+test('computeUpdateStatus: source mode — fetch throw → offline, no fabricated latest', async () => {
+  const e = eng({ binPath: '/opt/my/llama-server', version: '1 (0a635dc)', sourceRepo: 'https://github.com/owner/repo' })
+  const st = await computeUpdateStatus(e, async () => {
+    throw new Error('getaddrinfo ENOTFOUND')
+  })
+  assert.equal(st.latest, null)
+  assert.equal(st.hasUpdate, false)
+  assert.equal(st.error, 'offline')
 })
 
 test('UpdateChecker.checkAll + prune', async () => {

@@ -34,6 +34,9 @@ export function AddEngineDialog() {
   const [binPath, setBinPath] = useState('')
   const [version, setVersion] = useState('')
   const [name, setName] = useState('')
+  // Optional source-repo URL (ADR-088): the GitHub repo this build came from. Lets
+  // TurboLLM detect "newer source available → rebuild" by comparing commits.
+  const [sourceRepo, setSourceRepo] = useState('')
   // Spec 03 §2: name_already_taken renders under the Name field; every other code
   // (scan/probe) renders as a top-level inline error on the active step.
   const [nameError, setNameError] = useState<string | null>(null)
@@ -48,6 +51,7 @@ export function AddEngineDialog() {
     setBinPath('')
     setVersion('')
     setName('')
+    setSourceRepo('')
     setNameError(null)
     setError(null)
   }
@@ -79,8 +83,9 @@ export function AddEngineDialog() {
   const submit = () => {
     setNameError(null)
     setError(null)
+    const repo = sourceRepo.trim()
     add.mutate(
-      { name: name.trim(), binPath },
+      { name: name.trim(), binPath, ...(repo ? { sourceRepo: repo } : {}) },
       {
         onSuccess: (eng) => {
           // probe_no_version (spec 03 §2): saved but version unknown — non-blocking warning.
@@ -200,6 +205,18 @@ export function AddEngineDialog() {
                   {binPath}
                 </div>
               </div>
+
+              <label className="flex flex-col gap-1.5">
+                <span className="text-[13px] font-medium text-ink">Source repo URL (optional)</span>
+                <Input
+                  value={sourceRepo}
+                  onChange={(e) => setSourceRepo(e.target.value)}
+                  placeholder="https://github.com/owner/repo"
+                />
+                <span className="text-[12px] text-muted">
+                  Paste the GitHub repo you built this from — lets TurboLLM tell you when a newer build is available.
+                </span>
+              </label>
 
               {error && <InlineError message={error} />}
             </div>

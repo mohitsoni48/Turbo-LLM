@@ -114,7 +114,14 @@ export function listEngines(): Promise<EnginesList> {
  *  probed OK but no version string was found (spec 03 §2 `probe_no_version`). */
 export type AddEngineResult = Engine & { warning: 'no_version' | null }
 
-export function addEngine(input: { name: string; binPath: string }): Promise<AddEngineResult> {
+export function addEngine(input: {
+  name: string
+  binPath: string
+  /** Optional GitHub source-repo URL the build came from (ADR-088) — enables the
+   *  notify-only "newer source available → rebuild" check. Omitted when empty. */
+  sourceRepo?: string
+  sourceBranch?: string
+}): Promise<AddEngineResult> {
   return request<AddEngineResult>('/api/v1/engines', { method: 'POST', json: input })
 }
 

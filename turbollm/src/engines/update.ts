@@ -15,7 +15,7 @@
 // the tests exercise directly; checkUpdate/the scheduler are thin shells over them.
 
 import type { Engine } from '../config/config'
-import { latestReleaseTag } from './download'
+import { latestCommitSha, latestReleaseTag } from './download'
 
 // ─── Layer 1a: version/tag comparison (pure) ─────────────────────────────────
 
@@ -78,8 +78,9 @@ export function comparePipVersions(installed: string, latest: string): CompareRe
 }
 
 /** Which comparison applies to an engine source. llama.cpp + forks compare build
- *  tags; pip engines compare PEP440-ish versions. */
-export type UpdateSource = 'github-release' | 'pip'
+ *  tags; pip engines compare PEP440-ish versions; source-built engines (ADR-088)
+ *  compare the built commit hash against a GitHub repo's latest commit. */
+export type UpdateSource = 'github-release' | 'pip' | 'source'
 
 /** Compare installed vs latest for a given source. The single decision used both by
  *  checkUpdate and the tests. */
@@ -127,6 +128,11 @@ export interface UpdateStatus {
   /** When latest couldn't be parsed/compared against installed → result was `unknown`.
    *  The UI shows "couldn't compare" rather than a false up-to-date. */
   comparable: boolean
+  /** Set for source-built engines (ADR-088): the update is a source change that can't
+   *  be auto-applied (we can't recompile). The UI shows "newer source available →
+   *  rebuild" + a link to the repo instead of a one-click Update. Absent for
+   *  release/pip engines (which keep the existing one-click "Update available"). */
+  rebuild?: boolean
 }
 
 /** Resolve which update source + repo/package a registered engine checks against, and
@@ -141,9 +147,12 @@ export interface UpdateStatus {
  */
 export interface ResolvedSource {
   source: UpdateSource
-  /** GitHub `owner/repo` (github-release) or PyPI package name (pip). */
+  /** GitHub `owner/repo` (github-release + source) or PyPI package name (pip). */
   ref: string
   installed: string
+  /** Source mode only (ADR-088): the branch to compare commits against. Empty → the
+   *  repo's default branch (resolved via the GitHub `HEAD` commits ref). */
+  branch?: string
 }
 
 const OFFICIAL_LLAMA_REPO = 'ggml-org/llama.cpp'
@@ -171,6 +180,31 @@ export function tagFromVersionString(version: string): string {
   return m ? m[0] : ''
 }
 
+/** Extract `owner/repo` from a GitHub repo URL (ADR-088), tolerating a `.git` suffix,
+ *  a trailing slash, and `http(s)://`/`www.`/bare `github.com/` forms. Returns null when
+ *  the URL isn't a recognizable GitHub repo URL. PURE — the source-mode update resolver
+ *  uses it to turn a user-pasted URL into the `owner/repo` the GitHub API expects. */
+export function parseGitRepo(url: string): string | null {
+  const m = /(?:https?:\/\/)?(?:www\.)?github\.com\/([^/\s]+)\/([^/\s#?]+?)(?:\.git)?\/?(?:[#?].*)?$/i.exec(
+    url.trim(),
+  )
+  if (!m) return null
+  const owner = m[1]
+  const repo = m[2]
+  if (!owner || !repo) return null
+  return `${owner}/${repo}`
+}
+
+/** Pull the build's git short hash out of a probed version string (ADR-088): the first
+ *  hex token of 7–40 chars (e.g. "1 (0a635dc)" → "0a635dc", "version: x (abcdef1234)" →
+ *  "abcdef1234"). Returns '' when none is present. PURE. NOTE: a digits-only build tag
+ *  like `b9608`/`9608` is NOT a hex-with-letters hash, so a version carrying only a numeric
+ *  tag yields '' — there is no commit to compare. */
+export function commitFromVersionString(version: string): string {
+  const m = /\b[0-9a-f]{7,40}\b/i.exec(version)
+  return m ? m[0] : ''
+}
+
 /** Strip a leading package-name label off a probed pip version string ("mlx-lm 0.31.2"
  *  / "vllm 0.11.2" → "0.31.2" / "0.11.2"); returns the trimmed input otherwise. */
 export function versionFromPipString(version: string): string {
@@ -185,6 +219,20 @@ const KOBOLDCPP_REPO = 'LostRuins/koboldcpp'
 const LLAMAFILE_REPO = 'Mozilla-Ocho/llamafile'
 
 export function resolveUpdateSource(engine: Engine): ResolvedSource | null {
+  // Source-built provenance (ADR-088) takes precedence: when the engine carries a
+  // parseable GitHub source repo, compare its built commit hash against the repo's
+  // latest commit (notify-only "rebuild" — we can't recompile).
+  if (engine.sourceRepo) {
+    const ref = parseGitRepo(engine.sourceRepo)
+    if (ref) {
+      return {
+        source: 'source',
+        ref,
+        branch: engine.sourceBranch || '',
+        installed: commitFromVersionString(engine.version),
+      }
+    }
+  }
   if (engine.kind === 'mlx') return { source: 'pip', ref: 'mlx-lm', installed: versionFromPipString(engine.version) }
   if (engine.kind === 'vllm') return { source: 'pip', ref: 'vllm', installed: versionFromPipString(engine.version) }
   // KoboldCpp / llamafile: single-binary engines provisioned from GitHub releases. Their
@@ -217,6 +265,8 @@ export async function fetchLatest(src: ResolvedSource, signal?: AbortSignal): Pr
     const data = (await res.json()) as { info?: { version?: string } }
     return data.info?.version ?? ''
   }
+  // Source-built engines (ADR-088): the repo's latest commit sha on the branch.
+  if (src.source === 'source') return latestCommitSha(src.ref, src.branch ?? '', signal)
   return latestReleaseTag(src.ref, signal)
 }
 
@@ -242,6 +292,24 @@ export async function computeUpdateStatus(
   }
   if (!latest) {
     return { installed: src.installed, latest: null, hasUpdate: false, checkedAt, error: 'offline', comparable: false }
+  }
+  // Source-built (ADR-088): two commit SHAs can't be ordered, so "different short-sha →
+  // newer source available". An empty installed (no commit hash in the version string)
+  // means there's nothing to compare → no_source. Carry the latest short sha (7 chars).
+  if (src.source === 'source') {
+    const latestShort = latest.slice(0, 7)
+    if (!src.installed) {
+      return { installed: '', latest: latestShort, hasUpdate: false, checkedAt, error: 'no_source', comparable: false, rebuild: true }
+    }
+    const same = src.installed.slice(0, 7).toLowerCase() === latestShort.toLowerCase()
+    return {
+      installed: src.installed,
+      latest: latestShort,
+      hasUpdate: !same,
+      checkedAt,
+      comparable: true,
+      rebuild: true,
+    }
   }
   const cmp = compareVersions(src.source, src.installed, latest)
   return {

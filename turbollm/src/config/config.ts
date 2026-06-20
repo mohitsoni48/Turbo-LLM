@@ -27,6 +27,14 @@ export interface Engine {
   addedAt: string
   /** Auto-update policy (ADR-085). Absent in pre-Phase-6 configs → 'notify' on load. */
   updatePolicy?: UpdatePolicy
+  /** Optional source-repo URL this engine was built from (ADR-088). When set to a
+   *  GitHub repo, the update check compares the built commit hash against the repo's
+   *  latest commit and surfaces a notify-only "newer source available → rebuild".
+   *  Also seeds future telemetry. Absent on engines added before ADR-088. */
+  sourceRepo?: string
+  /** Optional branch to compare commits against (ADR-088). Empty/absent → the repo's
+   *  default branch (resolved via the `HEAD` commits ref). */
+  sourceBranch?: string
 }
 export interface Daemon {
   host: string

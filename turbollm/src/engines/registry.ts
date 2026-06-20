@@ -50,10 +50,16 @@ export class Registry {
     return c.activeEngineId ? findEngine(c.engines, c.activeEngineId) : undefined
   }
 
-  async add(name: string, binPath: string): Promise<AddResult> {
+  async add(
+    name: string,
+    binPath: string,
+    source?: { sourceRepo?: string; sourceBranch?: string },
+  ): Promise<AddResult> {
     const finalName = name.trim() || 'llama-server'
     this.assertNameFree(finalName)
     const pr = await probe(binPath)
+    const sourceRepo = source?.sourceRepo?.trim() || undefined
+    const sourceBranch = source?.sourceBranch?.trim() || undefined
     const eng: Engine = {
       id: randomUUID(),
       name: finalName,
@@ -62,6 +68,8 @@ export class Registry {
       version: pr.version,
       capabilities: pr.capabilities,
       addedAt: new Date().toISOString(),
+      ...(sourceRepo ? { sourceRepo } : {}),
+      ...(sourceBranch ? { sourceBranch } : {}),
     }
     this.store.update((c) => {
       // Re-check under the store lock — the name could have been taken between the
@@ -183,6 +191,30 @@ export class Registry {
       const n = name.trim()
       if (!n) throw new ValueError('name', 'name cannot be empty')
       e.name = n
+      out = structuredClone(e)
+    })
+    return out!
+  }
+
+  /** Attach (or clear) the source-repo provenance on an existing engine (ADR-088).
+   *  A user can point an already-added build at the GitHub repo it was built from so
+   *  TurboLLM can detect "newer source available → rebuild". Pass a defined field to
+   *  set it (trimmed); an empty string clears it; an undefined field leaves it as-is. */
+  setSource(id: string, source: { sourceRepo?: string; sourceBranch?: string }): Engine {
+    let out: Engine | undefined
+    this.store.update((c) => {
+      const e = findEngine(c.engines, id)
+      if (!e) throw new NotFoundError()
+      if (source.sourceRepo !== undefined) {
+        const v = source.sourceRepo.trim()
+        if (v) e.sourceRepo = v
+        else delete e.sourceRepo
+      }
+      if (source.sourceBranch !== undefined) {
+        const v = source.sourceBranch.trim()
+        if (v) e.sourceBranch = v
+        else delete e.sourceBranch
+      }
       out = structuredClone(e)
     })
     return out!
