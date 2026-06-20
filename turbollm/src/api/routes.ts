@@ -778,7 +778,7 @@ export function registerApi(app: Hono, d: Deps): void {
         const profile = resolveProfile(entry, sys, saved, b.profileOverrides, cfg.modelDefaults)
         // KoboldCpp is a GGUF engine with its OWN flag names — build its arg-map instead of
         // the llama-server profileToArgs. llamafile IS llama.cpp's server, so it keeps the
-        // full profileToArgs flags (the manager only prepends --server --nobrowser for it).
+        // full profileToArgs flags (the manager only prepends --server --no-webui for it).
         const extraArgs =
           active.kind === 'koboldcpp'
             ? koboldcppProfileToArgs(profile, primaryVendor(sys), sys.gpus.length > 0)

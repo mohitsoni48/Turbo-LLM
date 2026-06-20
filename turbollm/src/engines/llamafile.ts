@@ -3,7 +3,7 @@
 // llama.cpp's server. It is a *new engine kind* (`kind:'llamafile'`) — NOT the
 // llama-server kind — for one concrete reason: the standalone `llamafile` binary is
 // multi-mode (CLI chat by default) and must be told to run as a server with
-// `--server --nobrowser`, whereas `llama-server` is server-by-default. Once in server
+// `--server --no-webui`, whereas `llama-server` is server-by-default. Once in server
 // mode it IS llama.cpp's server, so it accepts the same flags (-m/--host/--port/-ngl/
 // -c) and serves /health + /v1/chat/completions — the shared probeReady() and the
 // llama.cpp model-field semantics (ignored; no alias) both apply unchanged.
@@ -14,7 +14,9 @@
 //
 // Server flags verified against the llamafile README + llama.cpp server docs:
 //   --server            run in server mode (required; the binary is CLI-by-default)
-//   --nobrowser         don't auto-open a browser tab on launch
+//   --no-webui          serve the OpenAI API only (no bundled web UI / browser tab).
+//                       NB: modern llamafile is llama.cpp's server — the old `--nobrowser`
+//                       flag was removed (it errors), `--no-webui` is the current spelling.
 //   -m <path>           load an external GGUF
 //   --host <addr> / --port <n>
 //   -ngl <n>            GPU layers ; -c <n> context size
@@ -93,7 +95,7 @@ export async function ensureLlamafile(
 
 /**
  * Command + args to launch llamafile in server mode for a model. `--server
- * --nobrowser` put the multi-mode binary into llama.cpp's HTTP server; from there it
+ * --no-webui` put the multi-mode binary into llama.cpp's HTTP server; from there it
  * speaks the same protocol as llama-server. `extraArgs` carries the model's llama.cpp
  * load flags built by the existing {@link profileToArgs} (llamafile understands the
  * same flag names), so the rich per-model profile flows straight through.
@@ -107,6 +109,6 @@ export function llamafileServerCommand(
 ): { cmd: string; args: string[] } {
   return {
     cmd: binPath,
-    args: ['--server', '--nobrowser', '-m', model, '--host', host, '--port', String(port), ...extraArgs],
+    args: ['--server', '--no-webui', '-m', model, '--host', host, '--port', String(port), ...extraArgs],
   }
 }

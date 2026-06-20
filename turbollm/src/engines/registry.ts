@@ -151,7 +151,7 @@ export class Registry {
   }
 
   /** Register a llamafile engine (kind='llamafile'). binPath is the single llamafile
-   *  executable; it runs as llama.cpp's server (launched with --server --nobrowser) and
+   *  executable; it runs as llama.cpp's server (launched with --server --no-webui) and
    *  accepts the standard llama.cpp profile flags. */
   addLlamafile(name: string, binPath: string, version: string): Engine {
     return this.addSingleBinary('llamafile', name || 'llamafile', binPath, version)

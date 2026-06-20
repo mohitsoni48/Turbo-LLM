@@ -266,7 +266,7 @@ export class ModelRouter {
     // KoboldCpp is a GGUF engine but uses its OWN flag names, so it gets its own small
     // arg-map (ctx/ngl + GPU backend) rather than the llama-server profileToArgs. llamafile
     // IS llama.cpp's server under the hood, so it keeps the full profileToArgs flags — the
-    // manager's llamafileServerCommand only prepends `--server --nobrowser`.
+    // manager's llamafileServerCommand only prepends `--server --no-webui`.
     const extraArgs =
       engine.kind === 'koboldcpp'
         ? koboldcppProfileToArgs(profile, sys.gpus[0]?.vendor ?? 'unknown', sys.gpus.length > 0)

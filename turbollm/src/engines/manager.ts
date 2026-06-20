@@ -531,7 +531,7 @@ function engineCommand(opts: StartOpts, port: number, slotSavePath?: string): { 
   if (opts.engine.kind === 'llamafile') {
     // llamafile: llama.cpp's server in a single multi-mode binary. extraArgs carries the
     // standard llama.cpp profileToArgs flags; llamafileServerCommand prepends
-    // `--server --nobrowser` to switch the binary into server mode.
+    // `--server --no-webui` to switch the binary into server mode.
     return llamafileServerCommand(opts.engine.binPath, opts.modelPath, port, '127.0.0.1', opts.extraArgs)
   }
   return { cmd: opts.engine.binPath, args: buildArgs(opts, port, slotSavePath) }

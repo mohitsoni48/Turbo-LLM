@@ -1,5 +1,5 @@
 // Phase 4: llamafile engine. Pure unit tests for the server launch command (it must
-// switch the multi-mode binary into server mode with --server --nobrowser, then pass the
+// switch the multi-mode binary into server mode with --server --no-webui, then pass the
 // standard llama.cpp flags through) and the release-asset selection (the portable
 // `llamafile-<version>` APE, excluding `-thin`/`.zip`/sibling tools — verified against the
 // Mozilla-Ocho/llamafile v0.10.3 release assets).
@@ -18,7 +18,7 @@ test('llamafileServerCommand switches to server mode and passes llama.cpp flags 
   assert.equal(cmd, '/bin/llamafile')
   assert.deepEqual(args, [
     '--server',
-    '--nobrowser',
+    '--no-webui',
     '-m',
     '/models/x.gguf',
     '--host',
@@ -35,7 +35,7 @@ test('llamafileServerCommand switches to server mode and passes llama.cpp flags 
 test('llamafileServerCommand with no extraArgs still launches in server mode', () => {
   const { args } = llamafileServerCommand('/bin/llamafile', '/m.gguf', 8000, '127.0.0.1')
   assert.ok(args.includes('--server'))
-  assert.ok(args.includes('--nobrowser'))
+  assert.ok(args.includes('--no-webui'))
   assert.deepEqual(args.slice(-2), ['--port', '8000'])
 })
 
