@@ -371,3 +371,73 @@ export async function provisionForkRelease(
   if (!bin) throw new Error('llama-server not found in extracted release archive')
   return bin
 }
+
+// TurboQuant ships self-contained prebuilts for macOS-arm64 and Linux-x64 (Vulkan) as
+// GitHub releases tagged PER PLATFORM (turboquant-macos-arm64-*, turboquant-linux-x64-*)
+// — so `releases/latest` can't be used (it's whichever platform published most recently);
+// this resolver finds the newest release whose TAG matches the OS. Windows has no usable
+// self-contained prebuilt (the only one, on HuggingFace, is a MinGW build with a UCRT
+// linkage defect that won't load), so it returns null → "build from source".
+
+/** Resolve the TurboQuant archive URL for this platform, or null when no self-contained
+ *  prebuilt exists (→ caller falls back to "build from source"). macOS/Linux → the newest
+ *  GitHub release whose TAG names this OS and carries a matching asset; Windows → null. */
+export async function turboquantAssetUrl(
+  repo: string,
+  platform = process.platform,
+  archStr = process.arch,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  if (platform === 'win32') return null // no usable self-contained Windows prebuilt
+  const res = await fetch(`https://api.github.com/repos/${repo}/releases?per_page=100`, {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'turbollm' },
+    signal,
+  })
+  if (!res.ok) throw new Error(`could not query ${repo} releases: HTTP ${res.status}`)
+  const releases = (await res.json()) as GithubRelease[]
+  const osTag = platform === 'darwin' ? 'macos' : 'linux'
+  for (const rel of releases) {
+    if (!(rel.tag_name ?? '').toLowerCase().includes(osTag)) continue
+    const asset = pickReleaseAsset(rel.assets ?? [], platform, archStr)
+    if (asset) return asset.browser_download_url
+  }
+  return null
+}
+
+/** Provision TurboQuant's prebuilt `llama-server` into `<enginesRoot>/turboquant/`,
+ *  resolving the right per-platform source (HF on Windows, GitHub elsewhere). Same
+ *  download → extract → locate pipeline as {@link provisionForkRelease}. Throws
+ *  `no_release_asset` when this platform has no prebuilt. */
+export async function provisionTurboquant(
+  enginesRoot: string,
+  repo: string,
+  onProgress?: (p: ProvisionProgress) => void,
+  signal?: AbortSignal,
+): Promise<string> {
+  const destDir = join(enginesRoot, 'turboquant')
+  if (existsSync(destDir)) {
+    const found = findServer(destDir)
+    if (found) return found
+  }
+  const url = await turboquantAssetUrl(repo, process.platform, process.arch, signal)
+  if (!url) throw new Error('no_release_asset')
+
+  mkdirSync(destDir, { recursive: true })
+  const fname = url.split('/').pop()?.split('?')[0] || 'turboquant-download.zip'
+  const tmp = join(enginesRoot, fname)
+  try {
+    onProgress?.({ phase: 'downloading', pct: 0 })
+    await downloadFile(url, tmp, onProgress, signal)
+    onProgress?.({ phase: 'extracting', pct: -1 })
+    await extractArchive(tmp, destDir)
+    rmSync(tmp, { force: true })
+  } catch (e) {
+    rmSync(tmp, { force: true })
+    rmSync(destDir, { recursive: true, force: true })
+    throw e
+  }
+
+  const bin = findServer(destDir)
+  if (!bin) throw new Error('llama-server not found in extracted TurboQuant archive')
+  return bin
+}

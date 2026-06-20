@@ -22,7 +22,7 @@ import {
   installedBackendServer,
   latestReleaseTag,
   provisionBackend,
-  provisionForkRelease,
+  provisionTurboquant,
   recommendBackendId,
 } from '../engines/download'
 import {
@@ -416,12 +416,13 @@ export function registerApi(app: Hono, d: Deps): void {
     void (async () => {
       try {
         d.provision.start('turboquant')
-        // For update: remove existing dir so provisionForkRelease re-downloads the latest.
+        // For update: remove existing dir so provisionTurboquant re-downloads the latest.
         if (upgrade) {
           const tqDir = join(root, 'turboquant')
           if (existsSync(tqDir)) rmSync(tqDir, { recursive: true, force: true })
         }
-        const bin = await provisionForkRelease(root, entry.repo!, 'turboquant', (p) =>
+        // Per-platform resolver: Windows build is on HuggingFace, macOS/Linux on GitHub.
+        const bin = await provisionTurboquant(root, entry.repo!, (p) =>
           d.provision.progress(p.phase, p.pct, p.part, p.parts),
         )
         let eng = d.registry.list().engines.find((e) => e.binPath === bin)
