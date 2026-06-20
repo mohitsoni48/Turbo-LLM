@@ -415,7 +415,14 @@ function InstallManageCatalog({
     <section className="flex flex-col gap-2">
       <SectionLabel>Install &amp; manage</SectionLabel>
 
-      {rec.recommendation.fits.map((fit) => {
+      {rec.recommendation.fits
+        .filter((fit) => {
+          // Hide engines not supported on this OS — except vLLM, which we keep visible
+          // (greyed, "Linux only") as the advertised power-user option (user request).
+          const c = catalogById.get(fit.engine.id)
+          return fit.engine.id === 'vllm' || !c || c.supportedHere !== false
+        })
+        .map((fit) => {
         const regId = registryEngineId(catalogById.get(fit.engine.id) ?? fit.engine as CatalogEngine)
         return (
         <CatalogFitRow
@@ -516,6 +523,9 @@ function CatalogFitRow({
   const e = fit.engine
   const isLlama = e.id === 'llama.cpp'
   const incompatible = fit.compatible.length === 0
+  // Compatible here, but no prebuilt for this OS (e.g. ik_llama everywhere, TurboQuant
+  // on Windows/Linux) → "build from source → Add your own" instead of a dead Install.
+  const buildYourself = !incompatible && fit.compatible.every((v) => !v.hasPrebuilt)
   const experimental = e.support === 'experimental'
   const isInstalled = !!catalog?.installed
   const isEnabled = !!catalog?.enabled
@@ -629,9 +639,10 @@ function CatalogFitRow({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-        ) : !catalog.comingSoon && !installFor(catalog) ? (
-          // Build-it-yourself fork (no prebuilt + no installer, e.g. ik_llama.cpp):
-          // link to the repo and funnel to "Add your own engine" — not a dead Install.
+        ) : buildYourself ? (
+          // Build-it-yourself fork — compatible here but no prebuilt for this OS
+          // (ik_llama everywhere; TurboQuant on Windows/Linux). Link to the repo and
+          // funnel to "Add your own engine" — not a dead Install button.
           <a
             href={catalog.homepage}
             target="_blank"

@@ -295,15 +295,15 @@ const ALL: CatalogEngine[] = [
     provision: 'github-release',
     homepage: 'https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant',
     repo: 'AtomicBot-ai/atomic-llama-cpp-turboquant',
-    // The fork currently publishes prebuilt binaries for macOS (Apple Silicon)
-    // only. The OS prefilter hides it elsewhere; it appears + installs on macOS.
-    // Add 'win32'/'linux' here the moment the fork ships those release assets.
-    platforms: ['darwin'],
+    // A well-known llama.cpp fork — buildable on all three desktop OSes, but the fork
+    // currently publishes prebuilt binaries for macOS (Apple Silicon) ONLY. So it shows
+    // everywhere: one-click Install on macOS (prebuilt), "build from source → Add your
+    // own engine" on Windows/Linux. Flip the source variant's hasPrebuilt + add assets
+    // the day the fork ships Windows/Linux releases.
+    platforms: ['win32', 'darwin', 'linux'],
     support: 'experimental',
     installEndpoint: '/api/v1/engines/turboquant',
-    note: 'Prebuilt binaries are published for macOS (Apple Silicon). Windows/Linux builds are not yet released by the fork.',
-    // Reflects the fork's current macOS-only prebuilt reality (later phases add
-    // Windows/Linux variants when the fork ships those release assets).
+    note: 'Prebuilt for macOS (Apple Silicon); on Windows/Linux build llama-server from the fork, then use "Add your own engine".',
     variants: [
       {
         id: 'turboquant-metal',
@@ -313,6 +313,15 @@ const ALL: CatalogEngine[] = [
         stability: 'experimental',
         speed: 'fast',
         hasPrebuilt: true,
+      },
+      {
+        id: 'turboquant-source',
+        label: 'Build from source',
+        repo: 'AtomicBot-ai/atomic-llama-cpp-turboquant',
+        requires: { platform: ['win32', 'linux'] },
+        stability: 'experimental',
+        speed: 'fast',
+        hasPrebuilt: false,
       },
     ],
   },
