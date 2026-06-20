@@ -12,12 +12,15 @@ import {
   useComfyGate,
   useDaemonRestart,
   useHfTokenTest,
+  useModelDirs,
+  useModelMutations,
   useNetworkInfo,
   useSettings,
   useStatus,
   useSysInfo,
   useTelemetryPreview,
 } from '../lib/queries'
+import { ModelDirs } from './models/ModelDirs'
 import { useConversationMutations } from '../lib/chat-queries'
 import { ApiError, type TelemetryLevel } from '../lib/api'
 import { TELEMETRY_UI_ENABLED } from '../lib/flags'
@@ -96,6 +99,10 @@ export function SettingsScreen() {
   const { theme, setTheme } = useUiStore()
   const { query: settingsQ, save } = useSettings()
   const settings = settingsQ.data
+  const modelDirsQ = useModelDirs()
+  const modelDirsMut = useModelMutations()
+  const modelDirs = modelDirsQ.data?.dirs ?? []
+  const primaryModelDir = modelDirsQ.data?.primaryDir ?? ''
 
   const [ttl, setTtl] = useState<number>(60)
   const [port, setPort] = useState<number>(6996)
@@ -433,6 +440,8 @@ export function SettingsScreen() {
 
         {/* Network (spec 08 §2) */}
         <NetworkSection lanBind={lanBind} setLanBind={setLanBind} requireApiKey={requireApiKey} setRequireApiKey={setRequireApiKey} port={port} setPort={setPort} />
+        {/* Models — folders */}
+        <ModelDirs dirs={modelDirs} primaryDir={primaryModelDir} mut={modelDirsMut} />
 
         {/* Models — Hugging Face token (spec 10 §4) */}
         <HfTokenSection tokenSet={settings?.hfTokenSet ?? false} onSaved={() => void settingsQ.refetch()} />
