@@ -11,7 +11,8 @@ import type { Deps } from '../deps'
 import { type ModelInfo, type StartOpts } from '../engines/manager'
 import { abortAllInFlightChats } from '../chat/chat-routes'
 import { NameTakenError, NotFoundError } from '../engines/registry'
-import { ProbeError } from '../engines/probe'
+import { ProbeError, probe } from '../engines/probe'
+import { resolveServerBinary, suggestEngineName } from '../engines/scan'
 import {
   LLAMA_BUILD,
   availableBackends,
@@ -361,6 +362,31 @@ export function registerApi(app: Hono, d: Deps): void {
       return c.json({ ...engine, warning: warning ?? null }, 201)
     } catch (e) {
       if (e instanceof NameTakenError) return err(c, 400, 'name_already_taken', e.message)
+      if (e instanceof ProbeError) return err(c, 400, e.code, e.message)
+      return err(c, 500, 'internal', (e as Error).message)
+    }
+  })
+
+  // Guided add (engine overhaul, Phase 3): scan a chosen FOLDER (or a binary file)
+  // for the server binary and probe it — read-only preflight for the Add-engine
+  // flow. Registration still happens via POST /api/v1/engines. `{found:false}` (200)
+  // when no binary turns up; ProbeError → 400 so wrong-OS / timeout reach the UI.
+  app.post('/api/v1/engines/scan', async (c) => {
+    const b = await body<{ path?: string }>(c)
+    const path = (b.path ?? '').trim()
+    if (!path) return err(c, 400, 'invalid_config_value', 'path is required.')
+    const binPath = resolveServerBinary(path)
+    if (!binPath) return c.json({ found: false })
+    try {
+      const { version, capabilities } = await probe(binPath)
+      return c.json({
+        found: true,
+        binPath,
+        version,
+        capabilities,
+        suggestedName: suggestEngineName(binPath, version),
+      })
+    } catch (e) {
       if (e instanceof ProbeError) return err(c, 400, e.code, e.message)
       return err(c, 500, 'internal', (e as Error).message)
     }

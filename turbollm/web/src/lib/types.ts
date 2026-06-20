@@ -151,6 +151,20 @@ export type EnginesList = {
   activeEngineId: string
 }
 
+/** POST /api/v1/engines/scan result (engine overhaul, Phase 3). Read-only preflight
+ *  for the guided Add-engine flow: `found:false` when no server binary turned up in
+ *  the chosen folder, else the located binary + its probed version/capabilities and
+ *  a pre-filled suggested name. ProbeError surfaces as an ApiError (wrong-OS / timeout). */
+export type EngineScanResult =
+  | { found: false }
+  | {
+      found: true
+      binPath: string
+      version: string
+      capabilities: EngineCapabilities
+      suggestedName: string
+    }
+
 /** A selectable llama.cpp backend variant (ADR-025). A "build" of the official
  *  engine. `engineId` is the registered engine to activate once installed.
  *  `enabled` = a registry engine entry exists for this binary (files on disk + registered).

@@ -55,6 +55,7 @@ import {
   removeEngine,
   removeModelDir,
   renameEngine,
+  scanEngineFolder,
   setPrimaryModelDir,
   reprobeEngine,
   rescanModels,
@@ -272,6 +273,13 @@ export function useEngineMutations() {
     stop: useMutation({ mutationFn: stopEngine, onSuccess: invalidate }),
     restart: useMutation({ mutationFn: restartEngine, onSuccess: invalidate }),
   }
+}
+
+/** Scan a chosen folder (or binary file) for the server binary (engine overhaul,
+ *  Phase 3). Read-only preflight for the guided Add-engine flow — no invalidation,
+ *  the actual add still goes through {@link useEngineMutations}.add. */
+export function useEngineScan() {
+  return useMutation({ mutationFn: (path: string) => scanEngineFolder(path) })
 }
 
 /** Browse a directory for the engine-binary picker (spec 03 §9). `path` is the

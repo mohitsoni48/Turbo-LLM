@@ -13,6 +13,7 @@ import type {
   EngineRecommendationResult,
   EngineLogs,
   EnginesList,
+  EngineScanResult,
   HfRepoDetail,
   HfSearchResult,
   HfTokenTest,
@@ -113,6 +114,13 @@ export type AddEngineResult = Engine & { warning: 'no_version' | null }
 
 export function addEngine(input: { name: string; binPath: string }): Promise<AddEngineResult> {
   return request<AddEngineResult>('/api/v1/engines', { method: 'POST', json: input })
+}
+
+/** Guided Add-engine scan (engine overhaul, Phase 3): given a chosen FOLDER or a
+ *  binary file, locate + probe the server binary. Read-only — registration still
+ *  goes through {@link addEngine}. Throws ApiError on a ProbeError (wrong-OS/timeout). */
+export function scanEngineFolder(path: string): Promise<EngineScanResult> {
+  return request<EngineScanResult>('/api/v1/engines/scan', { method: 'POST', json: { path } })
 }
 
 export function getEngineBackends(): Promise<EngineBackends> {

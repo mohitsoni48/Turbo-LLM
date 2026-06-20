@@ -116,12 +116,16 @@ export function installedBackendServer(enginesRoot: string, id: BackendId, tag =
   return existsSync(dir) ? findServer(dir) : null
 }
 
-/** Recursively find a file by exact name under dir (first match), or null. */
-export function findFile(dir: string, name: string): string | null {
+/** Recursively find a file by exact name under dir (first match), or null.
+ *  `skipDir(name)` lets a caller prune subtrees (e.g. node_modules / dotdirs) so a
+ *  huge tree can't make the scan hang — default keeps the original full-walk
+ *  behavior for existing callers. */
+export function findFile(dir: string, name: string, skipDir?: (dirName: string) => boolean): string | null {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, e.name)
     if (e.isDirectory()) {
-      const r = findFile(full, name)
+      if (skipDir?.(e.name)) continue
+      const r = findFile(full, name, skipDir)
       if (r) return r
     } else if (e.name === name) {
       return full
