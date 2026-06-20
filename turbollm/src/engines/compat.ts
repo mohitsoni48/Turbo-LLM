@@ -11,7 +11,9 @@ export type ModelFormat = 'gguf' | 'mlx'
 
 /**
  * True when an engine of `engineKind` can load a model of `format`:
- *   - llama.cpp and its forks (e.g. TurboQuant, kind 'llama-server') → GGUF
+ *   - llama.cpp and its forks (e.g. TurboQuant + ik_llama.cpp, kind 'llama-server') → GGUF
+ *   - llamafile (kind 'llamafile') → GGUF (it bundles llama.cpp's server)
+ *   - KoboldCpp (kind 'koboldcpp') → GGUF (it wraps llama.cpp)
  *   - MLX (kind 'mlx') → MLX-format safetensors directories
  *   - vLLM (kind 'vllm') → HF safetensors directories — the same on-disk shape the
  *     scanner tags 'mlx' (config.json + *.safetensors + tokenizer)
@@ -19,6 +21,7 @@ export type ModelFormat = 'gguf' | 'mlx'
 export function engineAcceptsFormat(engineKind: string, format: ModelFormat): boolean {
   if (engineKind === 'mlx') return format === 'mlx'
   if (engineKind === 'vllm') return format === 'mlx'
+  // llama-server / forks, llamafile, koboldcpp — all GGUF.
   return format === 'gguf'
 }
 
@@ -26,7 +29,9 @@ export function engineAcceptsFormat(engineKind: string, format: ModelFormat): bo
  * The value an OpenAI-compatible request must put in its `model` field for this engine.
  *
  * llama.cpp ignores the field (it serves the single loaded model), so we leave the
- * caller's value alone. mlx-lm and vLLM, however, treat `model` as the model to serve
+ * caller's value alone. llamafile (llama.cpp's server) and KoboldCpp likewise ignore it
+ * and serve the single loaded model, so they too keep the caller's value (null).
+ * mlx-lm and vLLM, however, treat `model` as the model to serve
  * and 404 (vLLM) or fail to load (mlx-lm) if it doesn't match a known name — they would
  * never match TurboLLM's internal model key (a display name with spaces). We launch both
  * under the fixed alias `default_model` (mlx-lm's built-in alias for its `--model`; vLLM

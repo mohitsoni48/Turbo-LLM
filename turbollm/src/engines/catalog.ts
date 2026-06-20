@@ -185,6 +185,108 @@ const ALL: CatalogEngine[] = [
     ],
   },
   {
+    id: 'ik_llama.cpp',
+    name: 'ik_llama.cpp',
+    kind: 'llama-server',
+    description:
+      'A llama.cpp fork (ikawrakow) with CPU/GPU performance work and extra quant types. Ships llama-server but publishes no prebuilt binaries — build it, then add your own engine.',
+    provision: 'github-release',
+    homepage: 'https://github.com/ikawrakow/ik_llama.cpp',
+    repo: 'ikawrakow/ik_llama.cpp',
+    // Buildable on all three desktop OSes, but the fork ships NO prebuilt release assets
+    // (verified: its releases are source-only). So it lists as "build it → Add your own
+    // engine" with the repo link, and has NO install endpoint. The day it publishes
+    // prebuilt llama-server archives, flip the variant's hasPrebuilt + add an endpoint.
+    platforms: ['win32', 'darwin', 'linux'],
+    support: 'experimental',
+    installEndpoint: '',
+    note: 'No prebuilt binaries are published. Build llama-server from the fork, then use "Add your own engine" to point TurboLLM at it — it runs on the standard llama-server path.',
+    variants: [
+      {
+        id: 'ik_llama.cpp-source',
+        label: 'Build from source',
+        repo: 'ikawrakow/ik_llama.cpp',
+        // No hardware gate beyond "it's a llama-server build" — the user picks their own
+        // backend when they compile it. hasPrebuilt:false drives the "build it" treatment.
+        requires: {},
+        stability: 'experimental',
+        speed: 'baseline',
+        hasPrebuilt: false,
+      },
+    ],
+  },
+  {
+    id: 'llamafile',
+    name: 'llamafile',
+    kind: 'llamafile',
+    description:
+      "Mozilla's single-file GGUF runtime (llama.cpp's server in one portable executable). Broadly portable — runs on any OS/arch.",
+    provision: 'github-release',
+    homepage: 'https://github.com/Mozilla-Ocho/llamafile',
+    repo: 'Mozilla-Ocho/llamafile',
+    // The release ships ONE Cosmopolitan APE binary that runs on every desktop OS/arch.
+    platforms: ['win32', 'darwin', 'linux'],
+    support: 'experimental',
+    installEndpoint: '/api/v1/engines/llamafile',
+    note: 'Downloads one portable executable that bundles llama.cpp. GPU acceleration depends on your platform/drivers; falls back to CPU.',
+    variants: [
+      {
+        id: 'llamafile',
+        label: 'Portable (any OS/GPU)',
+        repo: 'Mozilla-Ocho/llamafile',
+        // No hardware gate — the single binary runs everywhere (GPU where available, else CPU).
+        requires: {},
+        stability: 'experimental',
+        speed: 'baseline',
+        hasPrebuilt: true,
+      },
+    ],
+  },
+  {
+    id: 'koboldcpp',
+    name: 'KoboldCpp',
+    kind: 'koboldcpp',
+    description:
+      'A single-binary GGUF runtime (wraps llama.cpp) with an OpenAI-compatible API. CUDA build on NVIDIA, portable Vulkan/CPU build elsewhere.',
+    provision: 'github-release',
+    homepage: 'https://github.com/LostRuins/koboldcpp',
+    repo: 'LostRuins/koboldcpp',
+    // KoboldCpp publishes raw binaries for Windows x64, Linux x64, and macOS arm64.
+    platforms: ['win32', 'darwin', 'linux'],
+    support: 'experimental',
+    installEndpoint: '/api/v1/engines/koboldcpp',
+    note: 'Downloads a single KoboldCpp binary. The CUDA build is used on NVIDIA GPUs; the portable build (Vulkan/CPU) elsewhere. Windows/Linux are x64-only; macOS is Apple Silicon only.',
+    variants: [
+      {
+        id: 'koboldcpp-cuda',
+        label: 'CUDA (NVIDIA)',
+        repo: 'LostRuins/koboldcpp',
+        requires: { platform: ['win32', 'linux'], arch: ['x64'], gpuVendor: ['nvidia'] },
+        stability: 'experimental',
+        speed: 'fast',
+        hasPrebuilt: true,
+      },
+      {
+        id: 'koboldcpp-portable',
+        label: 'Vulkan / CPU (portable)',
+        repo: 'LostRuins/koboldcpp',
+        requires: { platform: ['win32', 'linux'], arch: ['x64'] },
+        stability: 'experimental',
+        speed: 'baseline',
+        hasPrebuilt: true,
+      },
+      {
+        id: 'koboldcpp-metal',
+        label: 'Metal (Apple)',
+        repo: 'LostRuins/koboldcpp',
+        requires: { platform: ['darwin'], arch: ['arm64'] },
+        stability: 'experimental',
+        speed: 'fast',
+        hasPrebuilt: true,
+      },
+    ],
+  },
+  {
     id: 'turboquant',
     name: 'TurboQuant',
     kind: 'llama-server',

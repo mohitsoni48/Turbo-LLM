@@ -79,6 +79,8 @@ const isOfficialLlama = (binPath: string) => /[\\/]engines[\\/]llama\.cpp-/.test
 function catalogIdFor(e: Engine): string {
   if (e.kind === 'mlx') return 'mlx'
   if (e.kind === 'vllm') return 'vllm'
+  if (e.kind === 'koboldcpp') return 'koboldcpp'
+  if (e.kind === 'llamafile') return 'llamafile'
   if (/[\\/]engines[\\/]turboquant[\\/]/.test(e.binPath)) return 'turboquant'
   return 'llama.cpp'
 }
@@ -88,6 +90,8 @@ function catalogIdFor(e: Engine): string {
 function buildContextFor(e: Engine, backends: EngineBackends | undefined): string {
   if (e.kind === 'mlx') return 'MLX · Apple Metal'
   if (e.kind === 'vllm') return 'vLLM'
+  if (e.kind === 'koboldcpp') return 'KoboldCpp'
+  if (e.kind === 'llamafile') return 'llamafile'
   if (isOfficialLlama(e.binPath)) {
     // The active official backend (cuda/metal/…) carries a friendly label.
     const active = backends?.backends.find((b) => b.active)
@@ -315,9 +319,13 @@ function InstallManageCatalog({
     install.vllm.isPending ||
     install.mlx.isPending ||
     install.turboquant.isPending ||
+    install.koboldcpp.isPending ||
+    install.llamafile.isPending ||
     install.updateVllm.isPending ||
     install.updateMlx.isPending ||
     install.updateTurboquant.isPending ||
+    install.updateKoboldcpp.isPending ||
+    install.updateLlamafile.isPending ||
     engineMut.remove.isPending ||
     engineMut.purge.isPending
 
@@ -326,18 +334,23 @@ function InstallManageCatalog({
     if (e.installEndpoint === '/api/v1/engines/vllm') return install.vllm
     if (e.installEndpoint === '/api/v1/engines/mlx') return install.mlx
     if (e.installEndpoint === '/api/v1/engines/turboquant') return install.turboquant
+    if (e.installEndpoint === '/api/v1/engines/koboldcpp') return install.koboldcpp
+    if (e.installEndpoint === '/api/v1/engines/llamafile') return install.llamafile
     return null
   }
   const updateFor = (e: CatalogEngine) => {
     if (e.installEndpoint === '/api/v1/engines/vllm') return install.updateVllm
     if (e.installEndpoint === '/api/v1/engines/mlx') return install.updateMlx
     if (e.installEndpoint === '/api/v1/engines/turboquant') return install.updateTurboquant
+    if (e.installEndpoint === '/api/v1/engines/koboldcpp') return install.updateKoboldcpp
+    if (e.installEndpoint === '/api/v1/engines/llamafile') return install.updateLlamafile
     return null
   }
   const registryEngineId = (e: CatalogEngine): string | undefined => {
     const eng = registry?.engines ?? []
     if (e.provision === 'pip') return eng.find((x) => x.kind === e.kind)?.id
     if (e.id === 'turboquant') return eng.find((x) => /[\\/]engines[\\/]turboquant[\\/]/.test(x.binPath))?.id
+    if (e.id === 'koboldcpp' || e.id === 'llamafile') return eng.find((x) => x.kind === e.kind)?.id
     return undefined
   }
   const doInstall = (e: CatalogEngine) => {

@@ -26,6 +26,9 @@ import {
 } from './download'
 import { ensureMlxEnv } from './mlx'
 import { ensureVllmEnv } from './vllm'
+import { ensureKoboldcpp, koboldcppDir } from './koboldcpp'
+import { ensureLlamafile, llamafileDir } from './llamafile'
+import { primaryVendor } from '../sysinfo/sysinfo'
 import { tagFromManagedBinPath } from './update'
 
 export interface UpdateApplyDeps {
@@ -45,6 +48,8 @@ export async function applyEngineUpdate(d: UpdateApplyDeps, engine: Engine, sign
   const root = join(d.store.dir(), 'engines')
   if (engine.kind === 'mlx') return applyPipUpdate(d, 'mlx', engine, root)
   if (engine.kind === 'vllm') return applyPipUpdate(d, 'vllm', engine, root)
+  if (engine.kind === 'koboldcpp') return applyKoboldcppUpdate(d, engine, root, signal)
+  if (engine.kind === 'llamafile') return applyLlamafileUpdate(d, engine, root, signal)
   if (engine.kind === 'llama-server') {
     if (isManagedLlama(engine.binPath)) return applyLlamaCppUpdate(d, engine, root, signal)
     if (isTurboquant(engine.binPath)) return applyForkUpdate(d, engine, root, signal)
@@ -110,6 +115,40 @@ async function applyForkUpdate(d: UpdateApplyDeps, engine: Engine, root: string,
     d.provision.done()
   } catch (e) {
     d.provision.fail(`Could not update TurboQuant: ${msg(e)}`)
+    throw e
+  }
+}
+
+/** KoboldCpp: remove the install dir + re-download the latest release binary. Mirrors
+ *  the fork path (single dir, replaced wholesale). */
+async function applyKoboldcppUpdate(d: UpdateApplyDeps, engine: Engine, root: string, signal?: AbortSignal): Promise<void> {
+  d.provision.start('koboldcpp')
+  try {
+    if (d.registry.active()?.id === engine.id) await d.manager.stopAndWait()
+    rmSync(koboldcppDir(root), { recursive: true, force: true })
+    const hasNvidia = primaryVendor() === 'nvidia'
+    const rt = await ensureKoboldcpp(root, hasNvidia, (p) => d.provision.progress(p.phase, p.pct, p.part, p.parts), signal)
+    const eng = d.registry.addKoboldcpp(`KoboldCpp (${rt.version})`, rt.binPath, rt.version)
+    d.registry.activate(eng.id)
+    d.provision.done()
+  } catch (e) {
+    d.provision.fail(`Could not update KoboldCpp: ${msg(e)}`)
+    throw e
+  }
+}
+
+/** llamafile: remove the install dir + re-download the latest portable binary. */
+async function applyLlamafileUpdate(d: UpdateApplyDeps, engine: Engine, root: string, signal?: AbortSignal): Promise<void> {
+  d.provision.start('llamafile')
+  try {
+    if (d.registry.active()?.id === engine.id) await d.manager.stopAndWait()
+    rmSync(llamafileDir(root), { recursive: true, force: true })
+    const rt = await ensureLlamafile(root, (p) => d.provision.progress(p.phase, p.pct, p.part, p.parts), signal)
+    const eng = d.registry.addLlamafile(`llamafile (${rt.version})`, rt.binPath, rt.version)
+    d.registry.activate(eng.id)
+    d.provision.done()
+  } catch (e) {
+    d.provision.fail(`Could not update llamafile: ${msg(e)}`)
     throw e
   }
 }

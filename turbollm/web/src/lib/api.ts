@@ -160,6 +160,14 @@ export function installTurboquant(): Promise<{ accepted: true; engine: 'turboqua
   return request('/api/v1/engines/turboquant', { method: 'POST', json: {} })
 }
 
+export function installKoboldcpp(): Promise<{ accepted: true; engine: 'koboldcpp' }> {
+  return request('/api/v1/engines/koboldcpp', { method: 'POST', json: {} })
+}
+
+export function installLlamafile(): Promise<{ accepted: true; engine: 'llamafile' }> {
+  return request('/api/v1/engines/llamafile', { method: 'POST', json: {} })
+}
+
 export function cancelBackendDownload(): Promise<{ ok: boolean }> {
   return request('/api/v1/engines/backends/cancel', { method: 'POST', json: {} })
 }
@@ -235,6 +243,16 @@ export function updateMlx(): Promise<{ accepted: true; engine: 'mlx' }> {
 /** Update (re-download latest release) the TurboQuant engine. */
 export function updateTurboquant(): Promise<{ accepted: true; engine: 'turboquant' }> {
   return request('/api/v1/engines/turboquant?update=1', { method: 'POST', json: {} })
+}
+
+/** Update (re-download latest release) the KoboldCpp engine. */
+export function updateKoboldcpp(): Promise<{ accepted: true; engine: 'koboldcpp' }> {
+  return request('/api/v1/engines/koboldcpp?update=1', { method: 'POST', json: {} })
+}
+
+/** Update (re-download latest release) the llamafile engine. */
+export function updateLlamafile(): Promise<{ accepted: true; engine: 'llamafile' }> {
+  return request('/api/v1/engines/llamafile?update=1', { method: 'POST', json: {} })
 }
 
 export function activateEngine(id: string): Promise<{ ok: true }> {

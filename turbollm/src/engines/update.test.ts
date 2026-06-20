@@ -49,6 +49,16 @@ test('compareBuildTags: malformed on either side → unknown', () => {
   assert.equal(compareBuildTags('', ''), 'unknown')
 })
 
+test('compareBuildTags: falls back to semver for non-build GitHub tags (KoboldCpp/llamafile)', () => {
+  // KoboldCpp tags vX.Y.Z; llamafile tags X.Y.Z — neither is a b<number> build tag,
+  // so the comparison falls back to semver ordering instead of returning unknown.
+  assert.equal(compareBuildTags('v1.115.1', 'v1.115.2'), 'newer') // latest ahead
+  assert.equal(compareBuildTags('v1.115.2', 'v1.115.1'), 'older')
+  assert.equal(compareBuildTags('1.115.2', '1.115.2'), 'equal')
+  assert.equal(compareBuildTags('0.10.2', '0.10.3'), 'newer')
+  assert.equal(compareBuildTags('0.10.3', '0.10.3'), 'equal')
+})
+
 // ─── pip version comparison ──────────────────────────────────────────────────
 
 test('parsePipVersion: leading dotted-integer release, ignores suffixes', () => {
@@ -167,6 +177,28 @@ test('resolveUpdateSource: mlx/vllm → PyPI package + stripped version', () => 
     ref: 'vllm',
     installed: '0.11.2',
   })
+})
+
+test('resolveUpdateSource: koboldcpp/llamafile → GitHub repo + stored tag (Phase 4)', () => {
+  assert.deepEqual(resolveUpdateSource(eng({ kind: 'koboldcpp', version: 'v1.115.2' })), {
+    source: 'github-release',
+    ref: 'LostRuins/koboldcpp',
+    installed: 'v1.115.2',
+  })
+  assert.deepEqual(resolveUpdateSource(eng({ kind: 'llamafile', version: '0.10.3' })), {
+    source: 'github-release',
+    ref: 'Mozilla-Ocho/llamafile',
+    installed: '0.10.3',
+  })
+})
+
+test('computeUpdateStatus: koboldcpp semver update is detected end-to-end (Phase 4)', async () => {
+  const e = eng({ kind: 'koboldcpp', version: 'v1.115.1' })
+  const st = await computeUpdateStatus(e, async () => 'v1.115.2')
+  assert.equal(st.installed, 'v1.115.1')
+  assert.equal(st.latest, 'v1.115.2')
+  assert.equal(st.hasUpdate, true)
+  assert.equal(st.comparable, true)
 })
 
 test('resolveUpdateSource: user-added arbitrary binary → null (no honest source)', () => {

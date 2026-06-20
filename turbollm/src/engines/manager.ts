@@ -7,6 +7,8 @@ import { createConnection, createServer } from 'node:net'
 import { dirname, join } from 'node:path'
 import type { ConfigStore, Engine } from '../config/config'
 import { mlxServerCommand } from './mlx'
+import { koboldcppServerCommand } from './koboldcpp'
+import { llamafileServerCommand } from './llamafile'
 import { slotCacheDir } from './slot-cache'
 import { vllmServerCommand, vllmServeBlocker } from './vllm'
 
@@ -519,6 +521,18 @@ function engineCommand(opts: StartOpts, port: number, slotSavePath?: string): { 
     // HF repo id or a local safetensors dir; llama.cpp LoadProfile flags don't apply,
     // but the multi-GPU shard count (ADR-054) maps to --tensor-parallel-size.
     return vllmServerCommand(opts.engine.binPath, opts.modelPath, port, '127.0.0.1', opts.tensorParallelSize, opts.extraArgs)
+  }
+  if (opts.engine.kind === 'koboldcpp') {
+    // KoboldCpp: a single binary with its OWN flag names. opts.extraArgs carries the
+    // KoboldCpp arg-map (koboldcppProfileToArgs) built by the router; no slot-save path
+    // (that's a llama-server-only flag).
+    return koboldcppServerCommand(opts.engine.binPath, opts.modelPath, port, '127.0.0.1', opts.extraArgs)
+  }
+  if (opts.engine.kind === 'llamafile') {
+    // llamafile: llama.cpp's server in a single multi-mode binary. extraArgs carries the
+    // standard llama.cpp profileToArgs flags; llamafileServerCommand prepends
+    // `--server --nobrowser` to switch the binary into server mode.
+    return llamafileServerCommand(opts.engine.binPath, opts.modelPath, port, '127.0.0.1', opts.extraArgs)
   }
   return { cmd: opts.engine.binPath, args: buildArgs(opts, port, slotSavePath) }
 }

@@ -32,6 +32,8 @@ import {
 import type { BackendId } from '../engines/download'
 import { ensureMlxEnv, mlxSamplingArgs } from '../engines/mlx'
 import { ensureVllmEnv } from '../engines/vllm'
+import { ensureKoboldcpp, koboldcppBinPath, koboldcppDir, koboldcppProfileToArgs } from '../engines/koboldcpp'
+import { ensureLlamafile, llamafileBinPath, llamafileDir } from '../engines/llamafile'
 import { catalogForPlatform, catalogEngine } from '../engines/catalog'
 import { detectHardware } from '../engines/hardware'
 import { recommendEngines } from '../engines/recommend'
@@ -346,6 +348,16 @@ export function registerApi(app: Hono, d: Deps): void {
         const tqDir = join(enginesRoot, 'turboquant')
         installed = existsSync(tqDir)
         enabled = regEngines.some((x) => /[\\/]engines[\\/]turboquant[\\/]/.test(x.binPath))
+      } else if (e.id === 'koboldcpp') {
+        // KoboldCpp: single binary under engines/koboldcpp/; enabled = a registered
+        // engine of kind 'koboldcpp' exists.
+        installed = existsSync(koboldcppBinPath(enginesRoot))
+        enabled = regEngines.some((x) => x.kind === 'koboldcpp')
+      } else if (e.id === 'llamafile') {
+        // llamafile: single binary under engines/llamafile/; enabled = a registered
+        // engine of kind 'llamafile' exists.
+        installed = existsSync(llamafileBinPath(enginesRoot))
+        enabled = regEngines.some((x) => x.kind === 'llamafile')
       }
       return { ...e, installed, enabled }
     })
@@ -425,6 +437,77 @@ export function registerApi(app: Hono, d: Deps): void {
       }
     })()
     return c.json({ accepted: true, engine: 'turboquant' }, 202)
+  })
+
+  // Provision KoboldCpp (engine overhaul, Phase 4): download the single platform/GPU-
+  // matching binary from its GitHub release, register as a kind='koboldcpp' engine.
+  // 202 + progress via /status. ?update=1 removes the existing binary so the latest is
+  // re-downloaded. CUDA build is chosen on NVIDIA; portable build elsewhere.
+  app.post('/api/v1/engines/koboldcpp', (c) => {
+    const entry = catalogEngine('koboldcpp')
+    if (!entry?.repo) return err(c, 500, 'internal', 'KoboldCpp catalog entry is misconfigured.')
+    if (!entry.platforms.includes(process.platform)) {
+      return err(c, 409, 'unsupported_platform', 'KoboldCpp has no prebuilt binary for this operating system yet.')
+    }
+    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    const root = join(d.store.dir(), 'engines')
+    const upgrade = c.req.query('update') === '1'
+    const hasNvidia = primaryVendor(getSysInfo()) === 'nvidia'
+    void (async () => {
+      try {
+        d.provision.start('koboldcpp')
+        if (upgrade) {
+          const dir = koboldcppDir(root)
+          if (existsSync(dir)) rmSync(dir, { recursive: true, force: true })
+        }
+        const rt = await ensureKoboldcpp(root, hasNvidia, (p) => d.provision.progress(p.phase, p.pct, p.part, p.parts))
+        const eng = d.registry.addKoboldcpp(`KoboldCpp (${rt.version})`, rt.binPath, rt.version)
+        d.registry.activate(eng.id)
+        d.provision.done()
+      } catch (e) {
+        const msg =
+          e instanceof Error && e.message === 'no_release_asset'
+            ? 'KoboldCpp has no prebuilt binary for this operating system/architecture in its latest release.'
+            : `Could not install KoboldCpp: ${e instanceof Error ? e.message : e}`
+        d.provision.fail(msg)
+      }
+    })()
+    return c.json({ accepted: true, engine: 'koboldcpp' }, 202)
+  })
+
+  // Provision llamafile (engine overhaul, Phase 4): download the single portable
+  // executable from its GitHub release, register as a kind='llamafile' engine. 202 +
+  // progress via /status. ?update=1 removes the existing binary so the latest is
+  // re-downloaded.
+  app.post('/api/v1/engines/llamafile', (c) => {
+    const entry = catalogEngine('llamafile')
+    if (!entry?.repo) return err(c, 500, 'internal', 'llamafile catalog entry is misconfigured.')
+    if (!entry.platforms.includes(process.platform)) {
+      return err(c, 409, 'unsupported_platform', 'llamafile is not available for this operating system yet.')
+    }
+    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    const root = join(d.store.dir(), 'engines')
+    const upgrade = c.req.query('update') === '1'
+    void (async () => {
+      try {
+        d.provision.start('llamafile')
+        if (upgrade) {
+          const dir = llamafileDir(root)
+          if (existsSync(dir)) rmSync(dir, { recursive: true, force: true })
+        }
+        const rt = await ensureLlamafile(root, (p) => d.provision.progress(p.phase, p.pct, p.part, p.parts))
+        const eng = d.registry.addLlamafile(`llamafile (${rt.version})`, rt.binPath, rt.version)
+        d.registry.activate(eng.id)
+        d.provision.done()
+      } catch (e) {
+        const msg =
+          e instanceof Error && e.message === 'no_release_asset'
+            ? 'llamafile has no downloadable binary in its latest release.'
+            : `Could not install llamafile: ${e instanceof Error ? e.message : e}`
+        d.provision.fail(msg)
+      }
+    })()
+    return c.json({ accepted: true, engine: 'llamafile' }, 202)
   })
 
   app.post('/api/v1/engines', async (c) => {
@@ -668,11 +751,18 @@ export function registerApi(app: Hono, d: Deps): void {
       } else {
         const saved = cfg.modelProfiles[entry.key] as Partial<LoadProfile> | undefined
         const profile = resolveProfile(entry, sys, saved, b.profileOverrides, cfg.modelDefaults)
+        // KoboldCpp is a GGUF engine with its OWN flag names — build its arg-map instead of
+        // the llama-server profileToArgs. llamafile IS llama.cpp's server, so it keeps the
+        // full profileToArgs flags (the manager only prepends --server --nobrowser for it).
+        const extraArgs =
+          active.kind === 'koboldcpp'
+            ? koboldcppProfileToArgs(profile, primaryVendor(sys), sys.gpus.length > 0)
+            : profileToArgs(profile, entry, active.capabilities, sys.cores)
         opts = {
           engine: active,
           model: { key: entry.key, name: entry.name, quant: entry.quant, ctx: profile.ctx, vision: entry.vision },
           modelPath: entry.path,
-          extraArgs: profileToArgs(profile, entry, active.capabilities, sys.cores),
+          extraArgs,
         }
       }
       // Single chokepoint (rule 3): load() stops the current model, runs the reverse
@@ -1656,6 +1746,16 @@ function engineInstallDir(eng: Engine, enginesRoot: string): string | null {
   // TurboQuant fork (llama-server kind, binPath under engines/turboquant/)
   if (/[\\/]engines[\\/]turboquant[\\/]/.test(eng.binPath)) {
     const d = join(enginesRoot, 'turboquant')
+    return inside(d) ? d : null
+  }
+  // KoboldCpp single binary (engines/koboldcpp/)
+  if (eng.kind === 'koboldcpp') {
+    const d = koboldcppDir(enginesRoot)
+    return inside(d) ? d : null
+  }
+  // llamafile single binary (engines/llamafile/)
+  if (eng.kind === 'llamafile') {
+    const d = llamafileDir(enginesRoot)
     return inside(d) ? d : null
   }
   return null

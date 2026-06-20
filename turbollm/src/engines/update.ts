@@ -33,14 +33,17 @@ export function parseBuildTag(tag: string): number | null {
   return Number.isInteger(n) ? n : null
 }
 
-/** Compare two llama.cpp build tags. Both must parse as `b<number>`; otherwise the
- *  result is `unknown` (we never guess across formats). */
+/** Compare two GitHub release tags. Prefers llama.cpp build-tag (`b<number>`) ordering;
+ *  when EITHER side isn't that shape it falls back to semver/PEP440-ish ordering
+ *  ({@link comparePipVersions}) so forks that tag releases `v1.115.2` (KoboldCpp) or
+ *  `0.10.3` (llamafile) still compare correctly. `unknown` only when neither scheme can
+ *  parse both sides — the honest "I can't tell" (we never guess across formats). */
 export function compareBuildTags(installed: string, latest: string): CompareResult {
   const a = parseBuildTag(installed)
   const b = parseBuildTag(latest)
-  if (a === null || b === null) return 'unknown'
-  if (a === b) return 'equal'
-  return a < b ? 'newer' : 'older' // `newer` = latest is ahead of installed
+  if (a !== null && b !== null) return a === b ? 'equal' : a < b ? 'newer' : 'older'
+  // Not both b<number> tags → try semver-style ordering (KoboldCpp/llamafile/etc.).
+  return comparePipVersions(installed, latest)
 }
 
 /** Parse a PEP440-ish / semver-ish version into numeric release segments. We keep
@@ -178,9 +181,17 @@ export function versionFromPipString(version: string): string {
 const isManagedLlama = (binPath: string) => /[\\/]engines[\\/]llama\.cpp-/.test(binPath)
 const isTurboquant = (binPath: string) => /[\\/]engines[\\/]turboquant[\\/]/.test(binPath)
 
+const KOBOLDCPP_REPO = 'LostRuins/koboldcpp'
+const LLAMAFILE_REPO = 'Mozilla-Ocho/llamafile'
+
 export function resolveUpdateSource(engine: Engine): ResolvedSource | null {
   if (engine.kind === 'mlx') return { source: 'pip', ref: 'mlx-lm', installed: versionFromPipString(engine.version) }
   if (engine.kind === 'vllm') return { source: 'pip', ref: 'vllm', installed: versionFromPipString(engine.version) }
+  // KoboldCpp / llamafile: single-binary engines provisioned from GitHub releases. Their
+  // installed version IS the stored release tag (vX.Y.Z / X.Y.Z); compareBuildTags falls
+  // back to semver ordering for non-`b<number>` tags.
+  if (engine.kind === 'koboldcpp') return { source: 'github-release', ref: KOBOLDCPP_REPO, installed: engine.version }
+  if (engine.kind === 'llamafile') return { source: 'github-release', ref: LLAMAFILE_REPO, installed: engine.version }
   if (engine.kind === 'llama-server') {
     if (isManagedLlama(engine.binPath)) {
       return { source: 'github-release', ref: OFFICIAL_LLAMA_REPO, installed: tagFromManagedBinPath(engine.binPath) }

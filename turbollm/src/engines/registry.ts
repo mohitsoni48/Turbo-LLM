@@ -135,6 +135,46 @@ export class Registry {
     return eng
   }
 
+  /** Register a KoboldCpp engine (kind='koboldcpp'). binPath is the single KoboldCpp
+   *  binary, not a llama-server, so llama.cpp capabilities/flags don't apply (it uses
+   *  its own CLI flag names — see koboldcppProfileToArgs). */
+  addKoboldcpp(name: string, binPath: string, version: string): Engine {
+    return this.addSingleBinary('koboldcpp', name || 'KoboldCpp', binPath, version)
+  }
+
+  /** Register a llamafile engine (kind='llamafile'). binPath is the single llamafile
+   *  executable; it runs as llama.cpp's server (launched with --server --nobrowser) and
+   *  accepts the standard llama.cpp profile flags. */
+  addLlamafile(name: string, binPath: string, version: string): Engine {
+    return this.addSingleBinary('llamafile', name || 'llamafile', binPath, version)
+  }
+
+  /** Shared registration for a single-binary, non-llama-server engine kind (koboldcpp,
+   *  llamafile). Mirrors addMlx/addVllm: no llama-server probe, empty capabilities, and
+   *  replace-in-place when the same path is re-registered. */
+  private addSingleBinary(kind: string, name: string, binPath: string, version: string): Engine {
+    const eng: Engine = {
+      id: randomUUID(),
+      name: name.trim() || kind,
+      binPath,
+      kind,
+      version,
+      capabilities: { kvTypes: [], flags: [] },
+      addedAt: new Date().toISOString(),
+    }
+    this.store.update((c) => {
+      const existing = c.engines.find((e) => e.kind === kind && e.binPath === binPath)
+      if (existing) {
+        existing.version = version
+        eng.id = existing.id
+      } else {
+        c.engines.push(eng)
+      }
+      if (!c.activeEngineId) c.activeEngineId = eng.id
+    })
+    return eng
+  }
+
   rename(id: string, name: string): Engine {
     let out: Engine | undefined
     this.store.update((c) => {

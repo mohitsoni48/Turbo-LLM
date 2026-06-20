@@ -35,6 +35,8 @@ import {
   updateVllm,
   updateMlx,
   updateTurboquant,
+  updateKoboldcpp,
+  updateLlamafile,
   getEngineUpdates,
   setEngineUpdatePolicy,
   getStatus,
@@ -49,6 +51,8 @@ import {
   installMlx,
   installVllm,
   installTurboquant,
+  installKoboldcpp,
+  installLlamafile,
   getEngineCatalog,
   getEngineRecommendation,
   listDownloads,
@@ -226,6 +230,8 @@ export function useBackendInstall() {
     mlx: useMutation({ mutationFn: () => installMlx(), onSuccess: invalidate }),
     vllm: useMutation({ mutationFn: () => installVllm(), onSuccess: invalidate }),
     turboquant: useMutation({ mutationFn: () => installTurboquant(), onSuccess: invalidate }),
+    koboldcpp: useMutation({ mutationFn: () => installKoboldcpp(), onSuccess: invalidate }),
+    llamafile: useMutation({ mutationFn: () => installLlamafile(), onSuccess: invalidate }),
     cancel: useMutation({ mutationFn: () => cancelBackendDownload(), onSuccess: invalidate }),
     remove: useMutation({ mutationFn: (id: string) => deleteEngineBackend(id), onSuccess: invalidate }),
     // Enable registers an already-installed backend binary without re-downloading.
@@ -234,6 +240,8 @@ export function useBackendInstall() {
     updateVllm: useMutation({ mutationFn: () => updateVllm(), onSuccess: invalidate }),
     updateMlx: useMutation({ mutationFn: () => updateMlx(), onSuccess: invalidate }),
     updateTurboquant: useMutation({ mutationFn: () => updateTurboquant(), onSuccess: invalidate }),
+    updateKoboldcpp: useMutation({ mutationFn: () => updateKoboldcpp(), onSuccess: invalidate }),
+    updateLlamafile: useMutation({ mutationFn: () => updateLlamafile(), onSuccess: invalidate }),
     // De-pinned, rollback-safe llama.cpp backend update (ADR-085): resolves the REAL latest
     // upstream tag, downloads + probes it, swaps + GCs the old build only on success.
     updateBackend: useMutation({ mutationFn: (id: string) => updateBackend(id), onSuccess: invalidate }),
