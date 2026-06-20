@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import {
   Navigate,
   Route,
@@ -11,12 +11,27 @@ import { UnreachableOverlay } from './components/UnreachableOverlay'
 import { AuthGate } from './components/AuthGate'
 import { useStatus } from './lib/queries'
 import { ApiError, setAuthToken } from './lib/api'
-import { ChatScreen } from './screens/ChatScreen'
-import { ModelsScreen } from './screens/ModelsScreen'
-import { EnginesScreen } from './screens/EnginesScreen'
-import { DeveloperScreen } from './screens/DeveloperScreen'
-import { CustomizeScreen } from './screens/CustomizeScreen'
-import { SettingsScreen } from './screens/SettingsScreen'
+
+// Route-level code splitting: each screen loads only when first navigated to.
+const ChatScreen = lazy(() => import('./screens/ChatScreen').then((m) => ({ default: m.ChatScreen })))
+const ModelsScreen = lazy(() => import('./screens/ModelsScreen').then((m) => ({ default: m.ModelsScreen })))
+const EnginesScreen = lazy(() => import('./screens/EnginesScreen').then((m) => ({ default: m.EnginesScreen })))
+const DeveloperScreen = lazy(() => import('./screens/DeveloperScreen').then((m) => ({ default: m.DeveloperScreen })))
+const CustomizeScreen = lazy(() => import('./screens/CustomizeScreen').then((m) => ({ default: m.CustomizeScreen })))
+const SettingsScreen = lazy(() => import('./screens/SettingsScreen').then((m) => ({ default: m.SettingsScreen })))
+
+/** Minimal centered loader shown while a route chunk is fetching. */
+function ScreenFallback() {
+  return (
+    <div className="flex h-full w-full items-center justify-center">
+      <div
+        className="h-6 w-6 animate-spin rounded-full border-2"
+        style={{ borderColor: 'var(--muted)', borderTopColor: 'var(--ink)' }}
+        aria-label="Loading"
+      />
+    </div>
+  )
+}
 
 export function App() {
   const statusQ = useStatus()
@@ -44,16 +59,18 @@ export function App() {
   return (
     <TooltipProvider delayDuration={300}>
       <Shell status={statusQ.data} online={online} version={version}>
-        <Routes>
-          <Route path="/chat" element={<ChatScreen />} />
-          <Route path="/chat/:convId" element={<ChatScreen />} />
-          <Route path="/models" element={<ModelsScreen />} />
-          <Route path="/engines" element={<EnginesScreen />} />
-          <Route path="/developer" element={<DeveloperScreen />} />
-          <Route path="/customize" element={<CustomizeScreen />} />
-          <Route path="/settings" element={<SettingsScreen />} />
-          <Route path="*" element={<Navigate to="/chat" replace />} />
-        </Routes>
+        <Suspense fallback={<ScreenFallback />}>
+          <Routes>
+            <Route path="/chat" element={<ChatScreen />} />
+            <Route path="/chat/:convId" element={<ChatScreen />} />
+            <Route path="/models" element={<ModelsScreen />} />
+            <Route path="/engines" element={<EnginesScreen />} />
+            <Route path="/developer" element={<DeveloperScreen />} />
+            <Route path="/customize" element={<CustomizeScreen />} />
+            <Route path="/settings" element={<SettingsScreen />} />
+            <Route path="*" element={<Navigate to="/chat" replace />} />
+          </Routes>
+        </Suspense>
       </Shell>
       {needsAuth && (
         <AuthGate
