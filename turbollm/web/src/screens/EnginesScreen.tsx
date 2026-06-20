@@ -67,6 +67,12 @@ import { BuildGuideDialog } from './engines/BuildGuideDialog'
 import { EngineStatusHeader } from './engines/EngineStatusHeader'
 import { EngineLogPanel } from './engines/EngineLogPanel'
 import { LlamaCppBackendRows } from './engines/ManagedEngines'
+import {
+  groupEngines,
+  memberToActivate,
+  variantLabel,
+  type EngineGroup,
+} from '../lib/engine-groups'
 
 const ISSUE_URL =
   'https://github.com/mohitsoni48/Turbo-LLM/issues/new?template=engine-request.yml'
@@ -198,6 +204,12 @@ function StatusHero({
 
   // Installed engines = everything in the registry (each is a runnable engine).
   const installed = list?.engines ?? []
+  // Group into LOGICAL engines (ADR-091): one row per engine, with per-build variants
+  // collapsed underneath. Avoids two near-identical "llama.cpp (cuda)" rows after an update.
+  const groups = useMemo(() => groupEngines(installed), [installed])
+  const activeGroup = activeEngine
+    ? groups.find((g) => g.members.some((m) => m.id === activeEngine.id)) ?? null
+    : null
   const activeBuild = activeEngine ? buildContextFor(activeEngine, backends) : null
 
   // Does the running engine match the hardware recommendation?
@@ -212,6 +224,13 @@ function StatusHero({
     mut.activate.mutate(id, {
       onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not switch engine.'),
     })
+  }
+
+  // Selecting a logical engine activates its currently-active member if present, else
+  // its latest build / first member (ADR-091).
+  const selectGroup = (g: EngineGroup) => {
+    const target = memberToActivate(g, activeEngine?.id ?? null)
+    if (target) activate(target.id)
   }
 
   return (
@@ -230,50 +249,90 @@ function StatusHero({
 
         <div className="flex flex-col items-start gap-1 md:items-end">
           <span className="text-[11px] font-medium uppercase tracking-wide text-faint">Running now</span>
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              disabled={busy || installed.length === 0}
-              className="flex h-9 min-w-[220px] items-center gap-2 rounded-lg border border-border bg-bg px-3 text-[13px] text-ink transition-colors hover:border-[color:var(--accent)] disabled:opacity-60"
-            >
-              <span className="flex h-2 w-2 shrink-0 rounded-full" style={{ background: activeEngine ? 'var(--ok)' : 'var(--faint)' }} />
-              <span className="flex-1 truncate text-left">
-                {activeEngine?.name ?? (installed.length ? 'No engine active' : 'No engine installed')}
-              </span>
-              <ChevronDown size={14} className="shrink-0 text-muted" />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-[280px]">
-              <div className="px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-faint">
-                Installed engines
-              </div>
-              {installed.length === 0 && (
-                <div className="px-2 py-1.5 text-[12px] text-muted">Install an engine below to get started.</div>
-              )}
-              {installed.map((e) => {
-                // Source-built engines (ADR-088): surface a notify-only "rebuild" hint
-                // when a newer commit is on the source repo. We can't recompile, so this
-                // is a badge only (the repo link lives on the catalog/engine card).
-                const rebuild = !!updates?.updates[e.id]?.rebuild && !!updates?.updates[e.id]?.hasUpdate
-                return (
-                  <DropdownMenuItem key={e.id} onSelect={() => activate(e.id)} className="flex items-center gap-2">
-                    <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-                      {e.id === activeEngine?.id && <Check size={14} className="text-accent" />}
-                    </span>
-                    <span className="min-w-0 flex-1 truncate text-ink">{e.name}</span>
-                    {rebuild && (
-                      <span className="shrink-0 text-[11px]" style={{ color: 'var(--accent)' }}>
-                        rebuild
+          <div className="flex flex-wrap items-center gap-2 md:justify-end">
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                disabled={busy || groups.length === 0}
+                className="flex h-9 min-w-[220px] items-center gap-2 rounded-lg border border-border bg-bg px-3 text-[13px] text-ink transition-colors hover:border-[color:var(--accent)] disabled:opacity-60"
+              >
+                <span className="flex h-2 w-2 shrink-0 rounded-full" style={{ background: activeEngine ? 'var(--ok)' : 'var(--faint)' }} />
+                <span className="flex-1 truncate text-left">
+                  {activeGroup?.label ?? (groups.length ? 'No engine active' : 'No engine installed')}
+                </span>
+                <ChevronDown size={14} className="shrink-0 text-muted" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-[280px]">
+                <div className="px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-faint">
+                  Installed engines
+                </div>
+                {groups.length === 0 && (
+                  <div className="px-2 py-1.5 text-[12px] text-muted">Install an engine below to get started.</div>
+                )}
+                {groups.map((g) => {
+                  // Source-built engines (ADR-088): surface a notify-only "rebuild" hint when
+                  // ANY member has a newer commit on its source repo. Badge only (we can't recompile).
+                  const rebuild = g.members.some(
+                    (m) => !!updates?.updates[m.id]?.rebuild && !!updates?.updates[m.id]?.hasUpdate,
+                  )
+                  const isActiveGroup = g.key === activeGroup?.key
+                  return (
+                    <DropdownMenuItem key={g.key} onSelect={() => selectGroup(g)} className="flex items-center gap-2">
+                      <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                        {isActiveGroup && <Check size={14} className="text-accent" />}
                       </span>
-                    )}
-                    {e.id === activeEngine?.id && (
-                      <span className="shrink-0 text-[11px] text-accent">active</span>
-                    )}
-                  </DropdownMenuItem>
-                )
-              })}
-              <DropdownMenuSeparator />
-              <div className="px-2 py-1.5 text-[11px] text-faint">Install more engines below ↓</div>
-            </DropdownMenuContent>
-          </DropdownMenu>
+                      <span className="min-w-0 flex-1 truncate text-ink">{g.label}</span>
+                      {g.members.length > 1 && (
+                        <span className="shrink-0 text-[11px] text-faint">{g.members.length} builds</span>
+                      )}
+                      {rebuild && (
+                        <span className="shrink-0 text-[11px]" style={{ color: 'var(--accent)' }}>
+                          rebuild
+                        </span>
+                      )}
+                      {isActiveGroup && <span className="shrink-0 text-[11px] text-accent">active</span>}
+                    </DropdownMenuItem>
+                  )
+                })}
+                <DropdownMenuSeparator />
+                <div className="px-2 py-1.5 text-[11px] text-faint">Install more engines below ↓</div>
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            {/* Version/build picker — only when the active engine has more than one
+                installed variant (ADR-091). Single-variant engines keep the clean one-line look. */}
+            {activeGroup && activeGroup.members.length > 1 && (
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  disabled={busy}
+                  className="flex h-9 min-w-[160px] items-center gap-2 rounded-lg border border-border bg-bg px-3 text-[13px] text-ink transition-colors hover:border-[color:var(--accent)] disabled:opacity-60"
+                >
+                  <Layers size={14} className="shrink-0 text-accent" />
+                  <span className="flex-1 truncate text-left">
+                    {activeEngine ? variantLabel(activeEngine) : 'Choose a build'}
+                  </span>
+                  <ChevronDown size={14} className="shrink-0 text-muted" />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-[260px]">
+                  <div className="px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-faint">
+                    Version
+                  </div>
+                  {activeGroup.members.map((m) => (
+                    <DropdownMenuItem key={m.id} onSelect={() => activate(m.id)} className="flex items-center gap-2">
+                      <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                        {m.id === activeEngine?.id && <Check size={14} className="text-accent" />}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-ink">{variantLabel(m)}</span>
+                      {m.id === activeGroup.latestId && (
+                        <span className="shrink-0 text-[11px]" style={{ color: 'var(--ok)' }}>
+                          latest
+                        </span>
+                      )}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+          </div>
 
           {activeBuild && <span className="text-[11px] text-muted">{activeBuild}</span>}
           {activeMatchesRec && (

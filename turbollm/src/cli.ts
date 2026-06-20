@@ -14,6 +14,7 @@ import { applyEngineUpdate } from './engines/update-apply'
 import { seedDefaultEngines } from './engines/seed'
 import { engineAcceptsFormat } from './engines/compat'
 import { Scanner } from './models/scanner'
+import { seedDefaultModelDir } from './models/hf-cache'
 import { HashStore } from './models/hashes'
 import { resolveProfile, profileToArgs, type LoadProfile } from './models/profile'
 import { getSysInfo } from './sysinfo/sysinfo'
@@ -140,6 +141,10 @@ const enginesDir = join(store.dir(), 'engines')
 void seedDefaultEngines(registry, enginesDir, provision).then(() => registry.ensureProbed())
 const manager = new Manager(store)
 const scanner = new Scanner(store)
+// First-run seed (ADR-092): if no model dirs are configured and the HF hub cache
+// exists, adopt it as the default so pre-existing HF models show up. One-time only;
+// triggers its own rescan. Must run BEFORE the background rescan below.
+seedDefaultModelDir(store, scanner)
 void scanner.rescan() // discover models in the background
 const hashes = new HashStore(store.dir())
 const db = new ConversationStore(store.dir())
