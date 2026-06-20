@@ -24,6 +24,8 @@ import {
 import { ensureMlxEnv, mlxSamplingArgs } from '../engines/mlx'
 import { ensureVllmEnv } from '../engines/vllm'
 import { catalogForPlatform, catalogEngine } from '../engines/catalog'
+import { detectHardware } from '../engines/hardware'
+import { recommendEngines } from '../engines/recommend'
 import { engineAcceptsFormat } from '../engines/compat'
 import { ScannerError, type ModelEntry } from '../models/scanner'
 import { estimateVram, type LoadProfile, profileToArgs, resolveProfile, vllmProfileToArgs } from '../models/profile'
@@ -272,6 +274,17 @@ export function registerApi(app: Hono, d: Deps): void {
       return { ...e, installed, enabled }
     })
     return c.json({ engines: items })
+  })
+
+  // Engine recommendation (engine overhaul, Phase 2): the hardware-level fit for the
+  // WHOLE catalog. Deliberately NOT OS-prefiltered — incompatible engines come back
+  // WITH a reason so the UI can grey them rather than hide them (ADR-083 "grey +
+  // reason, don't hide"). Pure read; pass the full CatalogEngine[] (drop the
+  // per-platform `supportedHere` flag the catalog endpoint adds).
+  app.get('/api/v1/engines/recommendation', (c) => {
+    const hw = detectHardware()
+    const rec = recommendEngines(hw, catalogForPlatform().map(({ supportedHere, ...e }) => e))
+    return c.json({ hardware: hw, recommendation: rec })
   })
 
   // Provision the vLLM engine (ADR-044): uv → venv → `uv pip install vllm`, then

@@ -1,9 +1,16 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { recommendEngines } from './recommend'
-import { llamaCppVariants } from './catalog'
+import { catalogForPlatform, llamaCppVariants } from './catalog'
 import type { CatalogEngine, EngineVariant } from './catalog'
 import type { HardwareProfile } from './hardware'
+
+/** The whole catalog as plain CatalogEngine[] (drop the per-platform flag the
+ *  recommendation endpoint also strips). Lets these tests classify EVERY engine,
+ *  including OS-incompatible ones, mirroring the "grey + reason, don't hide" API. */
+function fullCatalog(): CatalogEngine[] {
+  return catalogForPlatform().map(({ supportedHere, ...e }) => e)
+}
 
 // ── Fake hardware ────────────────────────────────────────────────────────────
 const nvidiaWin: HardwareProfile = {
@@ -148,6 +155,34 @@ test('recommendEngines: safe-default bias toward llama.cpp on a speed tie', () =
   // still choose llama.cpp.
   const rec = recommendEngines(noGpu, [rival, realLlama])
   assert.equal(rec.recommended!.engineId, 'llama.cpp')
+})
+
+test('recommendEngines: MLX is classified compatible on an Apple-Silicon Mac', () => {
+  const rec = recommendEngines(appleMac, fullCatalog())
+  const mlx = rec.fits.find((f) => f.engine.id === 'mlx')
+  assert.ok(mlx, 'mlx must appear in the fits over the full catalog')
+  assert.ok(mlx!.compatible.length > 0, 'mlx is runnable on mac (Apple GPU)')
+  assert.equal(mlx!.incompatibleReason, undefined)
+})
+
+test('recommendEngines: vLLM is incompatible on Windows/NVIDIA, with a reason', () => {
+  const rec = recommendEngines(nvidiaWin, fullCatalog())
+  const vllm = rec.fits.find((f) => f.engine.id === 'vllm')
+  assert.ok(vllm, 'vllm must appear in the fits over the full catalog')
+  assert.equal(vllm!.compatible.length, 0, 'vLLM needs Linux — not runnable on Windows')
+  assert.ok(vllm!.incompatibleReason, 'incompatible engine carries a reason (grey + reason, not hide)')
+  assert.match(vllm!.incompatibleReason!, /Linux only/)
+})
+
+test('recommendEngines: every catalog engine is classified (none left unclassified)', () => {
+  // The whole point of Part A: MLX/vLLM now have variants, so the recommender can
+  // reason about all four engines (compatible OR incompatible-with-reason).
+  const rec = recommendEngines(nvidiaWin, fullCatalog())
+  for (const fit of rec.fits) {
+    assert.ok(fit.variants.length > 0, `${fit.engine.id} should have variants to classify`)
+    const classified = fit.compatible.length > 0 || fit.incompatibleReason !== undefined
+    assert.ok(classified, `${fit.engine.id} must be either compatible or carry an incompatibleReason`)
+  }
 })
 
 test('llamaCppVariants: derives a non-empty, well-formed set from the backend list', () => {

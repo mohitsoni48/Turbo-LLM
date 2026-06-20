@@ -144,6 +144,19 @@ const ALL: CatalogEngine[] = [
     support: 'experimental',
     installEndpoint: '/api/v1/engines/vllm',
     note: 'Officially supported on Linux + NVIDIA/CUDA. macOS is CPU-only experimental; Windows is unsupported upstream. Installs a multi-GB Python environment.',
+    // Classification-only variant (its pip install path is unchanged). Lets the
+    // matcher/recommender reason about vLLM's fit on this box: Linux + NVIDIA.
+    variants: [
+      {
+        id: 'vllm-cuda',
+        label: 'CUDA (NVIDIA)',
+        repo: 'vllm-project/vllm',
+        requires: { platform: ['linux'], gpuVendor: ['nvidia'] },
+        stability: 'experimental',
+        speed: 'fastest',
+        hasPrebuilt: true,
+      },
+    ],
   },
   {
     id: 'mlx',
@@ -157,6 +170,19 @@ const ALL: CatalogEngine[] = [
     support: 'stable',
     installEndpoint: '/api/v1/engines/mlx',
     note: 'macOS (Apple Silicon) only.',
+    // Classification-only variant (its pip install path is unchanged). Lets the
+    // matcher/recommender reason about MLX's fit on this box: macOS + Apple GPU.
+    variants: [
+      {
+        id: 'mlx',
+        label: 'Apple Metal',
+        repo: 'ml-explore/mlx-lm',
+        requires: { platform: ['darwin'], gpuVendor: ['apple'] },
+        stability: 'stable',
+        speed: 'fast',
+        hasPrebuilt: true,
+      },
+    ],
   },
   {
     id: 'turboquant',

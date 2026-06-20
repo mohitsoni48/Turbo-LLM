@@ -47,6 +47,7 @@ import {
   installVllm,
   installTurboquant,
   getEngineCatalog,
+  getEngineRecommendation,
   listDownloads,
   listEngines,
   loadModel,
@@ -77,6 +78,7 @@ import type {
   DownloadsList,
   EngineBackends,
   EngineCatalog,
+  EngineRecommendationResult,
   EngineStats,
   EnginesList,
   HfRepoDetail,
@@ -95,6 +97,7 @@ export const queryKeys = {
   engines: ['engines'] as const,
   engineBackends: ['engine-backends'] as const,
   engineCatalog: ['engine-catalog'] as const,
+  engineRecommendation: ['engine-recommendation'] as const,
   models: ['models'] as const,
   modelDirs: ['modeldirs'] as const,
   downloads: ['downloads'] as const,
@@ -185,6 +188,18 @@ export function useEngineCatalog(provisioning: boolean): UseQueryResult<EngineCa
   return useQuery({
     queryKey: queryKeys.engineCatalog,
     queryFn: getEngineCatalog,
+    refetchInterval: provisioning ? 2000 : false,
+    retry: false,
+  })
+}
+
+/** Hardware-level engine recommendation over the WHOLE catalog (engine overhaul,
+ *  Phase 2). Same `provisioning` gating as useEngineBackends so the fits refresh
+ *  while an install runs. Hardware is stable, so a longer staleTime is fine. */
+export function useEngineRecommendation(provisioning: boolean): UseQueryResult<EngineRecommendationResult> {
+  return useQuery({
+    queryKey: queryKeys.engineRecommendation,
+    queryFn: getEngineRecommendation,
     refetchInterval: provisioning ? 2000 : false,
     retry: false,
   })

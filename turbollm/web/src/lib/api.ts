@@ -10,6 +10,7 @@ import type {
   Engine,
   EngineBackends,
   EngineCatalog,
+  EngineRecommendationResult,
   EngineLogs,
   EnginesList,
   HfRepoDetail,
@@ -132,6 +133,12 @@ export function installMlx(): Promise<{ accepted: true; engine: 'mlx' }> {
 
 export function getEngineCatalog(): Promise<EngineCatalog> {
   return request<EngineCatalog>('/api/v1/engines/catalog')
+}
+
+/** Hardware-level fit for the WHOLE catalog (engine overhaul, Phase 2). Incompatible
+ *  engines come back WITH a reason so the UI greys them ("grey + reason, don't hide"). */
+export function getEngineRecommendation(): Promise<EngineRecommendationResult> {
+  return request<EngineRecommendationResult>('/api/v1/engines/recommendation')
 }
 
 export function installVllm(): Promise<{ accepted: true; engine: 'vllm' }> {

@@ -213,6 +213,63 @@ export type EngineCatalog = {
   engines: CatalogEngine[]
 }
 
+// ── Engine recommendation (engine overhaul, Phase 2) ─────────────────────────
+// Mirrors the backend shapes from src/engines/{hardware,catalog,recommend}.ts.
+// Returned by GET /api/v1/engines/recommendation.
+
+/** Detected hardware, mirrors src/engines/hardware.ts HardwareProfile. */
+export type HardwareProfile = {
+  platform: string
+  arch: 'x64' | 'arm64'
+  gpuVendor: 'nvidia' | 'amd' | 'intel' | 'apple' | 'unknown'
+  hasGpu: boolean
+  vramMb: number
+  gpuName?: string
+}
+
+/** One hardware path of a catalog engine, mirrors src/engines/catalog.ts EngineVariant. */
+export type EngineVariant = {
+  id: string
+  label: string
+  repo: string
+  requires: {
+    platform?: string[]
+    arch?: ('x64' | 'arm64')[]
+    gpuVendor?: string[]
+    backend?: string
+    minVramMb?: number
+    minCudaCC?: number
+  }
+  stability: 'stable' | 'experimental'
+  speed?: 'baseline' | 'fast' | 'fastest'
+  backendId?: string
+  hasPrebuilt: boolean
+}
+
+/** Per-engine fit over the detected hardware, mirrors src/engines/recommend.ts EngineFit.
+ *  The recommendation endpoint passes plain CatalogEngine[] (no `supportedHere`/disk
+ *  flags), so the embedded engine omits those projection-only fields. */
+export type EngineFit = {
+  engine: Omit<CatalogEngine, 'supportedHere' | 'installed' | 'enabled'>
+  variants: EngineVariant[]
+  compatible: EngineVariant[]
+  /** Set when compatible.length === 0 — why this box can't run the engine. */
+  incompatibleReason?: string
+  recommended: boolean
+}
+
+/** The headline pick + per-engine fits, mirrors src/engines/recommend.ts EngineRecommendation. */
+export type EngineRecommendation = {
+  recommended: { engineId: string; variantId: string } | null
+  fits: EngineFit[]
+}
+
+/** GET /api/v1/engines/recommendation payload. */
+export type EngineRecommendationResult = {
+  hardware: HardwareProfile
+  recommendation: EngineRecommendation
+}
+
 /** Error envelope used for every non-2xx response (spec 00 §3). */
 export type ApiErrorEnvelope = {
   error: { code: string; message: string }
