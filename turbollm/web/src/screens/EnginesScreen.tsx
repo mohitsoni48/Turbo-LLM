@@ -10,6 +10,7 @@ import {
   MoreHorizontal,
   Settings2,
   Sparkles,
+  Wrench,
 } from 'lucide-react'
 import {
   useBackendInstall,
@@ -188,6 +189,11 @@ function StatusHero({
   const mut = useEngineMutations()
   const { data: sys } = useSysInfo()
   const { data: updates } = useEngineUpdates()
+  const [rebuildOpen, setRebuildOpen] = useState(false)
+
+  // Rebuild chip: show when the active engine is source-built and has a newer commit.
+  const upd = activeEngine ? updates?.updates[activeEngine.id] : undefined
+  const showRebuildChip = !!upd?.rebuild && !!activeEngine?.sourceRepo
 
   // Hardware line — prefer the recommendation's hardware, fall back to sysinfo.
   const hw = rec?.hardware
@@ -340,8 +346,30 @@ function StatusHero({
               <Sparkles size={11} /> recommended for your hardware
             </span>
           )}
+          {showRebuildChip && (
+            <button
+              type="button"
+              onClick={() => setRebuildOpen(true)}
+              className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors hover:opacity-80"
+              style={{ background: 'color-mix(in srgb, var(--accent) 15%, transparent)', color: 'var(--accent)' }}
+            >
+              <Wrench size={11} className="shrink-0" />
+              Rebuild available
+              {upd?.installed && upd?.latest ? ` · ${upd.installed} → ${upd.latest}` : ''}
+            </button>
+          )}
         </div>
       </div>
+
+      {showRebuildChip && activeEngine?.sourceRepo && (
+        <BuildGuideDialog
+          open={rebuildOpen}
+          onOpenChange={setRebuildOpen}
+          repoUrl={activeEngine.sourceRepo}
+          branch={activeEngine.sourceBranch}
+          engineName={activeEngine.name}
+        />
+      )}
     </div>
   )
 }
