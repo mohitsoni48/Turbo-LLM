@@ -13,6 +13,10 @@ export interface Capabilities {
   kvTypes: string[]
   flags: string[]
 }
+/** Per-engine auto-update policy (ADR-085, Phase 6). Default 'notify' (badge the UI;
+ *  never auto-apply). 'off' = ignore; 'auto' = apply a found update when the engine is idle. */
+export type UpdatePolicy = 'off' | 'notify' | 'auto'
+
 export interface Engine {
   id: string
   name: string
@@ -21,6 +25,8 @@ export interface Engine {
   version: string
   capabilities: Capabilities
   addedAt: string
+  /** Auto-update policy (ADR-085). Absent in pre-Phase-6 configs → 'notify' on load. */
+  updatePolicy?: UpdatePolicy
 }
 export interface Daemon {
   host: string
@@ -494,6 +500,9 @@ function normalize(c: Config): void {
     e.capabilities ??= { kvTypes: [], flags: [] }
     e.capabilities.kvTypes ??= []
     e.capabilities.flags ??= []
+    // Per-engine auto-update policy (ADR-085): absent/garbage in pre-Phase-6 configs
+    // → 'notify' (the safe default — surface updates, never silently auto-apply).
+    e.updatePolicy = e.updatePolicy === 'off' || e.updatePolicy === 'auto' ? e.updatePolicy : 'notify'
   }
   if (c.activeEngineId && !c.engines.some((e) => e.id === c.activeEngineId)) c.activeEngineId = ''
   if (!c.activeEngineId && c.engines.length > 0) c.activeEngineId = c.engines[0].id

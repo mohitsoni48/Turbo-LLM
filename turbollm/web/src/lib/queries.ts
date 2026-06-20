@@ -31,9 +31,12 @@ import {
   deleteEngineBackend,
   enableBackend,
   purgeEngine,
+  updateBackend,
   updateVllm,
   updateMlx,
   updateTurboquant,
+  getEngineUpdates,
+  setEngineUpdatePolicy,
   getStatus,
   startBench,
   getSettings,
@@ -81,7 +84,9 @@ import type {
   EngineCatalog,
   EngineRecommendationResult,
   EngineStats,
+  EngineUpdates,
   EnginesList,
+  UpdatePolicy,
   HfRepoDetail,
   HfSearchResult,
   LoadProfile,
@@ -99,6 +104,7 @@ export const queryKeys = {
   engineBackends: ['engine-backends'] as const,
   engineCatalog: ['engine-catalog'] as const,
   engineRecommendation: ['engine-recommendation'] as const,
+  engineUpdates: ['engine-updates'] as const,
   models: ['models'] as const,
   modelDirs: ['modeldirs'] as const,
   downloads: ['downloads'] as const,
@@ -212,6 +218,7 @@ export function useBackendInstall() {
     void qc.invalidateQueries({ queryKey: queryKeys.engineBackends })
     void qc.invalidateQueries({ queryKey: queryKeys.engineCatalog })
     void qc.invalidateQueries({ queryKey: queryKeys.engines })
+    void qc.invalidateQueries({ queryKey: queryKeys.engineUpdates })
     void qc.invalidateQueries({ queryKey: queryKeys.status })
   }
   return {
@@ -227,9 +234,35 @@ export function useBackendInstall() {
     updateVllm: useMutation({ mutationFn: () => updateVllm(), onSuccess: invalidate }),
     updateMlx: useMutation({ mutationFn: () => updateMlx(), onSuccess: invalidate }),
     updateTurboquant: useMutation({ mutationFn: () => updateTurboquant(), onSuccess: invalidate }),
-    // Backend update re-runs the provision (same as install, idempotent via re-download).
-    updateBackend: useMutation({ mutationFn: (id: string) => installBackend(id), onSuccess: invalidate }),
+    // De-pinned, rollback-safe llama.cpp backend update (ADR-085): resolves the REAL latest
+    // upstream tag, downloads + probes it, swaps + GCs the old build only on success.
+    updateBackend: useMutation({ mutationFn: (id: string) => updateBackend(id), onSuccess: invalidate }),
   }
+}
+
+/** Honest per-engine update status (ADR-085, Phase 6). Offline-first: serves the cache,
+ *  never a fabricated "latest". Polls while a provision/update is active so a freshly
+ *  applied update flips hasUpdate off. */
+export function useEngineUpdates(provisioning = false): UseQueryResult<EngineUpdates> {
+  return useQuery({
+    queryKey: queryKeys.engineUpdates,
+    queryFn: () => getEngineUpdates(false),
+    refetchInterval: provisioning ? 3000 : false,
+    retry: false,
+  })
+}
+
+/** Set an engine's auto-update policy (off | notify | auto). Invalidates the updates +
+ *  engines queries so the control + badge reflect the new policy. */
+export function useUpdatePolicyMutation() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, policy }: { id: string; policy: UpdatePolicy }) => setEngineUpdatePolicy(id, policy),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: queryKeys.engineUpdates })
+      void qc.invalidateQueries({ queryKey: queryKeys.engines })
+    },
+  })
 }
 
 export function useEngineMutations() {

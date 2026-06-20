@@ -17,9 +17,11 @@ import {
   useEngineCatalog,
   useEngineMutations,
   useEngineRecommendation,
+  useEngineUpdates,
   useEngines,
   useStatus,
   useSysInfo,
+  useUpdatePolicyMutation,
 } from '../lib/queries'
 import { ApiError } from '../lib/api'
 import type {
@@ -28,7 +30,9 @@ import type {
   EngineBackends,
   EngineFit,
   EngineRecommendationResult,
+  EngineUpdateStatus,
   EnginesList,
+  UpdatePolicy,
 } from '../lib/types'
 import { useUiStore } from '../stores/ui'
 import { ScreenHeader, InlineError } from '../components/common'
@@ -280,8 +284,10 @@ function InstallManageCatalog({
   const provisioning = !!status?.engineProvision?.active
   const catalogQ = useEngineCatalog(provisioning)
   const { data: registry } = useEngines()
+  const { data: updates } = useEngineUpdates(provisioning)
   const install = useBackendInstall()
   const engineMut = useEngineMutations()
+  const policyMut = useUpdatePolicyMutation()
   const [deleteTarget, setDeleteTarget] = useState<{ e: CatalogEngine; registryId: string } | null>(null)
 
   // Disk/registry install state lives in the catalog endpoint; the fit/badge
@@ -364,6 +370,14 @@ function InstallManageCatalog({
       onError: (err) => toast.error(err instanceof ApiError ? err.message : `Could not update ${e.name}.`),
     })
   }
+  const setPolicy = (e: CatalogEngine, policy: UpdatePolicy) => {
+    const id = registryEngineId(e)
+    if (!id) { toast.error(`Could not find the installed ${e.name} engine.`); return }
+    policyMut.mutate(
+      { id, policy },
+      { onError: (err) => toast.error(err instanceof ApiError ? err.message : 'Could not change auto-update.') },
+    )
+  }
   const requestDelete = (e: CatalogEngine) => {
     const registryId = registryEngineId(e)
     if (!registryId) { toast.error(`Could not find the installed ${e.name} engine to delete.`); return }
@@ -387,7 +401,9 @@ function InstallManageCatalog({
     <section className="flex flex-col gap-2">
       <SectionLabel>Install &amp; manage</SectionLabel>
 
-      {rec.recommendation.fits.map((fit) => (
+      {rec.recommendation.fits.map((fit) => {
+        const regId = registryEngineId(catalogById.get(fit.engine.id) ?? fit.engine as CatalogEngine)
+        return (
         <CatalogFitRow
           key={fit.engine.id}
           fit={fit}
@@ -395,14 +411,18 @@ function InstallManageCatalog({
           isActive={activeCatalogId === fit.engine.id}
           anyPending={anyPending}
           provisioning={provisioning}
+          updateStatus={regId ? updates?.updates[regId] : undefined}
+          policy={(regId ? updates?.policies[regId] : undefined) ?? 'notify'}
           installFor={installFor}
           onInstall={doInstall}
           onEnable={doEnable}
           onDisable={doDisable}
           onUpdate={doUpdate}
           onDelete={requestDelete}
+          onSetPolicy={setPolicy}
         />
-      ))}
+        )
+      })}
 
       {/* Add your own engine — first-class item in this zone. */}
       <div className="flex items-center gap-3 rounded-[var(--radius)] border border-dashed border-border-strong bg-panel p-4">
@@ -454,24 +474,30 @@ function CatalogFitRow({
   isActive,
   anyPending,
   provisioning,
+  updateStatus,
+  policy,
   installFor,
   onInstall,
   onEnable,
   onDisable,
   onUpdate,
   onDelete,
+  onSetPolicy,
 }: {
   fit: EngineFit
   catalog: CatalogEngine | undefined
   isActive: boolean
   anyPending: boolean
   provisioning: boolean
+  updateStatus: EngineUpdateStatus | undefined
+  policy: UpdatePolicy
   installFor: (e: CatalogEngine) => { isPending: boolean } | null
   onInstall: (e: CatalogEngine) => void
   onEnable: (e: CatalogEngine) => void
   onDisable: (e: CatalogEngine) => void
   onUpdate: (e: CatalogEngine) => void
   onDelete: (e: CatalogEngine) => void
+  onSetPolicy: (e: CatalogEngine, policy: UpdatePolicy) => void
 }) {
   const e = fit.engine
   const isLlama = e.id === 'llama.cpp'
@@ -508,6 +534,7 @@ function CatalogFitRow({
           {experimental && <Badge variant="mono">experimental</Badge>}
           {e.id === 'vllm' && <Badge variant="mono">For power users</Badge>}
           {isDisabled && <Badge variant="mono">Disabled</Badge>}
+          {isEnabled && updateStatus?.hasUpdate && <Badge variant="accent">Update available</Badge>}
           {incompatible && fit.incompatibleReason && (
             <Badge variant="mono">{fit.incompatibleReason}</Badge>
           )}
@@ -531,6 +558,13 @@ function CatalogFitRow({
             Pick a specific GPU build in Advanced below.
           </div>
         )}
+        {/* Honest per-engine update status (ADR-085) for enabled non-llama engines.
+            Never claims "up to date" without a real upstream check. */}
+        {!isLlama && isEnabled && (
+          <div className="mt-1">
+            <CatalogUpdateStatusLine st={updateStatus} />
+          </div>
+        )}
       </div>
 
       <div className="flex shrink-0 items-center gap-2 pt-0.5">
@@ -548,12 +582,32 @@ function CatalogFitRow({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem onSelect={() => onUpdate(catalog)} disabled={provisioning}>
-                <Download size={14} /> Update
+                <Download size={14} /> {updateStatus?.hasUpdate ? 'Update now' : 'Update'}
               </DropdownMenuItem>
               {isEnabled ? (
                 <DropdownMenuItem onSelect={() => onDisable(catalog)}>Disable</DropdownMenuItem>
               ) : (
                 <DropdownMenuItem onSelect={() => onEnable(catalog)}>Enable</DropdownMenuItem>
+              )}
+              {isEnabled && (
+                <>
+                  <DropdownMenuSeparator />
+                  <div className="px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-faint">
+                    Auto-update
+                  </div>
+                  {(['off', 'notify', 'auto'] as UpdatePolicy[]).map((p) => (
+                    <DropdownMenuItem
+                      key={p}
+                      onSelect={() => onSetPolicy(catalog, p)}
+                      className="flex items-center gap-2"
+                    >
+                      <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                        {policy === p && <Check size={13} className="text-accent" />}
+                      </span>
+                      {AUTO_UPDATE_LABEL[p]}
+                    </DropdownMenuItem>
+                  ))}
+                </>
               )}
               <DropdownMenuSeparator />
               <DropdownMenuItem destructive onSelect={() => onDelete(catalog)}>
@@ -697,6 +751,46 @@ function BuildPicker({
 }
 
 // ─── shared helpers ───────────────────────────────────────────────────────────
+
+const AUTO_UPDATE_LABEL: Record<UpdatePolicy, string> = { off: 'Off', notify: 'Notify', auto: 'Auto' }
+
+/** Compact relative-time for the last update check ("just now", "3h ago", "2d ago"). */
+function relativeTime(iso: string): string {
+  const then = new Date(iso).getTime()
+  if (!Number.isFinite(then)) return ''
+  const diff = Date.now() - then
+  if (diff < 60_000) return 'just now'
+  const mins = Math.floor(diff / 60_000)
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  return `${Math.floor(hrs / 24)}d ago`
+}
+
+/** Honest one-line update status for a catalog row (ADR-085). Never claims "up to date"
+ *  without a real upstream check; offline/uncheckable says so explicitly. */
+function CatalogUpdateStatusLine({ st }: { st: EngineUpdateStatus | undefined }) {
+  if (!st) return null
+  if (st.error === 'offline') {
+    return <span className="text-[11px] text-faint">Couldn&apos;t check for updates (offline)</span>
+  }
+  if (st.error === 'no_source' || !st.comparable) {
+    return <span className="text-[11px] text-faint">Update status unavailable</span>
+  }
+  if (st.hasUpdate && st.latest) {
+    return (
+      <span className="text-[11px]" style={{ color: 'var(--accent)' }}>
+        Update available · {st.installed || '?'} → {st.latest}
+      </span>
+    )
+  }
+  return (
+    <span className="text-[11px] text-faint">
+      Up to date · {st.latest ?? st.installed}
+      {st.checkedAt ? ` · checked ${relativeTime(st.checkedAt)}` : ''}
+    </span>
+  )
+}
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return <p className="text-[11px] font-medium uppercase tracking-wide text-faint">{children}</p>

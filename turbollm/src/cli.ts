@@ -8,6 +8,9 @@ import { Manager, killTrackedEnginesSync, reapStaleEngines, type StartOpts } fro
 import { ComfyGuard } from './engines/comfy-guard'
 import { Registry } from './engines/registry'
 import { ProvisionState } from './engines/provision-state'
+import { UpdateChecker } from './engines/update'
+import { UpdateScheduler } from './engines/update-scheduler'
+import { applyEngineUpdate } from './engines/update-apply'
 import { seedDefaultEngines } from './engines/seed'
 import { engineAcceptsFormat } from './engines/compat'
 import { Scanner } from './models/scanner'
@@ -131,6 +134,8 @@ const registry = new Registry(store)
 const pruned = registry.pruneDeadManagedBuilds()
 if (pruned > 0) console.log(`pruned ${pruned} dangling engine build(s)`)
 const provision = new ProvisionState()
+// Honest update checker (ADR-085): per-engine installed/latest/hasUpdate, in-memory cached.
+const updates = new UpdateChecker()
 const enginesDir = join(store.dir(), 'engines')
 void seedDefaultEngines(registry, enginesDir, provision).then(() => registry.ensureProbed())
 const manager = new Manager(store)
@@ -159,8 +164,24 @@ void (async () => {
 })()
 const startedAt = Date.now()
 // `requestRestart` is attached after the server is created (it must close over it).
-const deps: Deps = { store, registry, manager, scanner, hashes, db, provision, hf, downloads, bench, modelRouter, comfy, tools: toolRegistry, version, startedAt }
+const deps: Deps = { store, registry, manager, scanner, hashes, db, provision, updates, hf, downloads, bench, modelRouter, comfy, tools: toolRegistry, version, startedAt }
 const app = createApp(deps)
+
+// Background auto-update checker (ADR-085, Phase 6): runs shortly after boot + every
+// ~24h. Refreshes per-engine update status; for 'auto' engines with an available update
+// AND an idle engine it applies the rollback-safe update. 'notify' just keeps the badge
+// fresh; 'off' is skipped. Don't auto-apply while ComfyUI holds the GPU.
+const updateScheduler = new UpdateScheduler({
+  store,
+  registry,
+  manager,
+  updates,
+  applyUpdate: async (engine) => {
+    if (comfy.isBlocked()) return // ComfyUI owns the GPU — don't swap engines under it
+    await applyEngineUpdate({ store, registry, manager, provision }, engine)
+  },
+})
+updateScheduler.start()
 
 // ── Resolve listen address ────────────────────────────────────────────────────
 const cfg = store.snapshot()
@@ -336,6 +357,7 @@ function spawnReplacement(): void {
 deps.requestRestart = () => {
   if (restarting) return
   restarting = true
+  updateScheduler.stop() // don't let an update tick fire mid-teardown
   comfy.stop() // don't let a tick reload a model mid-teardown
   let spawned = false
   const finish = () => {
@@ -443,6 +465,7 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
     if (shuttingDown) return
     shuttingDown = true
     console.log('shutting down')
+    updateScheduler.stop()
     comfy.stop()
     toolRegistry.disconnectAll()
     void manager.shutdown().finally(() => { db.close(); server.close(() => process.exit(0)) })

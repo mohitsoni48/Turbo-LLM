@@ -12,8 +12,10 @@ import type {
   EngineCatalog,
   EngineRecommendationResult,
   EngineLogs,
+  EngineUpdates,
   EnginesList,
   EngineScanResult,
+  UpdatePolicy,
   HfRepoDetail,
   HfSearchResult,
   HfTokenTest,
@@ -127,11 +129,12 @@ export function getEngineBackends(): Promise<EngineBackends> {
   return request<EngineBackends>('/api/v1/engines/backends')
 }
 
-/** Install/update a llama.cpp backend build. When the current pinned build is already installed,
- *  the daemon returns `{ accepted: false, alreadyLatest: true, build }` (no download). */
+/** First-install a llama.cpp backend build (seeds the pinned LLAMA_BUILD). When the build
+ *  is already on disk the daemon returns `{ accepted: false, alreadyInstalled: true, build }`
+ *  (no download). Use {@link updateBackend} to honestly check + upgrade to the real latest. */
 export function installBackend(
   backend: string,
-): Promise<{ accepted: boolean; backend?: string; alreadyLatest?: boolean; build?: string }> {
+): Promise<{ accepted: boolean; backend?: string; alreadyInstalled?: boolean; build?: string }> {
   return request('/api/v1/engines/backends/install', { method: 'POST', json: { backend } })
 }
 
@@ -163,6 +166,31 @@ export function cancelBackendDownload(): Promise<{ ok: boolean }> {
 
 export function deleteEngineBackend(id: string): Promise<{ ok: true }> {
   return request(`/api/v1/engines/backends/${encodeURIComponent(id)}`, { method: 'DELETE', json: {} })
+}
+
+/** De-pinned, rollback-safe update for an official llama.cpp backend (ADR-085). Resolves
+ *  the REAL latest upstream tag, downloads + probes it, swaps + GCs the old build only on
+ *  success. Returns `{ accepted:false, alreadyLatest:true, build }` when a real check
+ *  confirms you're current; 503 `offline` when GitHub couldn't be reached. */
+export function updateBackend(
+  id: string,
+): Promise<{ accepted: boolean; backend?: string; build?: string; alreadyLatest?: boolean }> {
+  return request(`/api/v1/engines/backends/${encodeURIComponent(id)}/update`, { method: 'POST', json: {} })
+}
+
+// ── Honest engine update status + auto-update policy (ADR-085, Phase 6) ────────
+/** Per-engine update status (installed/latest/hasUpdate/checkedAt) + current policies.
+ *  `?refresh=1` forces a live re-check; otherwise the cache is served (offline-first). */
+export function getEngineUpdates(refresh = false): Promise<EngineUpdates> {
+  return request<EngineUpdates>(`/api/v1/engines/updates${refresh ? '?refresh=1' : ''}`)
+}
+
+/** Set an engine's auto-update policy (off | notify | auto). */
+export function setEngineUpdatePolicy(id: string, policy: UpdatePolicy): Promise<unknown> {
+  return request(`/api/v1/engines/${encodeURIComponent(id)}/update-policy`, {
+    method: 'PUT',
+    json: { policy },
+  })
 }
 
 export function renameEngine(id: string, name: string): Promise<Engine> {

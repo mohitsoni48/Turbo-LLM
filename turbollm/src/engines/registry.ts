@@ -2,7 +2,7 @@
 // enforced by the API layer using the Manager's live state.
 import { existsSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { ConfigStore, Engine, ValueError, findEngine } from '../config/config'
+import { ConfigStore, Engine, UpdatePolicy, ValueError, findEngine } from '../config/config'
 import { probe } from './probe'
 
 /** Auto-provisioned official builds live under `<dataDir>/engines/llama.cpp-…/`.
@@ -162,6 +162,18 @@ export class Registry {
       if (!findEngine(c.engines, id)) throw new NotFoundError()
       c.activeEngineId = id
     })
+  }
+
+  /** Set an engine's per-engine auto-update policy (ADR-085). Returns the updated engine. */
+  setUpdatePolicy(id: string, policy: UpdatePolicy): Engine {
+    let out: Engine | undefined
+    this.store.update((c) => {
+      const e = findEngine(c.engines, id)
+      if (!e) throw new NotFoundError()
+      e.updatePolicy = policy
+      out = structuredClone(e)
+    })
+    return out!
   }
 
   async reprobe(id: string): Promise<Engine> {

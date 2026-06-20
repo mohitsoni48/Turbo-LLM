@@ -201,6 +201,28 @@ export type EngineLogs = {
   lines: string[]
 }
 
+// ── Honest engine update status (ADR-085, Phase 6) ────────────────────────────
+/** Per-engine auto-update policy. Default 'notify'. */
+export type UpdatePolicy = 'off' | 'notify' | 'auto'
+
+/** One engine's update status from GET /api/v1/engines/updates. `latest` is null when
+ *  the check could not complete (offline) — the UI must show "couldn't check", never a
+ *  fabricated "up to date". `comparable` is false when latest couldn't be parsed/compared. */
+export type EngineUpdateStatus = {
+  installed: string
+  latest: string | null
+  hasUpdate: boolean
+  checkedAt: string
+  error?: 'offline' | 'no_source'
+  comparable: boolean
+}
+
+/** GET /api/v1/engines/updates payload: per-engine-id status + current policy. */
+export type EngineUpdates = {
+  updates: Record<string, EngineUpdateStatus>
+  policies: Record<string, UpdatePolicy>
+}
+
 /** One entry in the engine catalog (ADR-044). Mirrors src/engines/catalog.ts. */
 export type CatalogEngine = {
   id: string

@@ -1,7 +1,15 @@
 import { useState } from 'react'
-import { Download, Loader2, MoreHorizontal, Sparkles } from 'lucide-react'
-import { useBackendInstall, useEngineBackends, useEngineMutations, useStatus } from '../../lib/queries'
+import { Check, Download, Loader2, MoreHorizontal, Sparkles } from 'lucide-react'
+import {
+  useBackendInstall,
+  useEngineBackends,
+  useEngineMutations,
+  useEngineUpdates,
+  useUpdatePolicyMutation,
+  useStatus,
+} from '../../lib/queries'
 import { ApiError } from '../../lib/api'
+import type { EngineUpdateStatus, UpdatePolicy } from '../../lib/types'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
 import { toast } from '../../components/ui/sonner'
@@ -27,6 +35,51 @@ const SIZE_HINT: Record<string, string> = {
   cuda: '~550 MB', rocm: '~320 MB', sycl: '~110 MB', vulkan: '~40 MB', metal: '~11 MB', cpu: '~16 MB',
 }
 
+const POLICY_LABEL: Record<UpdatePolicy, string> = {
+  off: 'Off',
+  notify: 'Notify',
+  auto: 'Auto',
+}
+
+/** Compact relative-time ("just now", "3h ago", "2d ago") for the last update check. */
+function relativeTime(iso: string): string {
+  const then = new Date(iso).getTime()
+  if (!Number.isFinite(then)) return ''
+  const diff = Date.now() - then
+  if (diff < 60_000) return 'just now'
+  const mins = Math.floor(diff / 60_000)
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  return `${Math.floor(hrs / 24)}d ago`
+}
+
+/** Honest one-line update status for a backend row. NEVER claims "up to date" without a
+ *  real check — an offline/uncheckable engine says so. Returns null when the engine has
+ *  no recorded check yet (the row falls back to its installed line). */
+function UpdateStatusLine({ st }: { st: EngineUpdateStatus | undefined }) {
+  if (!st) return null
+  if (st.error === 'offline') {
+    return <span className="text-[12px] text-muted">Couldn&apos;t check for updates (offline)</span>
+  }
+  if (st.error === 'no_source' || !st.comparable) {
+    return <span className="text-[12px] text-muted">Update status unavailable for this build</span>
+  }
+  if (st.hasUpdate && st.latest) {
+    return (
+      <span className="text-[12px]" style={{ color: 'var(--accent)' }}>
+        Update available · {st.installed || '?'} → {st.latest}
+      </span>
+    )
+  }
+  return (
+    <span className="text-[12px] text-muted">
+      Up to date · {st.latest ?? st.installed}
+      {st.checkedAt ? ` · checked ${relativeTime(st.checkedAt)}` : ''}
+    </span>
+  )
+}
+
 /** One flat row per official llama.cpp backend variant. 3-state lifecycle:
  *  Not installed → Download button.
  *  Installed + enabled → "Installed" indicator + ⋯ menu (Update / Disable / Delete).
@@ -35,12 +88,31 @@ export function LlamaCppBackendRows() {
   const { data: status } = useStatus()
   const provisioning = !!status?.engineProvision?.active
   const { data, isLoading } = useEngineBackends(provisioning)
+  const { data: updates } = useEngineUpdates(provisioning)
   const install = useBackendInstall()
+  const policyMut = useUpdatePolicyMutation()
   // For Disable: unregister the engine entry only (keep files). Uses registry engine id.
   const engineMutForDisable = useEngineMutations()
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; label: string } | null>(null)
 
   if (isLoading || !data) return null
+
+  // Update status + auto-update policy are keyed by REGISTRY engine id (b.engineId).
+  const statusFor = (engineId: string): EngineUpdateStatus | undefined =>
+    engineId ? updates?.updates[engineId] : undefined
+  const policyFor = (engineId: string): UpdatePolicy =>
+    (engineId ? updates?.policies[engineId] : undefined) ?? 'notify'
+
+  const setPolicy = (engineId: string, policy: UpdatePolicy, label: string) => {
+    if (!engineId) return
+    policyMut.mutate(
+      { id: engineId, policy },
+      {
+        onSuccess: () => toast.success(`${label} auto-update: ${POLICY_LABEL[policy]}`),
+        onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not change auto-update.'),
+      },
+    )
+  }
 
   const anyPending = provisioning || install.backend.isPending || install.remove.isPending ||
     install.enableBackend.isPending || install.updateBackend.isPending ||
@@ -93,7 +165,10 @@ export function LlamaCppBackendRows() {
 
   return (
     <>
-      {data.backends.map((b) => (
+      {data.backends.map((b) => {
+        const up = statusFor(b.engineId)
+        const policy = policyFor(b.engineId)
+        return (
         <div
           key={b.id}
           className="flex items-center gap-3 rounded-[var(--radius)] border border-border bg-panel p-4"
@@ -110,12 +185,22 @@ export function LlamaCppBackendRows() {
               {b.installed && !b.enabled && (
                 <Badge variant="mono">Disabled</Badge>
               )}
+              {b.installed && b.enabled && up?.hasUpdate && (
+                <Badge variant="accent">Update available</Badge>
+              )}
             </div>
             <div className="mt-0.5 text-[12px] text-muted">
               {b.installed
                 ? `Installed · ${gpu ?? 'GPU detected'}`
                 : `Not installed · ${SIZE_HINT[b.id] ?? 'download to use'}`}
             </div>
+            {/* Honest per-engine update status (ADR-085) — only for an enabled engine
+                we can actually track upstream. Never claims "latest" without a check. */}
+            {b.installed && b.enabled && (
+              <div className="mt-0.5">
+                <UpdateStatusLine st={up} />
+              </div>
+            )}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {!b.installed ? (
@@ -139,7 +224,7 @@ export function LlamaCppBackendRows() {
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
                     <DropdownMenuItem onSelect={() => doUpdate(b.id)} disabled={provisioning}>
-                      <Download size={14} /> Update
+                      <Download size={14} /> {up?.hasUpdate ? 'Update now' : 'Check for update'}
                     </DropdownMenuItem>
                     {b.enabled ? (
                       <DropdownMenuItem onSelect={() => b.engineId && doDisable(b.engineId, b.label)}>
@@ -149,6 +234,26 @@ export function LlamaCppBackendRows() {
                       <DropdownMenuItem onSelect={() => doEnable(b.id)}>
                         Enable
                       </DropdownMenuItem>
+                    )}
+                    {b.enabled && b.engineId && (
+                      <>
+                        <DropdownMenuSeparator />
+                        <div className="px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-faint">
+                          Auto-update
+                        </div>
+                        {(['off', 'notify', 'auto'] as UpdatePolicy[]).map((p) => (
+                          <DropdownMenuItem
+                            key={p}
+                            onSelect={() => setPolicy(b.engineId, p, b.label)}
+                            className="flex items-center gap-2"
+                          >
+                            <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                              {policy === p && <Check size={13} className="text-accent" />}
+                            </span>
+                            {POLICY_LABEL[p]}
+                          </DropdownMenuItem>
+                        ))}
+                      </>
                     )}
                     <DropdownMenuSeparator />
                     <DropdownMenuItem
@@ -163,7 +268,8 @@ export function LlamaCppBackendRows() {
             )}
           </div>
         </div>
-      ))}
+        )
+      })}
 
       <AlertDialog open={!!deleteTarget} onOpenChange={(open) => { if (!open) setDeleteTarget(null) }}>
         <AlertDialogContent>

@@ -3,6 +3,7 @@ import type { Manager } from './engines/manager'
 import type { ComfyGuard } from './engines/comfy-guard'
 import type { Registry } from './engines/registry'
 import type { ProvisionState } from './engines/provision-state'
+import type { UpdateChecker } from './engines/update'
 import type { Scanner } from './models/scanner'
 import type { HashStore } from './models/hashes'
 import type { ConversationStore } from './chat/db'
@@ -20,6 +21,9 @@ export interface Deps {
   hashes: HashStore
   db: ConversationStore
   provision: ProvisionState
+  /** Honest engine update checker (ADR-085): per-engine installed/latest/hasUpdate with
+   *  an in-memory cache. Optional — absent in tests that don't exercise the update routes. */
+  updates?: UpdateChecker
   hf: HfClient
   downloads: DownloadManager
   bench: BenchRunner

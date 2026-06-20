@@ -16,12 +16,20 @@ import { resolveServerBinary, suggestEngineName } from '../engines/scan'
 import {
   LLAMA_BUILD,
   availableBackends,
+  backendDefAt,
+  backendDir,
   deleteBackend,
   installedBackendServer,
+  latestReleaseTag,
   provisionBackend,
   provisionForkRelease,
   recommendBackendId,
 } from '../engines/download'
+import {
+  normalizeUpdatePolicy,
+  tagFromManagedBinPath,
+} from '../engines/update'
+import type { BackendId } from '../engines/download'
 import { ensureMlxEnv, mlxSamplingArgs } from '../engines/mlx'
 import { ensureVllmEnv } from '../engines/vllm'
 import { catalogForPlatform, catalogEngine } from '../engines/catalog'
@@ -155,12 +163,11 @@ export function registerApi(app: Hono, d: Deps): void {
     const def = availableBackends().find((x) => x.id === b.backend)
     if (!def) return err(c, 400, 'invalid_config_value', 'Unknown backend for this platform.')
     const root = join(d.store.dir(), 'engines')
-    // Already at the current pinned build → nothing to download. llama.cpp backends are pinned to
-    // LLAMA_BUILD; a newer build only ships when TurboLLM bumps it (which changes the install dir,
-    // so the row would show Download again). Report 'already latest' so Update gives clear feedback
-    // instead of silently re-running.
+    // First-install only: seed the pinned LLAMA_BUILD. When the pinned build is already
+    // on disk, this is a no-op (no real upstream check here — that's the Update path's
+    // job, which de-pins and resolves the REAL latest tag honestly, ADR-085).
     if (installedBackendServer(root, def.id)) {
-      return c.json({ accepted: false, alreadyLatest: true, build: LLAMA_BUILD })
+      return c.json({ accepted: false, alreadyInstalled: true, build: LLAMA_BUILD })
     }
     if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
     const ac = new AbortController()
@@ -194,6 +201,74 @@ export function registerApi(app: Hono, d: Deps): void {
       return c.json({ ok: true })
     }
     return c.json({ ok: false })
+  })
+
+  // De-pinned, rollback-safe update for an official llama.cpp backend (ADR-085, Phase 6).
+  // Resolves the REAL latest upstream build tag, downloads it into a NEW tag-keyed dir,
+  // probes it (registry.add probes), and only on success registers + activates it and GCs
+  // the old install. On any download/probe failure the OLD install is left untouched
+  // (rollback) and the error is surfaced via the provision channel. Reports 'already latest'
+  // ONLY when the real upstream check confirms it — never the old "is the pinned build on
+  // disk?" lie. 202 + progress via GET /status engineProvision (same channel as install).
+  app.post('/api/v1/engines/backends/:id/update', async (c) => {
+    const def = availableBackends().find((x) => x.id === c.req.param('id'))
+    if (!def) return err(c, 400, 'invalid_config_value', 'Unknown backend for this platform.')
+    const root = join(d.store.dir(), 'engines')
+    const oldBin = installedBackendServer(root, def.id)
+    if (!oldBin) return err(c, 409, 'not_installed', 'Backend is not installed — download it first.')
+    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    // Honest upstream check FIRST: resolve the real latest tag. Offline → clear 503.
+    let latestTag: string
+    try {
+      latestTag = await latestReleaseTag('ggml-org/llama.cpp', AbortSignal.timeout(15_000))
+    } catch {
+      return err(c, 503, 'offline', "Couldn't reach GitHub to check for a newer build. Try again when online.")
+    }
+    if (!latestTag) return err(c, 503, 'offline', "GitHub didn't report a latest build. Try again later.")
+    const installedTag = tagFromManagedBinPath(oldBin)
+    // Already on the real latest → honest "already latest" (no download).
+    if (installedTag && installedTag === latestTag) {
+      return c.json({ accepted: false, alreadyLatest: true, build: latestTag })
+    }
+    const newDef = backendDefAt(def.id as BackendId, latestTag)
+    if (!newDef) return err(c, 500, 'internal', 'No upstream build of this backend for your platform.')
+    const ac = new AbortController()
+    provisionAbort = ac
+    void (async () => {
+      try {
+        d.provision.start(def.id)
+        // Download the latest build into its OWN tag-keyed dir. The old dir is untouched,
+        // so a failure here leaves the working install in place (rollback by construction).
+        const newBin = await provisionBackend(
+          root, newDef, latestTag,
+          (p) => d.provision.progress(p.phase, p.pct, p.part, p.parts),
+          ac.signal,
+        )
+        // Probe + register the new build (add() probes the binary). Only now do we touch
+        // the active engine / old install — if the probe throws, the old build still runs.
+        let newEng = d.registry.list().engines.find((e) => e.binPath === newBin)
+        if (!newEng) newEng = (await d.registry.add(`llama.cpp ${latestTag} (${def.id})`, newBin)).engine
+        // Stop the engine if the OLD build of this backend is the running active one, so the
+        // swap doesn't leave a stale process pointing at a dir we're about to delete.
+        const oldEng = d.registry.list().engines.find((e) => e.binPath === oldBin)
+        if (oldEng && d.registry.active()?.id === oldEng.id) await d.manager.stopAndWait()
+        d.registry.activate(newEng.id)
+        // GC the old install: unregister its engine entry + delete its tag-keyed dir.
+        if (oldEng && oldEng.id !== newEng.id) {
+          try { d.registry.remove(oldEng.id) } catch { /* already gone */ }
+        }
+        if (installedTag && installedTag !== latestTag) {
+          rmSync(backendDir(root, def.id as BackendId, installedTag), { recursive: true, force: true })
+        }
+        d.provision.done()
+      } catch (e) {
+        if ((e as Error)?.name === 'AbortError') d.provision.done() // user cancelled — old install intact
+        else d.provision.fail(`Could not update the ${def.id} engine (your existing build is unchanged): ${e instanceof Error ? e.message : e}`)
+      } finally {
+        if (provisionAbort === ac) provisionAbort = null
+      }
+    })()
+    return c.json({ accepted: true, backend: def.id, build: latestTag }, 202)
   })
 
   // Enable (register without re-downloading) an installed llama.cpp backend.
@@ -444,6 +519,43 @@ export function registerApi(app: Hono, d: Deps): void {
       return c.json(await d.registry.reprobe(c.req.param('id')))
     } catch (e) {
       if (e instanceof ProbeError) return err(c, 400, e.code, e.message)
+      return regErr(c, e)
+    }
+  })
+
+  // ---- honest per-engine update status (ADR-085, Phase 6) ----
+  // Per-engine installed/latest/hasUpdate/checkedAt(/error). Offline-first: works
+  // without network by returning each engine's cached or "couldn't check" state — it
+  // NEVER fabricates a "latest" it didn't actually fetch. `?refresh=1` forces a live
+  // re-check (otherwise the cache is served and a background refresh is kicked off).
+  app.get('/api/v1/engines/updates', async (c) => {
+    if (!d.updates) return c.json({ updates: {}, policies: {} })
+    const engines = d.registry.list().engines
+    const refresh = c.req.query('refresh') === '1'
+    d.updates.prune(new Set(engines.map((e) => e.id)))
+    if (refresh) {
+      await d.updates.checkAll(engines, AbortSignal.timeout(20_000)).catch(() => {})
+    } else {
+      // Kick a background check for any engine we've never checked, but return immediately.
+      const unchecked = engines.filter((e) => !d.updates!.get(e.id))
+      if (unchecked.length) void d.updates.checkAll(unchecked).catch(() => {})
+    }
+    const updates = d.updates.all()
+    // Surface each engine's current policy alongside (default 'notify').
+    const policies: Record<string, string> = {}
+    for (const e of engines) policies[e.id] = normalizeUpdatePolicy(e.updatePolicy)
+    return c.json({ updates, policies })
+  })
+
+  // Set an engine's per-engine auto-update policy (off | notify | auto). Default notify.
+  app.put('/api/v1/engines/:id/update-policy', async (c) => {
+    const b = await body<{ policy?: string }>(c)
+    if (b.policy !== 'off' && b.policy !== 'notify' && b.policy !== 'auto') {
+      return err(c, 400, 'invalid_config_value', 'policy must be off, notify, or auto.')
+    }
+    try {
+      return c.json(d.registry.setUpdatePolicy(c.req.param('id'), b.policy))
+    } catch (e) {
       return regErr(c, e)
     }
   })

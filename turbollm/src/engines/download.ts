@@ -110,6 +110,12 @@ export function backendDir(enginesRoot: string, id: BackendId, tag = LLAMA_BUILD
   return join(enginesRoot, `llama.cpp-${tag}-${id}`)
 }
 
+/** The BackendDef for `id` at a SPECIFIC tag (the update path targets the real latest
+ *  tag, not the pinned LLAMA_BUILD). Returns null when this OS/arch has no such backend. */
+export function backendDefAt(id: BackendId, tag: string): BackendDef | null {
+  return availableBackends(tag).find((b) => b.id === id) ?? null
+}
+
 /** Path to an already-extracted backend's server binary, or null if not installed. */
 export function installedBackendServer(enginesRoot: string, id: BackendId, tag = LLAMA_BUILD): string | null {
   const dir = backendDir(enginesRoot, id, tag)
@@ -296,6 +302,34 @@ export function pickReleaseAsset(
   return best
 }
 
+/** One GitHub release as we consume it (latest-release resolution). */
+export interface GithubRelease {
+  tag_name?: string
+  assets?: ReleaseAsset[]
+}
+
+/** Resolve the latest GitHub release of `repo` (tag + assets) via the public API.
+ *  Single source of truth for "what is upstream's latest" — used both by the
+ *  provisioning path (provisionForkRelease) and the honest update check (update.ts).
+ *  Throws on a non-2xx response (caller maps it to an offline/error state). */
+export async function latestGithubRelease(repo: string, signal?: AbortSignal): Promise<GithubRelease> {
+  const apiUrl = `https://api.github.com/repos/${repo}/releases/latest`
+  const res = await fetch(apiUrl, {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'turbollm' },
+    signal,
+  })
+  if (!res.ok) throw new Error(`could not query ${repo} releases: HTTP ${res.status}`)
+  return (await res.json()) as GithubRelease
+}
+
+/** Resolve just the latest release tag of `repo` (e.g. `b9761`), or '' when the
+ *  release carries no tag. Thin wrapper over {@link latestGithubRelease} for the
+ *  update checker, which only needs the tag to compare. */
+export async function latestReleaseTag(repo: string, signal?: AbortSignal): Promise<string> {
+  const rel = await latestGithubRelease(repo, signal)
+  return rel.tag_name ?? ''
+}
+
 /** Resolve the latest release of `repo` and provision its platform-matching
  *  `llama-server` into `<enginesRoot>/<destName>/`. Returns the server binary path.
  *  Throws `no_release_asset` (Error.message) when the latest release has no asset
@@ -315,13 +349,7 @@ export async function provisionForkRelease(
   }
 
   // Resolve the latest release + its assets via the GitHub API.
-  const apiUrl = `https://api.github.com/repos/${repo}/releases/latest`
-  const res = await fetch(apiUrl, {
-    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'turbollm' },
-    signal,
-  })
-  if (!res.ok) throw new Error(`could not query ${repo} releases: HTTP ${res.status}`)
-  const rel = (await res.json()) as { tag_name?: string; assets?: ReleaseAsset[] }
+  const rel = await latestGithubRelease(repo, signal)
   const asset = pickReleaseAsset(rel.assets ?? [])
   if (!asset) throw new Error('no_release_asset')
 
