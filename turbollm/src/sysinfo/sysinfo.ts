@@ -3,6 +3,7 @@
 // selection (ADR-025: vendor → fastest backend).
 import { execFileSync } from 'node:child_process'
 import os from 'node:os'
+import fs from 'node:fs'
 
 export type GpuVendor = 'nvidia' | 'amd' | 'intel' | 'apple' | 'unknown'
 
@@ -119,7 +120,8 @@ function enumWindowsGpus(): GpuInfo[] {
 }
 
 function enumLinuxGpus(): GpuInfo[] {
-  // lspci lists display controllers; we only need the vendor from the description.
+  // lspci gives vendor + name but no VRAM size; read VRAM per-adapter from
+  // sysfs (linuxVramMb), matched by the adapter's PCI slot.
   const out = execFileSync('sh', ['-c', "lspci -mm 2>/dev/null | grep -iE 'VGA|3D|Display'"], {
     timeout: 8000,
   }).toString()
@@ -129,7 +131,28 @@ function enumLinuxGpus(): GpuInfo[] {
     .filter(Boolean)
     .map((line) => {
       const vendor = classifyVendor(line)
-      return { name: line.replace(/"/g, '').trim().slice(0, 80), vramMb: 0, vendor }
+      const slot = line.trim().split(/\s+/)[0] ?? ''
+      return { name: line.replace(/"/g, '').trim().slice(0, 80), vramMb: linuxVramMb(slot), vendor }
     })
     .filter((g) => g.vendor !== 'unknown')
+}
+
+// amdgpu exposes total VRAM in bytes via sysfs (incl. the BIOS carveout on
+// APUs like Ryzen AI / Strix Halo); lspci carries no size. Each lspci -mm line
+// begins with the PCI slot (e.g. "c3:00.0"), whose sysfs node lives at
+// /sys/bus/pci/devices/<domain>:<slot> — lspci omits the "0000:" domain by
+// default, so try both forms. Intel iGPUs / nouveau lack the attribute → 0 (no
+// dedicated VRAM), preserving prior behaviour. Byte→MB uses the same /1e6 as
+// the nvidia/windows/apple branches.
+function linuxVramMb(pciSlot: string): number {
+  if (!pciSlot) return 0
+  for (const dev of [`/sys/bus/pci/devices/0000:${pciSlot}`, `/sys/bus/pci/devices/${pciSlot}`]) {
+    try {
+      const bytes = parseInt(fs.readFileSync(`${dev}/mem_info_vram_total`, 'utf8').trim(), 10)
+      if (Number.isFinite(bytes) && bytes > 0) return Math.round(bytes / 1e6)
+    } catch {
+      /* no such device, or adapter exposes no VRAM (Intel iGPU, nouveau) */
+    }
+  }
+  return 0
 }
