@@ -17,7 +17,40 @@
 // prebuilt GitHub release — it flips to installable the day it does, by setting a
 // `repo` + clearing the flag, no code change to the install machinery.
 
+import { type BackendId, availableBackends } from './download'
+import type { Arch } from './hardware'
+import type { GpuVendor } from '../sysinfo/sysinfo'
+
 export type ProvisionType = 'github-release' | 'pip' | 'builtin'
+
+// ─── Variant model (engine overhaul, Phase 1) ───────────────────────────────
+// A catalog engine can ship several installable *variants* — one per hardware
+// path (e.g. llama.cpp has cuda/rocm/sycl/vulkan/metal/cpu). Each variant
+// declares the hardware it needs (HardwareReq); the matcher (compat.evaluate-
+// Variant) decides whether the current box can run it. This is additive: every
+// existing CatalogEngine field/export is unchanged and `variants` is optional.
+
+export interface HardwareReq {
+  platform?: NodeJS.Platform[]
+  arch?: Arch[]
+  gpuVendor?: GpuVendor[] // any-of
+  backend?: BackendId
+  minVramMb?: number
+  /** Accepted but NOT enforced in v1 (tiered gating — we can't reliably detect
+   *  compute capability yet). Kept on the type so future tiers can use it. */
+  minCudaCC?: number
+}
+
+export interface EngineVariant {
+  id: string
+  label: string
+  repo: string // OG repo (credit + source link)
+  requires: HardwareReq
+  stability: 'stable' | 'experimental'
+  speed?: 'baseline' | 'fast' | 'fastest'
+  backendId?: BackendId // set for official llama.cpp variants
+  hasPrebuilt: boolean // false => "build it, then Add your own"
+}
 
 export interface CatalogEngine {
   /** Stable catalog id (not the registry engine id). */
@@ -44,6 +77,40 @@ export interface CatalogEngine {
   comingSoon?: boolean
   /** Extra context shown under the card (support caveats, etc.). */
   note?: string
+  /** Installable variants (one per hardware path). Optional: llama.cpp derives
+   *  its variants at call time via llamaCppVariants(); other engines list them
+   *  inline or leave undefined (handled in later phases). */
+  variants?: EngineVariant[]
+}
+
+// Maps each llama.cpp BackendId to the hardware it needs + how fast it is.
+// We DERIVE the variant list from availableBackends() rather than hand-listing
+// the 6 backends, so the catalog never drifts from download.ts.
+const LLAMA_BACKEND_REQ: Record<BackendId, { requires: HardwareReq; speed: EngineVariant['speed'] }> = {
+  cuda: { requires: { gpuVendor: ['nvidia'], backend: 'cuda' }, speed: 'fast' },
+  rocm: { requires: { gpuVendor: ['amd'], backend: 'rocm' }, speed: 'fast' },
+  sycl: { requires: { gpuVendor: ['intel'], backend: 'sycl' }, speed: 'baseline' },
+  vulkan: { requires: { backend: 'vulkan' }, speed: 'baseline' }, // any GPU
+  metal: { requires: { platform: ['darwin'], gpuVendor: ['apple'], backend: 'metal' }, speed: 'fast' },
+  cpu: { requires: { backend: 'cpu' }, speed: 'baseline' }, // always ok
+}
+
+/** llama.cpp's variants for this OS/arch, derived from the official backend
+ *  list (download.ts) so the two never diverge. */
+export function llamaCppVariants(): EngineVariant[] {
+  return availableBackends().map((b) => {
+    const { requires, speed } = LLAMA_BACKEND_REQ[b.id]
+    return {
+      id: `llama.cpp-${b.id}`,
+      label: b.label,
+      repo: 'ggml-org/llama.cpp',
+      requires,
+      stability: 'stable',
+      speed,
+      backendId: b.id,
+      hasPrebuilt: true,
+    }
+  })
 }
 
 const ALL: CatalogEngine[] = [
@@ -107,6 +174,19 @@ const ALL: CatalogEngine[] = [
     support: 'experimental',
     installEndpoint: '/api/v1/engines/turboquant',
     note: 'Prebuilt binaries are published for macOS (Apple Silicon). Windows/Linux builds are not yet released by the fork.',
+    // Reflects the fork's current macOS-only prebuilt reality (later phases add
+    // Windows/Linux variants when the fork ships those release assets).
+    variants: [
+      {
+        id: 'turboquant-metal',
+        label: 'Metal (Apple)',
+        repo: 'AtomicBot-ai/atomic-llama-cpp-turboquant',
+        requires: { platform: ['darwin'], gpuVendor: ['apple'] },
+        stability: 'experimental',
+        speed: 'fast',
+        hasPrebuilt: true,
+      },
+    ],
   },
 ]
 
