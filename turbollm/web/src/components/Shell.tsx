@@ -33,7 +33,7 @@ export function Shell({
   children: ReactNode
 }) {
   return (
-    <div className="flex h-full">
+    <div className="app-shell flex h-full">
       <NavRail status={status} online={online} version={version} className="hidden md:flex" />
       <div className="flex min-w-0 flex-1 flex-col">
         <EngineProvisionBanner status={status} />

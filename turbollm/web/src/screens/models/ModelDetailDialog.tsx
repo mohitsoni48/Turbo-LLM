@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState, type ReactNode } from 'react'
+﻿import { useEffect, useMemo, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { ChevronDown, ExternalLink, Gauge, RotateCcw, Save, X, Zap } from 'lucide-react'
 import { ApiError } from '../../lib/api'
@@ -7,7 +7,7 @@ import type { LoadProfile, SysGpu } from '../../lib/types'
 import { defaultGpu, defaultVllm } from '../../lib/types'
 import { estimateVram, gpuBudgetMb } from '../../lib/vram'
 import { Button } from '../../components/ui/button'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../components/ui/dialog'
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '../../components/ui/sheet'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -67,6 +67,24 @@ export function ModelDetailDialog({
   useEffect(() => {
     if (detail) setDraft(structuredClone(detail.profile))
   }, [detail])
+
+  // While the panel is open, mark <html> so the app shell pads to the right by the
+  // panel width (.app-shell in index.css) — content resizes instead of overlapping.
+  // On desktop only; on mobile the panel is a full-screen takeover (no padding).
+  // Also restore a previously dragged width (see ConfigResizeHandle).
+  useEffect(() => {
+    if (!modelKey) return
+    const root = document.documentElement
+    const saved = parseInt(readSavedConfigWidth() ?? '', 10)
+    if (saved > 0) {
+      // Clamp against the current viewport — a width saved on a wider screen must
+      // not overflow a narrower one.
+      const w = Math.min(Math.max(saved, CONFIG_MIN_W), configMaxW())
+      root.style.setProperty('--tllm-config-w', `${w}px`)
+    }
+    root.classList.add('tllm-config-open')
+    return () => root.classList.remove('tllm-config-open')
+  }, [modelKey])
 
   // After "Stop & benchmark", the eject takes a moment to drain the engine. Once the
   // status poll reports it stopped, fire the deferred sweep (the runner 409s while busy).
@@ -176,13 +194,20 @@ export function ModelDetailDialog({
 
   return (
     <>
-    <Dialog open={!!modelKey} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-[560px] slim-scroll">
-        <DialogHeader>
-          <DialogTitle className="truncate">{detail?.name ?? 'Model'}</DialogTitle>
-          <DialogDescription>
+    <Sheet open={!!modelKey} onOpenChange={(o) => !o && onClose()} modal={false}>
+      <SheetContent
+        className="overflow-y-auto p-5 slim-scroll"
+        // It's a push panel, not a modal: keep it open while the user works in
+        // the resized content behind it. Close is via the ✕, Esc, or the buttons.
+        onPointerDownOutside={(e) => e.preventDefault()}
+        onInteractOutside={(e) => e.preventDefault()}
+      >
+        <ConfigResizeHandle />
+        <SheetHeader>
+          <SheetTitle className="truncate">{detail?.name ?? 'Model'}</SheetTitle>
+          <SheetDescription>
             {detail ? `${detail.arch} · ${detail.quant} · ${fmtSize(detail.sizeBytes)}` : 'Load settings'}
-          </DialogDescription>
+          </SheetDescription>
           {detail?.sourceRepo && onViewRepo && (
             <button
               type="button"
@@ -193,7 +218,7 @@ export function ModelDetailDialog({
               <ExternalLink size={12} /> Model card &amp; quants on Hugging Face
             </button>
           )}
-        </DialogHeader>
+        </SheetHeader>
 
         {!detail || !draft ? (
           <div className="py-10 text-center text-[13px] text-muted">Loading…</div>
@@ -478,8 +503,8 @@ export function ModelDetailDialog({
             </div>
           </div>
         )}
-      </DialogContent>
-    </Dialog>
+      </SheetContent>
+    </Sheet>
     <AutoTuneResultDialog
       result={benchDone && benchHere ? benchState?.result : undefined}
       modelName={detail?.name}
@@ -487,6 +512,61 @@ export function ModelDetailDialog({
       onCancel={onTuneCancel}
     />
     </>
+  )
+}
+
+// ── Resizable panel (desktop) ────────────────────────────────────────────────
+// The panel width is one CSS var, `--tllm-config-w`, read by both the panel and
+// the shell's right-pad — so updating it resizes both in lock-step. We drag it,
+// clamp it, and remember it across opens.
+const CONFIG_WIDTH_KEY = 'tllm-config-w'
+const CONFIG_MIN_W = 360
+/** Largest the panel may grow: never wider than ~760px, and always leave room for content. */
+function configMaxW() {
+  return Math.max(CONFIG_MIN_W, Math.min(760, window.innerWidth - 220))
+}
+function readSavedConfigWidth(): string | null {
+  try {
+    return localStorage.getItem(CONFIG_WIDTH_KEY)
+  } catch {
+    return null
+  }
+}
+
+/** Thin drag handle on the panel's left seam; updates `--tllm-config-w` live. */
+function ConfigResizeHandle() {
+  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    // Left button only; ignore on touch-less right/middle clicks.
+    if (e.button !== 0) return
+    e.preventDefault()
+    const root = document.documentElement
+    root.classList.add('tllm-config-resizing')
+    const onMove = (ev: PointerEvent) => {
+      // Panel is docked right, so its width is the distance from the right edge.
+      const w = Math.min(Math.max(window.innerWidth - ev.clientX, CONFIG_MIN_W), configMaxW())
+      root.style.setProperty('--tllm-config-w', `${Math.round(w)}px`)
+    }
+    const onUp = () => {
+      root.classList.remove('tllm-config-resizing')
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      try {
+        localStorage.setItem(CONFIG_WIDTH_KEY, getComputedStyle(root).getPropertyValue('--tllm-config-w').trim())
+      } catch {
+        /* ignore quota / disabled storage */
+      }
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
+  return (
+    <div
+      className="tllm-config-resizer"
+      onPointerDown={onPointerDown}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize panel"
+    />
   )
 }
 

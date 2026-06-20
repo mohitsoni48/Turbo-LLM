@@ -84,6 +84,9 @@ html,
 body,
 #root {
   height: 100%;
+  /* Full-height SPA shell — page itself never scrolls (inner panes do), and this
+     clips the config panel while it sits off-screen during its slide animation. */
+  overflow: hidden;
 }
 
 body {
@@ -121,6 +124,100 @@ body {
 }
 .tllm-pulse {
   animation: tllm-pulse 1.2s ease-in-out infinite;
+}
+
+/* Model config panel. Slides in from the RIGHT at every width (Radix data-state).
+     · mobile  — full-screen takeover
+     · desktop — right-docked PUSH panel: no overlay, the app shell shrinks by the
+                 panel's width so content resizes instead of being covered.
+   The panel width lives in one variable so the panel and the shell padding stay
+   in lock-step. */
+:root {
+  --tllm-config-w: min(560px, 45vw);
+}
+
+@keyframes tllm-sheet-in-right {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+@keyframes tllm-sheet-out-right {
+  from { transform: translateX(0); }
+  to { transform: translateX(100%); }
+}
+
+/* Mobile (default): full-screen takeover. */
+.tllm-sheet {
+  inset: 0;
+  width: 100%;
+  max-width: none;
+}
+.tllm-sheet[data-state='open'] {
+  animation: tllm-sheet-in-right 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+}
+.tllm-sheet[data-state='closed'] {
+  animation: tllm-sheet-out-right 0.24s ease-in;
+}
+
+/* Desktop (≥768px, matches the app's nav breakpoint): right-docked panel and a
+   matching right-pad on the shell so the rest of the UI resizes (no overlap). */
+.app-shell {
+  transition: padding-right 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+}
+@media (min-width: 768px) {
+  .tllm-sheet {
+    inset: 0 0 0 auto;
+    width: var(--tllm-config-w);
+    max-width: var(--tllm-config-w);
+    border-left-width: 1px;
+  }
+  html.tllm-config-open .app-shell {
+    padding-right: var(--tllm-config-w);
+  }
+}
+
+/* Drag-to-resize handle on the panel's left seam (desktop only — on mobile the
+   panel is full-screen). Pinned to the viewport at the seam (right offset = panel
+   width) so it never scrolls with the panel content. */
+.tllm-config-resizer {
+  display: none;
+}
+@media (min-width: 768px) {
+  .tllm-config-resizer {
+    display: block;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    right: var(--tllm-config-w);
+    width: 10px;
+    margin-right: -5px;
+    z-index: 51;
+    cursor: col-resize;
+    touch-action: none;
+  }
+  /* Thin seam line that brightens on hover/drag. */
+  .tllm-config-resizer::after {
+    content: '';
+    position: absolute;
+    inset: 0 4px;
+    background: transparent;
+    transition: background-color 0.15s;
+  }
+  .tllm-config-resizer:hover::after,
+  html.tllm-config-resizing .tllm-config-resizer::after {
+    background: var(--accent);
+  }
+}
+/* While dragging: kill the open/push animations so the panel tracks the pointer
+   1:1, and stop text selection / cursor flicker across the whole window. */
+html.tllm-config-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+html.tllm-config-resizing .app-shell {
+  transition: none;
+}
+html.tllm-config-resizing .tllm-sheet {
+  animation: none;
 }
 
 /* Slim scrollbar — used on panels that need a non-intrusive scroll indicator.

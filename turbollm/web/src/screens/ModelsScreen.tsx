@@ -130,7 +130,7 @@ export function ModelsScreen() {
   }
 
   return (
-    <div className="w-full px-6 py-6">
+    <div className="slim-scroll h-full w-full overflow-y-auto px-6 py-6">
       <ScreenHeader
         title="Models"
         description={
