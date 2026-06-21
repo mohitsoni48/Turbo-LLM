@@ -1,13 +1,12 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
-import { Boxes, ChevronRight, CircleSlash, Download, FolderPlus, Loader2, MoreHorizontal, PackageSearch, RefreshCw, SlidersHorizontal, Star, Trash2, X, Zap } from 'lucide-react'
+import { Boxes, ChevronRight, CircleSlash, Download, Loader2, MoreHorizontal, PackageSearch, RefreshCw, SlidersHorizontal, Trash2, Zap } from 'lucide-react'
 import { ApiError, deleteModel } from '../lib/api'
 import { queryKeys, useModelActions, useModelDirs, useModelMutations, useModels, useStatus } from '../lib/queries'
 import type { ModelEntry } from '../lib/types'
 import { EmptyState, InlineError, ScreenHeader } from '../components/common'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
-import { Input } from '../components/ui/input'
 import { Skeleton } from '../components/ui/skeleton'
 import {
   AlertDialog,
@@ -29,6 +28,7 @@ import { toast } from '../components/ui/sonner'
 import { ModelDetailDialog } from './models/ModelDetailDialog'
 import { DiscoverTab } from './models/DiscoverTab'
 import { HfRepoDialog } from './models/HfRepoDialog'
+import { ModelDirs } from './models/ModelDirs'
 
 type Filter = 'all' | 'vision' | 'moe' | 'nextn' | 'embedding'
 type Tab = 'library' | 'discover'
@@ -609,79 +609,6 @@ function partPaths(m: ModelEntry): string[] {
     parts.push(`${dir}${sep}${prefix}-${n}-of-${t}.gguf`)
   }
   return parts
-}
-
-function ModelDirs({
-  dirs,
-  primaryDir,
-  mut,
-}: {
-  dirs: string[]
-  primaryDir: string
-  mut: ReturnType<typeof useModelMutations>
-}) {
-  const [value, setValue] = useState('')
-  const addError = mut.addDir.error instanceof ApiError ? mut.addDir.error.message : null
-
-  const add = () => {
-    const dir = value.trim()
-    if (!dir) return
-    mut.addDir.mutate(dir, { onSuccess: () => setValue('') })
-  }
-
-  return (
-    <div className="mb-5 rounded-lg border border-border bg-panel-2 p-4">
-      <div className="mb-2 text-[13px] font-medium text-ink">Model folders</div>
-      {dirs.length > 0 && (
-        <div className="mb-3 flex flex-col gap-1.5">
-          {dirs.map((d) => {
-            const isPrimary = d === primaryDir
-            return (
-              <div key={d} className="group/dir flex items-center gap-2 text-[13px]">
-                <span className="flex-1 truncate font-mono text-muted">{d}</span>
-                {isPrimary ? (
-                  <Tag tone="ok">Primary</Tag>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => mut.setPrimaryDir.mutate(d)}
-                    disabled={mut.setPrimaryDir.isPending}
-                    title="Downloads and imports will land in this folder"
-                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-faint opacity-0 transition-opacity hover:text-ink focus:opacity-100 group-hover/dir:opacity-100"
-                  >
-                    <Star size={12} />
-                    Set as primary
-                  </button>
-                )}
-                <button
-                  type="button"
-                  aria-label={`Remove ${d}`}
-                  onClick={() => mut.removeDir.mutate(d)}
-                  className="rounded p-1 text-muted transition-colors hover:text-ink"
-                >
-                  <X size={14} />
-                </button>
-              </div>
-            )
-          })}
-        </div>
-      )}
-      <div className="flex items-center gap-2">
-        <Input
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && add()}
-          placeholder="Paste an absolute folder path, e.g. D:\\models"
-          className="flex-1 font-mono text-[13px]"
-        />
-        <Button size="sm" onClick={add} disabled={mut.addDir.isPending || !value.trim()}>
-          <FolderPlus size={14} />
-          Add folder
-        </Button>
-      </div>
-      {addError && <p className="mt-2 text-[12px]" style={{ color: 'var(--err)' }}>{addError}</p>}
-    </div>
-  )
 }
 
 function FilterChip({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
