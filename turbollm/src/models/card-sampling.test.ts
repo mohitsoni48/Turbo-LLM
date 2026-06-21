@@ -143,6 +143,17 @@ test('relevantCardExcerpt: long card centers the window on a back-half settings 
   assert.ok(ex.includes('Recommended Settings'), 'window should include the surrounding heading')
 })
 
+test('relevantCardExcerpt: prefers a "recommended settings" heading over an early bare param', () => {
+  // An early bare `temperature 0` (a demo) sits in the head; the real recommendation block is
+  // deep in the card. The window should center on the heading, not the early demo mention.
+  const head = 'Run with temperature 0 for the demo.\n' + 'lorem '.repeat(2000) // ~12k chars
+  const card = head + '\n## Recommended Settings\ntemperature: 1.0, top_p: 0.95\n' + 'tail '.repeat(400)
+  const ex = relevantCardExcerpt(card, 8000)
+  assert.ok(ex.includes('Recommended Settings'), 'window centers on the recommendation heading')
+  assert.ok(ex.includes('temperature: 1.0'))
+  assert.ok(!ex.includes('for the demo'), 'the early demo mention is outside the window')
+})
+
 test('relevantCardExcerpt: cue already in the head → head window', () => {
   const card = 'temperature: 0.6 at the very top\n' + 'x'.repeat(20000)
   const ex = relevantCardExcerpt(card, 8000)

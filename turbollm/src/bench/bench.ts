@@ -698,11 +698,16 @@ export class BenchRunner {
   // ---- card-derived recommended sampling (ADR-099) ------------------------
 
   /** Resolve the model's HF card and extract recommended sampling (temp/top_k/top_p/min_p).
-   *  HYBRID: the deterministic heuristic parser runs first; only if it finds nothing does the
-   *  just-tuned local model read its own card and emit JSON (the LLM fallback). Returns
-   *  undefined when the model's repo can't be resolved (e.g. a hand-placed file), the card is
-   *  missing/unreachable, or nothing parseable is found — the caller then leaves sampling at the
-   *  resolved defaults. Never throws (all failures collapse to undefined). */
+   *  Order (ADR-099): (1) heuristic on the LOCAL repo card; (2) heuristic on the BASE model's card
+   *  — most local GGUFs are third-party requants (lmstudio-community/unsloth/noctrex/…) whose card
+   *  omits the author's recommended sampling, but they declare the original model, whose card has
+   *  it (e.g. Gemma QAT → `google/gemma-…`); (3) LLM fallback (one reload) on the richer card for
+   *  prose-only recommendations. Returns undefined when the repo can't be resolved (hand-placed
+   *  file), no card is reachable, or nothing parseable is found — the caller then leaves sampling
+   *  at the resolved defaults. Never throws.
+   *
+   *  NOTE: a gated base model (e.g. Gemma's `google/…`) needs a configured HF token to fetch — without
+   *  one its card 401s and we fall through (sampling unchanged). */
   private async extractCardSampling(
     entry: ModelEntry,
     winningProfile: LoadProfile,
@@ -712,19 +717,27 @@ export class BenchRunner {
     const repo = inferRepoFromPath(entry.path, this.store.snapshot().modelDirs)
     if (!repo) return undefined // hand-placed file outside a model dir → no upstream card
     this.state = { ...this.state, step: 'Reading model-card recommendations…' }
-    let card = ''
-    try {
-      card = await this.hf.fetchModelCard(repo)
-    } catch {
-      return undefined
+
+    // 1. Local GGUF repo card — heuristic.
+    const localCard = await this.hf.fetchModelCard(repo).catch(() => '')
+    const localH = parseCardSampling(localCard)
+    if (hasAnySampling(localH)) return localH
+
+    // 2. Base-model fallback — the original model's card (where the author states the recommendation).
+    let baseCard = ''
+    if (!this.cancelled) {
+      const baseRepo = await this.hf.baseModelOf(repo).catch(() => null)
+      if (baseRepo && baseRepo !== repo) {
+        baseCard = await this.hf.fetchModelCard(baseRepo).catch(() => '')
+        const baseH = parseCardSampling(baseCard)
+        if (hasAnySampling(baseH)) return baseH
+      }
     }
-    if (!card) return undefined
 
-    const heuristic = parseCardSampling(card)
-    if (hasAnySampling(heuristic)) return heuristic // deterministic fast path
-
-    // LLM fallback: prose-only / unusual card — ask the just-tuned model to read it.
+    // 3. LLM fallback (one reload) on the richer card — prose-only / unusual phrasing the scan misses.
     if (this.cancelled) return undefined
+    const card = baseCard.length > localCard.length ? baseCard : localCard
+    if (!card) return undefined
     const llm = await this.llmExtractSampling(entry, winningProfile, caps, sys, card).catch(() => undefined)
     return llm && hasAnySampling(llm) ? llm : undefined
   }

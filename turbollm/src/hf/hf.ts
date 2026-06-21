@@ -7,10 +7,11 @@ import { quantFromName } from '../gguf/gguf'
 
 const BASE = 'https://huggingface.co'
 const CACHE_TTL_MS = 5 * 60 * 1000
-/** Cap for the model card when read for sampling extraction (ADR-099). Larger than the
- *  12k display cap so a recommended-settings section in the back half of a long card
- *  (common with unsloth/bartowski-style requant READMEs) is still in-window. */
-const CARD_EXTRACT_MAX = 40000
+/** Cap for the model card when read for sampling extraction (ADR-099). Much larger than the
+ *  12k display cap because big model cards put their recommended-settings section deep in the
+ *  card — e.g. Qwen3.5 cards run ~80–95k chars with the "recommended sampling parameters" block
+ *  near char 64–80k. 120k keeps those in-window for the text scan while staying a bounded slice. */
+const CARD_EXTRACT_MAX = 120000
 
 /** Carries a machine-checkable `code` for the API error envelope. */
 export class HfError extends Error {
@@ -165,6 +166,27 @@ export class HfClient {
     return this.getCard(repo, CARD_EXTRACT_MAX)
   }
 
+  /** Resolve the upstream base model for a repo (ADR-099 base-model fallback): the `base_model`
+   *  declared in the repo's HF card metadata. Most local GGUFs are third-party requants
+   *  (lmstudio-community / unsloth / noctrex / …) whose card omits the author's recommended
+   *  sampling — but they name the ORIGINAL model, whose card has it. Returns `owner/name`, or null
+   *  when none is declared / unreachable. Handles the array form and the `base_model:[relation:]repo`
+   *  tag form. Cached via {@link getJson}. */
+  async baseModelOf(repo: string): Promise<string | null> {
+    try {
+      const info = await this.getJson<RawRepoInfo>(`${BASE}/api/models/${repo}`)
+      const bm = info.cardData?.base_model
+      const first = Array.isArray(bm) ? bm[0] : bm
+      if (typeof first === 'string' && first.includes('/')) return first
+      const tag = (info.tags ?? []).find((t) => t.startsWith('base_model:'))
+      // Tag forms: `base_model:owner/repo` or newer `base_model:<relation>:owner/repo`.
+      const fromTag = tag ? tag.split(':').pop() ?? '' : ''
+      return fromTag.includes('/') ? fromTag : null
+    } catch {
+      return null
+    }
+  }
+
   /** Fetch the repo README (the model card), strip its YAML frontmatter, and cap the
    *  length. Best-effort — a missing/unreachable README yields '' rather than failing the
    *  whole repo-detail request. The full (up to {@link CARD_EXTRACT_MAX}) card is cached and
@@ -277,7 +299,7 @@ interface RawRepoInfo {
   likes?: number
   gated?: boolean | string
   tags?: string[]
-  cardData?: { license?: string }
+  cardData?: { license?: string; base_model?: string | string[] }
 }
 
 interface RawTreeEntry {

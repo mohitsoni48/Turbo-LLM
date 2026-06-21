@@ -100,9 +100,11 @@ export function hasAnySampling(s: CardSampling): boolean {
  *  Falls back to the head when no cue is found or the cue is already in the head. */
 export function relevantCardExcerpt(card: string, maxLen = 8000): string {
   if (card.length <= maxLen) return card
-  const cue = /\b(?:temp(?:erature)?|top[_\-\s]?[pk]|min[_\-\s]?p|recommended\s+settings|sampling\s+(?:settings|parameters|params))\b/i.exec(
-    card,
-  )
+  // Prefer a recommendation-context cue (a "recommended settings / sampling parameters / best
+  // practices" heading) over a bare param name — a bare `temperature` often first appears in an
+  // early usage snippet, whereas the heading marks the real recommendation block.
+  const strong = /\b(?:recommended\s+(?:settings|sampling|parameters)|sampling\s+(?:settings|parameters|params)|best\s+practices?|generation\s+config)\b/i.exec(card)
+  const cue = strong ?? /\b(?:temp(?:erature)?|top[_\-\s]?[pk]|min[_\-\s]?p)\b/i.exec(card)
   if (!cue || cue.index < maxLen) return card.slice(0, maxLen)
   // Start a little before the cue so its surrounding heading/context is included.
   const start = Math.max(0, cue.index - Math.floor(maxLen * 0.3))
