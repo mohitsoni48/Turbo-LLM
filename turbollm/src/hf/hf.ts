@@ -152,6 +152,12 @@ export class HfClient {
     }
   }
 
+  /** Public model-card fetch (ADR-099): the cleaned README for `owner/repo`, or '' when
+   *  missing/unreachable. Used by auto-tune to read recommended sampling from the card. */
+  fetchModelCard(repo: string): Promise<string> {
+    return this.getCard(repo)
+  }
+
   /** Fetch the repo README (the model card), strip its YAML frontmatter, and cap the
    *  length for display. Best-effort — a missing/unreachable README yields '' rather
    *  than failing the whole repo-detail request. Cached like other HF reads. */

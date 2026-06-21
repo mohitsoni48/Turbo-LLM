@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { ChevronDown, ExternalLink, Gauge, RotateCcw, Save, X, Zap } from 'lucide-react'
 import { ApiError } from '../../lib/api'
 import { useBenchActions, useBenchState, useEngines, useModelActions, useModelDetail, useStatus } from '../../lib/queries'
-import type { LoadProfile, SysGpu } from '../../lib/types'
+import type { CardSampling, LoadProfile, SysGpu } from '../../lib/types'
 import { defaultGpu, defaultVllm } from '../../lib/types'
 import { estimateVram, gpuBudgetMb } from '../../lib/vram'
 import { Button } from '../../components/ui/button'
@@ -578,11 +578,20 @@ function AutoTuneResultDialog({
   onSave,
   onCancel,
 }: {
-  result?: { params: { ctx: number; ngl: number; nCpuMoe: number }; tps: number; vramMb: number | null }
+  result?: { params: { ctx: number; ngl: number; nCpuMoe: number }; tps: number; vramMb: number | null; recommendedSampling?: CardSampling }
   modelName?: string
   onSave: () => void
   onCancel: () => void
 }) {
+  const rec = result?.recommendedSampling
+  const recParts = rec
+    ? ([
+        rec.temp != null && `temp ${rec.temp}`,
+        rec.topK != null && `top_k ${rec.topK}`,
+        rec.topP != null && `top_p ${rec.topP}`,
+        rec.minP != null && `min_p ${rec.minP}`,
+      ].filter(Boolean) as string[])
+    : []
   return (
     <AlertDialog open={!!result} onOpenChange={(o) => { if (!o) onCancel() }}>
       <AlertDialogContent>
@@ -603,6 +612,19 @@ function AutoTuneResultDialog({
                   )}
                   {' '}· <span className="font-mono text-ink">{result.params.ctx.toLocaleString()}</span> ctx
                   {result.vramMb != null && <> · ~<span className="font-mono text-ink">{result.vramMb}</span> MB VRAM</>}
+                </span>
+              )}
+              {recParts.length > 0 && (
+                <span
+                  className="rounded-md border px-2.5 py-2"
+                  style={{
+                    borderColor: 'color-mix(in srgb, var(--accent) 35%, var(--border))',
+                    background: 'color-mix(in srgb, var(--accent) 5%, transparent)',
+                  }}
+                >
+                  <span className="text-ink">Recommended sampling from the model card:</span>{' '}
+                  <span className="font-mono text-ink">{recParts.join(' · ')}</span>
+                  <span className="mt-0.5 block text-faint">Applied on Save — adjust any time in Sampling below.</span>
                 </span>
               )}
               <span className="text-faint">Save applies these settings to {modelName ?? 'this model'} and closes.</span>

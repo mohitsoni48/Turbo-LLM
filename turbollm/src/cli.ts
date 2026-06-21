@@ -154,7 +154,7 @@ const hf = new HfClient(() => store.snapshot().hf.token, version)
 const downloads = new DownloadManager(store, () => void scanner.rescan(), () => hf.authHeaders())
 // Auto-benchmark + auto-tune runner (Differentiator #2, spec 09). Owns the engine
 // exclusively for a run; reuses manager/profile control rather than reimplementing it.
-const bench = new BenchRunner(manager, store, scanner, registry, version)
+const bench = new BenchRunner(manager, store, scanner, registry, version, hf)
 // ComfyUI GPU coordinator (push): the installed ComfyUI gate node calls
 // /api/v1/comfyui/acquire|release to unload/reload the model around renders. Event-
 // driven — no polling. No-op until enabled in Settings + the node is installed.
