@@ -463,6 +463,30 @@ turbollm/
 
 ---
 
+## Screenshots
+
+The unified engine catalog: a hardware-aware recommendation up top, then every supported engine (llama.cpp, KoboldCpp, llamafile, vLLM, and forks) with build-from-source for the rest.
+
+<p align="center"><img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/engines.png" width="860" alt="TurboLLM Engines screen: hardware-aware recommendation and a unified engine catalog" /></p>
+
+Chat mid-conversation: pinned model selector, a live context meter, streaming reply with running token count and tokens/sec.
+
+<p align="center"><img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/chat.png" width="860" alt="TurboLLM Chat screen: model selector, live context meter, streaming reply with tokens/sec" /></p>
+
+The Models library: GGUF and MLX models discovered in your folders, each with measured tokens/sec and a VRAM-fit verdict, grouped by quant.
+
+<p align="center"><img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/models.png" width="860" alt="TurboLLM Models library: discovered models with measured tokens/sec and quant grouping" /></p>
+
+Per-model tuning: context length, GPU layers, KV-cache type, flash attention, and speculative decoding, all with a live VRAM-fit verdict.
+
+<p align="center"><img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/tuning.png" width="860" alt="TurboLLM model tuning panel: context, GPU layers, KV-cache type, flash attention, VRAM-fit verdict" /></p>
+
+Customize: pick a web-search provider and wire up MCP tool servers the model can call during conversations.
+
+<p align="center"><img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/customize.png" width="860" alt="TurboLLM Customize screen: web-search provider and MCP tool servers" /></p>
+
+---
+
 ## License
 
 Source-available under the **Functional Source License 1.1 (Apache-2.0 future grant)** — SPDX
