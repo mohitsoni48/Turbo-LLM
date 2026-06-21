@@ -587,8 +587,8 @@ function AutoTuneResultDialog({
   const recParts = rec
     ? ([
         rec.temp != null && `temp ${rec.temp}`,
-        rec.topK != null && `top_k ${rec.topK}`,
         rec.topP != null && `top_p ${rec.topP}`,
+        rec.topK != null && `top_k ${rec.topK}`,
         rec.minP != null && `min_p ${rec.minP}`,
       ].filter(Boolean) as string[])
     : []

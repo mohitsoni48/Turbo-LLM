@@ -225,10 +225,19 @@ export class BenchRunner {
       // persists it. Fully fail-safe — no card / nothing parsed leaves sampling untouched
       // (done-when: "no card → defaults unchanged"). The engine is stopped here; the LLM
       // fallback (only when the heuristic finds nothing) reloads the winner briefly itself.
+      // Gate on the global deadline too (not just cancel): a run that already spent the full
+      // TOTAL_BUDGET_MS must not spawn a multi-minute LLM-fallback reload past budget.
       let recommended: CardSampling | undefined
-      if (!this.cancelled) {
+      if (!this.cancelled && Date.now() <= this.deadline) {
         recommended = await this.extractCardSampling(entry, best.profile, caps, sys).catch(() => undefined)
         await this.manager.stopAndWait().catch(() => {}) // in case the LLM fallback loaded a model
+      }
+      // A cancel DURING extraction (the LLM fallback can run for minutes) must not resurrect the
+      // results dialog or re-hold a profile the user just discarded: cancel() cleared winning +
+      // result, but couldn't stop this still-running run. Re-check before committing the winner.
+      if (this.cancelled) {
+        this.state = { running: false, modelKey, done: true, candidates: results }
+        return
       }
       const profile =
         recommended && hasAnySampling(recommended)
