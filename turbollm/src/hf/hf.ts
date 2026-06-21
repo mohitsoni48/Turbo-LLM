@@ -7,6 +7,10 @@ import { quantFromName } from '../gguf/gguf'
 
 const BASE = 'https://huggingface.co'
 const CACHE_TTL_MS = 5 * 60 * 1000
+/** Cap for the model card when read for sampling extraction (ADR-099). Larger than the
+ *  12k display cap so a recommended-settings section in the back half of a long card
+ *  (common with unsloth/bartowski-style requant READMEs) is still in-window. */
+const CARD_EXTRACT_MAX = 40000
 
 /** Carries a machine-checkable `code` for the API error envelope. */
 export class HfError extends Error {
@@ -153,28 +157,32 @@ export class HfClient {
   }
 
   /** Public model-card fetch (ADR-099): the cleaned README for `owner/repo`, or '' when
-   *  missing/unreachable. Used by auto-tune to read recommended sampling from the card. */
+   *  missing/unreachable. Used by auto-tune to read recommended sampling from the card.
+   *  Uses a LARGER cap than the display path: popular requanters (e.g. unsloth) put their
+   *  recommended-settings section in the BACK HALF of a long card, past the 12k display cap —
+   *  the extra window is what lets the heuristic actually find them (live-verified). */
   fetchModelCard(repo: string): Promise<string> {
-    return this.getCard(repo)
+    return this.getCard(repo, CARD_EXTRACT_MAX)
   }
 
   /** Fetch the repo README (the model card), strip its YAML frontmatter, and cap the
-   *  length for display. Best-effort — a missing/unreachable README yields '' rather
-   *  than failing the whole repo-detail request. Cached like other HF reads. */
-  private async getCard(repo: string): Promise<string> {
+   *  length. Best-effort — a missing/unreachable README yields '' rather than failing the
+   *  whole repo-detail request. The full (up to {@link CARD_EXTRACT_MAX}) card is cached and
+   *  each caller slices to its own `maxLen` (display 12k; extraction larger), so the two
+   *  paths share one fetch without the cache returning a too-short slice. */
+  private async getCard(repo: string, maxLen = 12000): Promise<string> {
     const url = `${BASE}/${repo}/raw/main/README.md`
     const now = Date.now()
     const hit = this.cache.get(url)
-    if (hit && now - hit.at < CACHE_TTL_MS) return hit.value as string
+    if (hit && now - hit.at < CACHE_TTL_MS) return (hit.value as string).slice(0, maxLen)
     try {
       const res = await fetch(url, { headers: this.authHeaders(), redirect: 'follow' })
       if (!res.ok) return ''
       const raw = await res.text()
-      // Strip a leading `---\n…\n---` YAML frontmatter block, then cap the size.
-      const body = raw.replace(/^﻿?---\r?\n[\s\S]*?\r?\n---\r?\n/, '').trim()
-      const card = body.slice(0, 12000)
-      this.cache.set(url, { at: now, value: card })
-      return card
+      // Strip a leading `---\n…\n---` YAML frontmatter block, then cap (cache the full window).
+      const full = raw.replace(/^﻿?---\r?\n[\s\S]*?\r?\n---\r?\n/, '').trim().slice(0, CARD_EXTRACT_MAX)
+      this.cache.set(url, { at: now, value: full })
+      return full.slice(0, maxLen)
     } catch {
       return ''
     }

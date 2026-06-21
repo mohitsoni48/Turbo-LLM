@@ -757,7 +757,14 @@ export class BenchRunner {
 
   /** One non-streaming completion that returns the generated TEXT (vs {@link chat}, which
    *  returns timings). Used by the card-sampling LLM fallback. Honors the per-call timeout and
-   *  the cancel kill-switch; null on a non-OK response. */
+   *  the cancel kill-switch; null on a non-OK response.
+   *
+   *  `enable_thinking: false` is REQUIRED here (live-verified): a reasoning model (Gemma 4,
+   *  Qwen3, …) otherwise spends the whole token budget on hidden reasoning and either emits no
+   *  JSON or truncates it (`finish_reason: length`) — the extraction returns nothing on exactly
+   *  the models people run. Card extraction is a structured task that needs no reasoning; with
+   *  thinking off, even a 4B model emits clean JSON in well under 200 tokens. Templates that
+   *  don't know the kwarg ignore it. */
   private async chatText(target: string, content: string, maxTokens: number, timeoutMs: number): Promise<string | null> {
     const signals: AbortSignal[] = [AbortSignal.timeout(timeoutMs)]
     if (this.abort) signals.push(this.abort.signal)
@@ -770,6 +777,7 @@ export class BenchRunner {
         max_tokens: maxTokens,
         temperature: 0,
         stream: false,
+        chat_template_kwargs: { enable_thinking: false },
       }),
       signal: signals.length > 1 ? AbortSignal.any(signals) : signals[0],
     })
