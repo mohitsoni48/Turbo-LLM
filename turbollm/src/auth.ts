@@ -54,6 +54,16 @@ function isLoopback(c: Context): boolean | null {
   return LOOPBACK.has(addr)
 }
 
+/** True when a request is local to the daemon host: either the daemon is loopback-only
+ *  bound (no LAN listener at all) or the request came from a loopback address. Use to
+ *  gate **local-admin actions that execute a caller-supplied binary** (add/scan engine)
+ *  so a LAN client can't trigger arbitrary execution even with a valid API key. Fails
+ *  closed: an undetermined address while LAN-exposed is treated as remote. */
+export function isLocalRequest(c: Context, d: Deps): boolean {
+  if (!d.store.snapshot().daemon.lanBind) return true // loopback-only bind → always local
+  return isLoopback(c) === true
+}
+
 /** LAN auth middleware (spec 06 §5). Register AFTER cors + the Server header and
  *  BEFORE the API/chat/gateway routes. Enforcement only kicks in when the daemon
  *  is LAN-exposed (lanBind=true); with the default loopback-only bind it is a pure

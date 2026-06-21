@@ -19,8 +19,11 @@ import { latestCommitSha, latestReleaseTag } from './download'
 
 // ─── Layer 1a: version/tag comparison (pure) ─────────────────────────────────
 
-/** The outcome of comparing two version strings. `unknown` when the two can't be
- *  meaningfully compared (different/unparseable formats) — the honest "I can't tell". */
+/** The outcome of comparing INSTALLED vs LATEST, stated from the latest's perspective:
+ *  `newer` = upstream/latest is ahead of installed (i.e. an update is available),
+ *  `older` = installed is ahead of latest, `equal` = same version. `unknown` when the
+ *  two can't be meaningfully compared (different/unparseable formats) — the honest
+ *  "I can't tell" (we never guess across formats). */
 export type CompareResult = 'older' | 'equal' | 'newer' | 'unknown'
 
 /** Parse a llama.cpp-style build tag (`b9608`, `B9761`) into its integer build

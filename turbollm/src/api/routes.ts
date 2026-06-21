@@ -13,6 +13,7 @@ import { abortAllInFlightChats } from '../chat/chat-routes'
 import { NameTakenError, NotFoundError } from '../engines/registry'
 import { ProbeError, probe } from '../engines/probe'
 import { resolveServerBinary, suggestEngineName } from '../engines/scan'
+import { isLocalRequest } from '../auth'
 import {
   LLAMA_BUILD,
   availableBackends,
@@ -519,6 +520,10 @@ export function registerApi(app: Hono, d: Deps): void {
   })
 
   app.post('/api/v1/engines', async (c) => {
+    // Adding an engine probes (executes) a caller-supplied binary — a local-admin action.
+    // Refuse it from non-loopback callers even with a key (defense in depth).
+    if (!isLocalRequest(c, d))
+      return err(c, 403, 'forbidden', 'Engines can only be added from the machine running TurboLLM.')
     const b = await body<{ name?: string; binPath?: string; sourceRepo?: string; sourceBranch?: string }>(c)
     if (!b.binPath || !b.binPath.trim()) return err(c, 400, 'invalid_config_value', 'binPath is required.')
     try {
@@ -541,6 +546,10 @@ export function registerApi(app: Hono, d: Deps): void {
   // flow. Registration still happens via POST /api/v1/engines. `{found:false}` (200)
   // when no binary turns up; ProbeError → 400 so wrong-OS / timeout reach the UI.
   app.post('/api/v1/engines/scan', async (c) => {
+    // Scanning probes (executes) the binary it finds — gate to the local host so a LAN
+    // client can't trigger arbitrary execution by pointing at any path (matches POST /engines).
+    if (!isLocalRequest(c, d))
+      return err(c, 403, 'forbidden', 'Engine scanning is only available on the machine running TurboLLM.')
     const b = await body<{ path?: string }>(c)
     const path = (b.path ?? '').trim()
     if (!path) return err(c, 400, 'invalid_config_value', 'path is required.')

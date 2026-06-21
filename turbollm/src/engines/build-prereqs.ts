@@ -145,9 +145,11 @@ export async function checkBuildPrereqs(): Promise<BuildPrereqs> {
  *  binary lands so the user knows what to point "Add your own engine" at. */
 export function buildCommands(repoUrl: string, branch?: string): string[] {
   const b = (branch ?? '').trim()
+  // Quote the branch + URL so the copy-pasted command survives a space/special char
+  // in either (display-only; values come from the catalog, but the user pastes this).
   const clone = b
-    ? `git clone --branch ${b} --depth 1 ${repoUrl} turbo-build`
-    : `git clone --depth 1 ${repoUrl} turbo-build`
+    ? `git clone --branch "${b}" --depth 1 "${repoUrl}" turbo-build`
+    : `git clone --depth 1 "${repoUrl}" turbo-build`
   return [
     clone,
     'cd turbo-build',

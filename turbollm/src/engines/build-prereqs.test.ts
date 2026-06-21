@@ -4,11 +4,11 @@ import { buildCommands } from './build-prereqs'
 
 test('buildCommands: includes --branch when a branch is given', () => {
   const cmds = buildCommands('https://github.com/owner/repo', 'main')
-  assert.equal(cmds[0], 'git clone --branch main --depth 1 https://github.com/owner/repo turbo-build')
+  assert.equal(cmds[0], 'git clone --branch "main" --depth 1 "https://github.com/owner/repo" turbo-build')
 })
 
 test('buildCommands: omits --branch when no branch (or empty/whitespace) is given', () => {
-  const expected = 'git clone --depth 1 https://github.com/owner/repo turbo-build'
+  const expected = 'git clone --depth 1 "https://github.com/owner/repo" turbo-build'
   assert.equal(buildCommands('https://github.com/owner/repo')[0], expected)
   assert.equal(buildCommands('https://github.com/owner/repo', '')[0], expected)
   assert.equal(buildCommands('https://github.com/owner/repo', '   ')[0], expected)
