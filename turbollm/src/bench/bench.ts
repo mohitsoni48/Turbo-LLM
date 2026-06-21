@@ -53,9 +53,11 @@ export interface BenchState {
     tps: number
     ttftMs: number
     vramMb: number | null
-    /** Recommended sampling read from the model's HF card (ADR-099), when one was found.
-     *  Already merged into the winning profile so Save persists it; surfaced here so the
-     *  results dialog can show what the card recommended. Absent when no card / nothing parsed. */
+    /** The COMPLETE sampling the winning profile will be saved with (card values already
+     *  merged in). Lets the results dialog show the full config as a table. */
+    sampling?: CardSampling
+    /** The subset of `sampling` that came from the HF card (ADR-099), when any was found —
+     *  used to mark those rows "from model card". Absent when no card / nothing parsed. */
     recommendedSampling?: CardSampling
   }
 }
@@ -256,6 +258,14 @@ export class BenchRunner {
           tps: best.cand.tps ?? 0,
           ttftMs: best.cand.ttftMs ?? 0,
           vramMb: best.cand.vramMb,
+          // The full sampling that Save will persist (winning profile, card values merged in) so
+          // the results dialog can show the COMPLETE config — not just the card-derived delta.
+          sampling: {
+            temp: profile.sampling.temp,
+            topK: profile.sampling.topK,
+            topP: profile.sampling.topP,
+            minP: profile.sampling.minP,
+          },
           ...(recommended && hasAnySampling(recommended) ? { recommendedSampling: recommended } : {}),
         },
         candidates: results,
