@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Moon, Sun, Monitor, Save, ExternalLink, ShieldAlert, Sparkles, RefreshCw, Check, X, Loader2, AlertTriangle } from 'lucide-react'
+import { Moon, Sun, Monitor, Save, ExternalLink, ShieldAlert, Sparkles, RefreshCw, Check, X, Loader2, AlertTriangle, ArrowUpCircle } from 'lucide-react'
 import {
   PERSONAS, getDefaultPersonaId, getPersonalization, savePersonalization,
   setDefaultPersonaId, type PersonaId, type Personalization,
@@ -19,7 +19,9 @@ import {
   useStatus,
   useSysInfo,
   useTelemetryPreview,
+  useAppUpdate,
 } from '../lib/queries'
+import { CopyButton } from '../components/ui/copy-button'
 import { ModelDirs } from './models/ModelDirs'
 import { useConversationMutations } from '../lib/chat-queries'
 import { ApiError, type TelemetryLevel } from '../lib/api'
@@ -463,6 +465,9 @@ export function SettingsScreen() {
 
         {/* Advanced (spec 08 §2): daemon restart */}
         <AdvancedSection onRestart={requestRestart} />
+
+        {/* About + app self-update check (F-006) */}
+        <AboutSection />
 
         {/* Help */}
         <HelpSection />
@@ -1309,6 +1314,63 @@ function PersonalizationSection() {
           </Button>
         </div>
       </div>
+    </section>
+  )
+}
+
+// ── About + app self-update check (F-006, ADR-031) ────────────────────────────
+// Shows the running version and, when npm has a newer TurboLLM, an "update available"
+// chip with the install command to copy. Informational only — npm performs the upgrade;
+// the app never auto-updates itself. Offline-silent: when the npm check couldn't run we
+// just show the current version with no error (never a false "up to date").
+
+const APP_UPDATE_COMMAND = 'npm i -g turbollm'
+
+function AboutSection() {
+  // The running version always comes from /status (present immediately); the npm
+  // comparison rides the separate, offline-first app-update check.
+  const { data: status } = useStatus()
+  const { data: update } = useAppUpdate()
+  const installed = update?.installed || status?.version || ''
+  const hasUpdate = !!update?.hasUpdate && !!update?.latest
+
+  return (
+    <section className="rounded-lg border border-border bg-panel p-4">
+      <h2 className="mb-3 text-[13px] font-semibold uppercase tracking-wide text-faint">About</h2>
+
+      <div className="flex items-center justify-between py-1">
+        <div>
+          <div className="text-[14px] font-medium text-ink">Version</div>
+          <div className="text-[12px] text-muted">The TurboLLM version this daemon is running</div>
+        </div>
+        <span className="font-mono text-[13px] text-ink">{installed ? `v${installed}` : '—'}</span>
+      </div>
+
+      {hasUpdate ? (
+        <div
+          className="mt-2 flex flex-col gap-2 rounded-md border p-3"
+          style={{
+            borderColor: 'color-mix(in srgb, var(--accent) 40%, var(--border))',
+            background: 'color-mix(in srgb, var(--accent) 6%, transparent)',
+          }}
+        >
+          <div className="flex items-center gap-2 text-[13px] font-medium" style={{ color: 'var(--accent)' }}>
+            <ArrowUpCircle size={15} />
+            TurboLLM v{update!.latest} is available
+          </div>
+          <div className="text-[12px] text-muted">Update from your terminal:</div>
+          <div className="flex items-center justify-between gap-2 rounded-md border border-border bg-bg px-2.5 py-1.5">
+            <code className="select-all font-mono text-[12px] text-ink">{APP_UPDATE_COMMAND}</code>
+            <CopyButton text={APP_UPDATE_COMMAND} />
+          </div>
+        </div>
+      ) : update?.latest && !update.hasUpdate ? (
+        // Checked successfully and current — a quiet confirmation, no call to action.
+        <div className="mt-1 inline-flex items-center gap-1.5 text-[12px] text-faint">
+          <Check size={13} style={{ color: 'var(--ok)' }} />
+          You're on the latest version
+        </div>
+      ) : null}
     </section>
   )
 }

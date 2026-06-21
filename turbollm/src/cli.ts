@@ -10,6 +10,7 @@ import { Registry } from './engines/registry'
 import { ProvisionState } from './engines/provision-state'
 import { UpdateChecker } from './engines/update'
 import { UpdateScheduler } from './engines/update-scheduler'
+import { AppUpdateChecker } from './app-update'
 import { applyEngineUpdate } from './engines/update-apply'
 import { seedDefaultEngines } from './engines/seed'
 import { engineAcceptsFormat } from './engines/compat'
@@ -168,9 +169,18 @@ void (async () => {
   await toolRegistry.syncMcpServers(cfg.mcp.servers)
 })()
 const startedAt = Date.now()
+// App self-update checker (F-006, ADR-031): is a newer TurboLLM published on npm than
+// the version we're running? Informational only — npm does the upgrade. The route serves
+// this cache offline-first; the startup check below warms it so the chip is ready.
+const appUpdates = new AppUpdateChecker(version)
 // `requestRestart` is attached after the server is created (it must close over it).
-const deps: Deps = { store, registry, manager, scanner, hashes, db, provision, updates, hf, downloads, bench, modelRouter, comfy, tools: toolRegistry, version, startedAt }
+const deps: Deps = { store, registry, manager, scanner, hashes, db, provision, updates, appUpdates, hf, downloads, bench, modelRouter, comfy, tools: toolRegistry, version, startedAt }
 const app = createApp(deps)
+
+// Warm the app-update cache shortly after boot (ADR-031: "once per daemon start") so the
+// Settings chip is ready without the user clicking refresh. Offline-silent; unref'd so it
+// never holds the process open. The 24h re-check is on-demand when the cache goes stale.
+setTimeout(() => void appUpdates.check(AbortSignal.timeout(10_000)).catch(() => {}), 5_000).unref()
 
 // Background auto-update checker (ADR-085, Phase 6): runs shortly after boot + every
 // ~24h. Refreshes per-engine update status; for 'auto' engines with an available update

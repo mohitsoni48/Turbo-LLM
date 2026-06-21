@@ -4,6 +4,7 @@ import type { ComfyGuard } from './engines/comfy-guard'
 import type { Registry } from './engines/registry'
 import type { ProvisionState } from './engines/provision-state'
 import type { UpdateChecker } from './engines/update'
+import type { AppUpdateChecker } from './app-update'
 import type { Scanner } from './models/scanner'
 import type { HashStore } from './models/hashes'
 import type { ConversationStore } from './chat/db'
@@ -24,6 +25,10 @@ export interface Deps {
   /** Honest engine update checker (ADR-085): per-engine installed/latest/hasUpdate with
    *  an in-memory cache. Optional — absent in tests that don't exercise the update routes. */
   updates?: UpdateChecker
+  /** App self-update checker (F-006, ADR-031): is a newer TurboLLM published on npm than
+   *  the running version? Informational only (npm does the upgrade). Optional — absent in
+   *  tests that don't exercise the app-update route. */
+  appUpdates?: AppUpdateChecker
   hf: HfClient
   downloads: DownloadManager
   bench: BenchRunner

@@ -25,6 +25,7 @@ import type {
   ModelDirs,
   ModelsList,
   Status,
+  AppUpdate,
 } from './types'
 
 const AUTH_KEY = 'tllm.authToken'
@@ -205,6 +206,13 @@ export function updateBackend(
  *  `?refresh=1` forces a live re-check; otherwise the cache is served (offline-first). */
 export function getEngineUpdates(refresh = false): Promise<EngineUpdates> {
   return request<EngineUpdates>(`/api/v1/engines/updates${refresh ? '?refresh=1' : ''}`)
+}
+
+/** App self-update check (F-006, ADR-031): is a newer TurboLLM published on npm than the
+ *  running version? Offline-first — serves the daemon's 24h cache; `?refresh=1` forces a
+ *  live re-check. Informational only; npm performs the upgrade. */
+export function getAppUpdate(refresh = false): Promise<AppUpdate> {
+  return request<AppUpdate>(`/api/v1/app/update${refresh ? '?refresh=1' : ''}`)
 }
 
 /** Set an engine's auto-update policy (off | notify | auto). */
