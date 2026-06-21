@@ -154,13 +154,15 @@ turbollm
 Then open **Models**, download or pick a GGUF, click **Load**, and start chatting. Stop the
 daemon any time with **Ctrl+C**.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/engines.png" width="860" alt="TurboLLM Engines screen: hardware-aware recommendation, a unified engine catalog (llama.cpp, KoboldCpp, llamafile, vLLM, forks), and build-from-source" />
+</p>
+
 <!--
-  📸 SCREENSHOTS — drop PNGs into assets/screenshots/ and uncomment. Suggested shots:
+  📸 More screenshots — drop PNGs into assets/screenshots/ and add. Suggested shots:
   - chat.png      : a chat mid-stream showing the live t/s + context meter
   - models.png    : the Models › Library with measured t/s per model
-  - engines.png   : the Engines screen + backend picker (the USP)
   - tuning.png    : the model load-params panel (ctx/ngl/NextN/VRAM verdict)
-  <p align="center"><img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/chat.png" width="860" alt="TurboLLM chat" /></p>
 -->
 
 ---
