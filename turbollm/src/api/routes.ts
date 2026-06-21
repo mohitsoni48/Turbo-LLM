@@ -664,6 +664,21 @@ export function registerApi(app: Hono, d: Deps): void {
     return c.json({ updates, policies })
   })
 
+  // ---- app self-update check (F-006, ADR-031) ----
+  // Is a newer TurboLLM published on npm than the running version? Informational only —
+  // npm does the upgrade (`npm i -g turbollm`); we never auto-update the app. Offline-first:
+  // serves the cached answer and NEVER fabricates a "latest" it didn't fetch. Non-blocking —
+  // a stale (or `?refresh=1`) cache kicks a background re-check and returns the cache now.
+  app.get('/api/v1/app/update', (c) => {
+    const fallback = { installed: d.version, latest: null, hasUpdate: false, checkedAt: new Date().toISOString(), comparable: false }
+    if (!d.appUpdates) return c.json(fallback)
+    const refresh = c.req.query('refresh') === '1'
+    if (refresh || d.appUpdates.isStale()) {
+      void d.appUpdates.check(AbortSignal.timeout(10_000)).catch(() => {})
+    }
+    return c.json(d.appUpdates.get() ?? fallback)
+  })
+
   // Set an engine's per-engine auto-update policy (off | notify | auto). Default notify.
   app.put('/api/v1/engines/:id/update-policy', async (c) => {
     const b = await body<{ policy?: string }>(c)

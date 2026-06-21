@@ -38,6 +38,7 @@ import {
   updateKoboldcpp,
   updateLlamafile,
   getEngineUpdates,
+  getAppUpdate,
   setEngineUpdatePolicy,
   getStatus,
   startBench,
@@ -91,6 +92,7 @@ import type {
   EngineRecommendationResult,
   EngineStats,
   EngineUpdates,
+  AppUpdate,
   EnginesList,
   UpdatePolicy,
   HfRepoDetail,
@@ -111,6 +113,7 @@ export const queryKeys = {
   engineCatalog: ['engine-catalog'] as const,
   engineRecommendation: ['engine-recommendation'] as const,
   engineUpdates: ['engine-updates'] as const,
+  appUpdate: ['app-update'] as const,
   models: ['models'] as const,
   modelDirs: ['modeldirs'] as const,
   downloads: ['downloads'] as const,
@@ -271,6 +274,21 @@ export function useEngineUpdates(provisioning = false): UseQueryResult<EngineUpd
     queryKey: queryKeys.engineUpdates,
     queryFn: () => getEngineUpdates(false),
     refetchInterval: provisioning ? 3000 : false,
+    retry: false,
+  })
+}
+
+/** App self-update check (F-006, ADR-031). Offline-first: serves the daemon's 24h cache,
+ *  never a fabricated "latest". The daemon warms the cache at startup; this polls gently
+ *  while the answer is still unknown (null) so the startup-warmed result lands without a
+ *  manual refresh, then stops once a real answer (or an offline state) is cached. */
+export function useAppUpdate(): UseQueryResult<AppUpdate> {
+  return useQuery({
+    queryKey: queryKeys.appUpdate,
+    queryFn: () => getAppUpdate(false),
+    refetchInterval: (q) => (q.state.data && q.state.data.latest === null && !q.state.data.error ? 20000 : false),
+    refetchIntervalInBackground: false,
+    staleTime: 60_000,
     retry: false,
   })
 }

@@ -112,6 +112,20 @@ export type Status = {
   uptimeSec: number
 }
 
+/** App self-update check (F-006, GET /api/v1/app/update). Is a newer TurboLLM published
+ *  on npm than the running version? `latest` is null + `error:'offline'` when the npm
+ *  registry was unreachable (the UI then stays silent — never a false "up to date"). */
+export type AppUpdate = {
+  /** The running version. */
+  installed: string
+  /** The npm `latest`, or null when the check failed (offline). */
+  latest: string | null
+  hasUpdate: boolean
+  checkedAt: string
+  error?: 'offline'
+  comparable: boolean
+}
+
 /** Live ComfyUI coordination state (GET /api/v1/status). Drives the "paused while
  *  ComfyUI renders" indicator and the reason a model load was refused. */
 export type ComfyRuntime = {
