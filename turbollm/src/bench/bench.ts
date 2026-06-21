@@ -15,6 +15,15 @@ import type { Engine } from '../config/config'
 import type { Scanner, ModelEntry } from '../models/scanner'
 import { deriveDefault, profileToArgs, resolveProfile, type LoadProfile } from '../models/profile'
 import { getSysInfo, type SysInfo } from '../sysinfo/sysinfo'
+import type { HfClient } from '../hf/hf'
+import { inferRepoFromPath } from '../api/path-utils'
+import {
+  buildCardExtractionPrompt,
+  hasAnySampling,
+  parseCardSampling,
+  parseLlmSampling,
+  type CardSampling,
+} from '../models/card-sampling'
 
 /** A single candidate the sweep evaluated. `outcome` is 'ok' on a measured run, or
  *  the failure mode (timeout/crash/oom) — the sweep keeps going on a failure. */
@@ -39,7 +48,16 @@ export interface BenchState {
   error?: string
   /** The winning candidate, surfaced when a run finishes so the UI can show a Save/Cancel
    *  results dialog. The profile is NOT persisted until the user clicks Save (POST /bench/save). */
-  result?: { params: BenchCandidate['params']; tps: number; ttftMs: number; vramMb: number | null }
+  result?: {
+    params: BenchCandidate['params']
+    tps: number
+    ttftMs: number
+    vramMb: number | null
+    /** Recommended sampling read from the model's HF card (ADR-099), when one was found.
+     *  Already merged into the winning profile so Save persists it; surfaced here so the
+     *  results dialog can show what the card recommended. Absent when no card / nothing parsed. */
+    recommendedSampling?: CardSampling
+  }
 }
 
 // Hard limits (spec 09 §1).
@@ -93,6 +111,8 @@ export class BenchRunner {
     private scanner: Scanner,
     private registry: Registry,
     private version: string,
+    /** Used to fetch the model's HF card for card-derived sampling (ADR-099). */
+    private hf: HfClient,
   ) {}
 
   /** Live state for GET /status. */
@@ -200,15 +220,44 @@ export class BenchRunner {
     await this.manager.stopAndWait().catch(() => {})
 
     if (best) {
+      // Card-derived recommended sampling (ADR-099): read the model author's recommended
+      // temp/top_k/top_p/min_p from the HF card and merge into the winning profile so Save
+      // persists it. Fully fail-safe — no card / nothing parsed leaves sampling untouched
+      // (done-when: "no card → defaults unchanged"). The engine is stopped here; the LLM
+      // fallback (only when the heuristic finds nothing) reloads the winner briefly itself.
+      // Gate on the global deadline too (not just cancel): a run that already spent the full
+      // TOTAL_BUDGET_MS must not spawn a multi-minute LLM-fallback reload past budget.
+      let recommended: CardSampling | undefined
+      if (!this.cancelled && Date.now() <= this.deadline) {
+        recommended = await this.extractCardSampling(entry, best.profile, caps, sys).catch(() => undefined)
+        await this.manager.stopAndWait().catch(() => {}) // in case the LLM fallback loaded a model
+      }
+      // A cancel DURING extraction (the LLM fallback can run for minutes) must not resurrect the
+      // results dialog or re-hold a profile the user just discarded: cancel() cleared winning +
+      // result, but couldn't stop this still-running run. Re-check before committing the winner.
+      if (this.cancelled) {
+        this.state = { running: false, modelKey, done: true, candidates: results }
+        return
+      }
+      const profile =
+        recommended && hasAnySampling(recommended)
+          ? { ...best.profile, sampling: { ...best.profile.sampling, ...recommended } }
+          : best.profile
       // Hold the winner instead of auto-saving — the UI shows a Save/Cancel results dialog and
       // persists via POST /bench/save only when the user clicks Save.
-      this.winning = { modelKey, profile: best.profile, cand: best.cand, entry, sys, engineVersion: active?.version ?? '' }
+      this.winning = { modelKey, profile, cand: best.cand, entry, sys, engineVersion: active?.version ?? '' }
       this.state = {
         running: false,
         modelKey,
         done: true,
         bestTps: best.cand.tps ?? undefined,
-        result: { params: best.cand.params, tps: best.cand.tps ?? 0, ttftMs: best.cand.ttftMs ?? 0, vramMb: best.cand.vramMb },
+        result: {
+          params: best.cand.params,
+          tps: best.cand.tps ?? 0,
+          ttftMs: best.cand.ttftMs ?? 0,
+          vramMb: best.cand.vramMb,
+          ...(recommended && hasAnySampling(recommended) ? { recommendedSampling: recommended } : {}),
+        },
         candidates: results,
       }
     } else {
@@ -634,6 +683,99 @@ export class BenchRunner {
     const t = data.timings
     if (!t || typeof t.predicted_per_second !== 'number') return null
     return { tps: t.predicted_per_second, ttftMs: typeof t.prompt_ms === 'number' ? t.prompt_ms : 0 }
+  }
+
+  // ---- card-derived recommended sampling (ADR-099) ------------------------
+
+  /** Resolve the model's HF card and extract recommended sampling (temp/top_k/top_p/min_p).
+   *  HYBRID: the deterministic heuristic parser runs first; only if it finds nothing does the
+   *  just-tuned local model read its own card and emit JSON (the LLM fallback). Returns
+   *  undefined when the model's repo can't be resolved (e.g. a hand-placed file), the card is
+   *  missing/unreachable, or nothing parseable is found — the caller then leaves sampling at the
+   *  resolved defaults. Never throws (all failures collapse to undefined). */
+  private async extractCardSampling(
+    entry: ModelEntry,
+    winningProfile: LoadProfile,
+    caps: Engine['capabilities'],
+    sys: SysInfo,
+  ): Promise<CardSampling | undefined> {
+    const repo = inferRepoFromPath(entry.path, this.store.snapshot().modelDirs)
+    if (!repo) return undefined // hand-placed file outside a model dir → no upstream card
+    this.state = { ...this.state, step: 'Reading model-card recommendations…' }
+    let card = ''
+    try {
+      card = await this.hf.fetchModelCard(repo)
+    } catch {
+      return undefined
+    }
+    if (!card) return undefined
+
+    const heuristic = parseCardSampling(card)
+    if (hasAnySampling(heuristic)) return heuristic // deterministic fast path
+
+    // LLM fallback: prose-only / unusual card — ask the just-tuned model to read it.
+    if (this.cancelled) return undefined
+    const llm = await this.llmExtractSampling(entry, winningProfile, caps, sys, card).catch(() => undefined)
+    return llm && hasAnySampling(llm) ? llm : undefined
+  }
+
+  /** LLM fallback for {@link extractCardSampling}: briefly reload the winning profile, ask the
+   *  model to extract recommended sampling as JSON, then stop. The recommendation is
+   *  model-specific (independent of the swept offload), so reusing the winning profile is exact.
+   *  Bounded by the readiness window + a short generation timeout; any failure → undefined, and
+   *  the engine is always left stopped. */
+  private async llmExtractSampling(
+    entry: ModelEntry,
+    profile: LoadProfile,
+    caps: Engine['capabilities'],
+    sys: SysInfo,
+    card: string,
+  ): Promise<CardSampling | undefined> {
+    const active = this.registry.active()
+    if (!active) return undefined
+    const opts: StartOpts = {
+      engine: active,
+      model: { key: entry.key, name: entry.name, quant: entry.quant, ctx: profile.ctx, vision: entry.vision },
+      modelPath: entry.path,
+      extraArgs: profileToArgs(profile, entry, caps, sys.cores),
+    }
+    try {
+      await this.manager.start(opts)
+    } catch {
+      return undefined
+    }
+    const ready = await this.awaitReady(Date.now() + READY_TIMEOUT_MS)
+    const target = ready === 'ok' ? this.manager.target() : null
+    if (!target) {
+      await this.manager.stopAndWait().catch(() => {})
+      return undefined
+    }
+    const text = await this.chatText(target, buildCardExtractionPrompt(card), 200, 60_000).catch(() => null)
+    await this.manager.stopAndWait().catch(() => {})
+    return text ? parseLlmSampling(text) : undefined
+  }
+
+  /** One non-streaming completion that returns the generated TEXT (vs {@link chat}, which
+   *  returns timings). Used by the card-sampling LLM fallback. Honors the per-call timeout and
+   *  the cancel kill-switch; null on a non-OK response. */
+  private async chatText(target: string, content: string, maxTokens: number, timeoutMs: number): Promise<string | null> {
+    const signals: AbortSignal[] = [AbortSignal.timeout(timeoutMs)]
+    if (this.abort) signals.push(this.abort.signal)
+    const res = await fetch(`${target}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'bench',
+        messages: [{ role: 'user', content }],
+        max_tokens: maxTokens,
+        temperature: 0,
+        stream: false,
+      }),
+      signal: signals.length > 1 ? AbortSignal.any(signals) : signals[0],
+    })
+    if (!res.ok) return null
+    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> }
+    return data.choices?.[0]?.message?.content ?? null
   }
 
   /** Save the winning profile as the model's saved profile (tunedBy:'bench') and

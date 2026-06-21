@@ -84,7 +84,24 @@ export type BenchState = {
   error?: string
   /** Winning candidate of a finished run — drives the Save/Cancel results dialog. The profile is
    *  only persisted when the user clicks Save (POST /bench/save). */
-  result?: { params: BenchCandidate['params']; tps: number; ttftMs: number; vramMb: number | null }
+  result?: {
+    params: BenchCandidate['params']
+    tps: number
+    ttftMs: number
+    vramMb: number | null
+    /** Sampling recommended by the model's HF card (ADR-099), already merged into the winning
+     *  profile so Save persists it. Absent when no card / nothing parsed. */
+    recommendedSampling?: CardSampling
+  }
+}
+
+/** Card-derived recommended sampling (ADR-099). Field names mirror the profile's `Sampling`
+ *  block; only the knobs the card stated are present. */
+export type CardSampling = {
+  temp?: number
+  topP?: number
+  topK?: number
+  minP?: number
 }
 
 /** Live per-request progress for the engine card (spec 11), from GET /api/v1/status.
