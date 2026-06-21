@@ -25,6 +25,45 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
+## [1.0.0] - 2026-06-21
+
+**The engine overhaul — TurboLLM 1.0.** Engines are now hardware-aware, self-updating, and
+bring-your-own from any source, behind a redesigned, beginner-first Engines screen.
+
+### Added
+- **Hardware-aware recommendation** — detects your GPU + OS and labels each engine by fit
+  ("Recommended for you"); engines that can't run here are greyed with the reason.
+- **Unified, fit-labeled engine catalog** — llama.cpp, KoboldCpp, llamafile, MLX, vLLM, plus
+  forks (ik_llama, TurboQuant) — install and manage from one place.
+- **KoboldCpp** and **llamafile** as first-class engine kinds (GGUF, OpenAI-compatible),
+  verified end-to-end.
+- **Guided "Add your own engine"** — pick a folder; TurboLLM scans for the server binary,
+  probes its version + capabilities, and pre-fills the name. Optional source-repo URL.
+- **Build-from-source guide** (Windows + CUDA) — prerequisite checker (git / CMake / CUDA /
+  MSVC) + the exact build commands, then a handoff to "Add your own engine".
+- **Honest engine updates** — checks the real upstream release / commit (and PyPI for
+  pip engines); per-engine **Off / Notify / Auto** policy (default Notify); rollback-safe
+  apply; a **"Rebuild available"** chip for source builds.
+- **"Register my engine"** — nominate a fork via a prefilled GitHub issue form.
+- **HuggingFace cache as a default model folder** on first run — your existing HF models
+  appear with zero configuration.
+- Grouped engine selection — one engine dropdown; a version dropdown (with a "latest" badge)
+  appears only when you have more than one build.
+
+### Changed
+- **Redesigned Engines screen** — three calm zones: a status hero (hardware + a "Running now"
+  switcher) → the unified Install & manage catalog → a collapsed Advanced section (GPU build
+  picker + backend management). Replaces the old two-level Engine→Build selector + help accordion.
+- De-pinned official llama.cpp for updates — the pinned build is now the first-install default only.
+- **Route-level code-splitting** — initial JS bundle ~1 MB → ~314 kB; screens load on demand.
+
+### Fixed
+- "You're on the latest" was misleading for official llama.cpp (it only checked the pinned build
+  on disk) — it now checks the real upstream release.
+- llamafile launch on current versions (`--no-webui`, replacing the removed `--nobrowser`).
+- Cross-engine KV-cache-type bleed — a model tuned under TurboQuant (turbo2/3/4 KV) no longer
+  crashes standard llama.cpp / llamafile; the KV type is gated to what the engine actually supports.
+
 ## [0.8.0] - 2026-06-19
 
 ### Added
