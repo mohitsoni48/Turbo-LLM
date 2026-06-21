@@ -9,6 +9,7 @@ import type { Scanner, ModelEntry } from '../models/scanner'
 import type { ComfyGuard } from '../engines/comfy-guard'
 import { resolveProfile, profileToArgs, vllmProfileToArgs, type LoadProfile } from '../models/profile'
 import { mlxSamplingArgs } from '../engines/mlx'
+import { koboldcppProfileToArgs } from '../engines/koboldcpp'
 import { engineAcceptsFormat } from '../engines/compat'
 import { getSysInfo } from '../sysinfo/sysinfo'
 
@@ -262,11 +263,19 @@ export class ModelRouter {
     }
     const saved = cfg.modelProfiles[entry.key] as Partial<LoadProfile> | undefined
     const profile = resolveProfile(entry, sys, saved, undefined, cfg.modelDefaults)
+    // KoboldCpp is a GGUF engine but uses its OWN flag names, so it gets its own small
+    // arg-map (ctx/ngl + GPU backend) rather than the llama-server profileToArgs. llamafile
+    // IS llama.cpp's server under the hood, so it keeps the full profileToArgs flags — the
+    // manager's llamafileServerCommand only prepends `--server --no-webui`.
+    const extraArgs =
+      engine.kind === 'koboldcpp'
+        ? koboldcppProfileToArgs(profile, sys.gpus[0]?.vendor ?? 'unknown', sys.gpus.length > 0)
+        : profileToArgs(profile, entry, engine.capabilities, sys.cores)
     return {
       engine,
       model: { key: entry.key, name: entry.name, quant: entry.quant, ctx: profile.ctx, vision: entry.vision },
       modelPath: entry.path,
-      extraArgs: profileToArgs(profile, entry, engine.capabilities, sys.cores),
+      extraArgs,
     }
   }
 

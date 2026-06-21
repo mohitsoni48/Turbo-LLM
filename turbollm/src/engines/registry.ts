@@ -2,7 +2,7 @@
 // enforced by the API layer using the Manager's live state.
 import { existsSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { ConfigStore, Engine, ValueError, findEngine } from '../config/config'
+import { ConfigStore, Engine, UpdatePolicy, ValueError, findEngine } from '../config/config'
 import { probe } from './probe'
 
 /** Auto-provisioned official builds live under `<dataDir>/engines/llama.cpp-…/`.
@@ -50,10 +50,16 @@ export class Registry {
     return c.activeEngineId ? findEngine(c.engines, c.activeEngineId) : undefined
   }
 
-  async add(name: string, binPath: string): Promise<AddResult> {
+  async add(
+    name: string,
+    binPath: string,
+    source?: { sourceRepo?: string; sourceBranch?: string },
+  ): Promise<AddResult> {
     const finalName = name.trim() || 'llama-server'
     this.assertNameFree(finalName)
     const pr = await probe(binPath)
+    const sourceRepo = source?.sourceRepo?.trim() || undefined
+    const sourceBranch = source?.sourceBranch?.trim() || undefined
     const eng: Engine = {
       id: randomUUID(),
       name: finalName,
@@ -62,6 +68,8 @@ export class Registry {
       version: pr.version,
       capabilities: pr.capabilities,
       addedAt: new Date().toISOString(),
+      ...(sourceRepo ? { sourceRepo } : {}),
+      ...(sourceBranch ? { sourceBranch } : {}),
     }
     this.store.update((c) => {
       // Re-check under the store lock — the name could have been taken between the
@@ -135,6 +143,46 @@ export class Registry {
     return eng
   }
 
+  /** Register a KoboldCpp engine (kind='koboldcpp'). binPath is the single KoboldCpp
+   *  binary, not a llama-server, so llama.cpp capabilities/flags don't apply (it uses
+   *  its own CLI flag names — see koboldcppProfileToArgs). */
+  addKoboldcpp(name: string, binPath: string, version: string): Engine {
+    return this.addSingleBinary('koboldcpp', name || 'KoboldCpp', binPath, version)
+  }
+
+  /** Register a llamafile engine (kind='llamafile'). binPath is the single llamafile
+   *  executable; it runs as llama.cpp's server (launched with --server --no-webui) and
+   *  accepts the standard llama.cpp profile flags. */
+  addLlamafile(name: string, binPath: string, version: string): Engine {
+    return this.addSingleBinary('llamafile', name || 'llamafile', binPath, version)
+  }
+
+  /** Shared registration for a single-binary, non-llama-server engine kind (koboldcpp,
+   *  llamafile). Mirrors addMlx/addVllm: no llama-server probe, empty capabilities, and
+   *  replace-in-place when the same path is re-registered. */
+  private addSingleBinary(kind: string, name: string, binPath: string, version: string): Engine {
+    const eng: Engine = {
+      id: randomUUID(),
+      name: name.trim() || kind,
+      binPath,
+      kind,
+      version,
+      capabilities: { kvTypes: [], flags: [] },
+      addedAt: new Date().toISOString(),
+    }
+    this.store.update((c) => {
+      const existing = c.engines.find((e) => e.kind === kind && e.binPath === binPath)
+      if (existing) {
+        existing.version = version
+        eng.id = existing.id
+      } else {
+        c.engines.push(eng)
+      }
+      if (!c.activeEngineId) c.activeEngineId = eng.id
+    })
+    return eng
+  }
+
   rename(id: string, name: string): Engine {
     let out: Engine | undefined
     this.store.update((c) => {
@@ -143,6 +191,30 @@ export class Registry {
       const n = name.trim()
       if (!n) throw new ValueError('name', 'name cannot be empty')
       e.name = n
+      out = structuredClone(e)
+    })
+    return out!
+  }
+
+  /** Attach (or clear) the source-repo provenance on an existing engine (ADR-088).
+   *  A user can point an already-added build at the GitHub repo it was built from so
+   *  TurboLLM can detect "newer source available → rebuild". Pass a defined field to
+   *  set it (trimmed); an empty string clears it; an undefined field leaves it as-is. */
+  setSource(id: string, source: { sourceRepo?: string; sourceBranch?: string }): Engine {
+    let out: Engine | undefined
+    this.store.update((c) => {
+      const e = findEngine(c.engines, id)
+      if (!e) throw new NotFoundError()
+      if (source.sourceRepo !== undefined) {
+        const v = source.sourceRepo.trim()
+        if (v) e.sourceRepo = v
+        else delete e.sourceRepo
+      }
+      if (source.sourceBranch !== undefined) {
+        const v = source.sourceBranch.trim()
+        if (v) e.sourceBranch = v
+        else delete e.sourceBranch
+      }
       out = structuredClone(e)
     })
     return out!
@@ -162,6 +234,18 @@ export class Registry {
       if (!findEngine(c.engines, id)) throw new NotFoundError()
       c.activeEngineId = id
     })
+  }
+
+  /** Set an engine's per-engine auto-update policy (ADR-085). Returns the updated engine. */
+  setUpdatePolicy(id: string, policy: UpdatePolicy): Engine {
+    let out: Engine | undefined
+    this.store.update((c) => {
+      const e = findEngine(c.engines, id)
+      if (!e) throw new NotFoundError()
+      e.updatePolicy = policy
+      out = structuredClone(e)
+    })
+    return out!
   }
 
   async reprobe(id: string): Promise<Engine> {

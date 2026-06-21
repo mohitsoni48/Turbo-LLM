@@ -11,19 +11,34 @@ import type { Deps } from '../deps'
 import { type ModelInfo, type StartOpts } from '../engines/manager'
 import { abortAllInFlightChats } from '../chat/chat-routes'
 import { NameTakenError, NotFoundError } from '../engines/registry'
-import { ProbeError } from '../engines/probe'
+import { ProbeError, probe } from '../engines/probe'
+import { resolveServerBinary, suggestEngineName } from '../engines/scan'
+import { isLocalRequest } from '../auth'
 import {
   LLAMA_BUILD,
   availableBackends,
+  backendDefAt,
+  backendDir,
   deleteBackend,
   installedBackendServer,
+  latestReleaseTag,
   provisionBackend,
-  provisionForkRelease,
+  provisionTurboquant,
   recommendBackendId,
 } from '../engines/download'
+import {
+  normalizeUpdatePolicy,
+  tagFromManagedBinPath,
+} from '../engines/update'
+import type { BackendId } from '../engines/download'
 import { ensureMlxEnv, mlxSamplingArgs } from '../engines/mlx'
 import { ensureVllmEnv } from '../engines/vllm'
+import { ensureKoboldcpp, koboldcppBinPath, koboldcppDir, koboldcppProfileToArgs } from '../engines/koboldcpp'
+import { ensureLlamafile, llamafileBinPath, llamafileDir } from '../engines/llamafile'
 import { catalogForPlatform, catalogEngine } from '../engines/catalog'
+import { checkBuildPrereqs } from '../engines/build-prereqs'
+import { detectHardware } from '../engines/hardware'
+import { recommendEngines } from '../engines/recommend'
 import { engineAcceptsFormat } from '../engines/compat'
 import { ScannerError, type ModelEntry } from '../models/scanner'
 import { estimateVram, type LoadProfile, profileToArgs, resolveProfile, vllmProfileToArgs } from '../models/profile'
@@ -152,12 +167,11 @@ export function registerApi(app: Hono, d: Deps): void {
     const def = availableBackends().find((x) => x.id === b.backend)
     if (!def) return err(c, 400, 'invalid_config_value', 'Unknown backend for this platform.')
     const root = join(d.store.dir(), 'engines')
-    // Already at the current pinned build → nothing to download. llama.cpp backends are pinned to
-    // LLAMA_BUILD; a newer build only ships when TurboLLM bumps it (which changes the install dir,
-    // so the row would show Download again). Report 'already latest' so Update gives clear feedback
-    // instead of silently re-running.
+    // First-install only: seed the pinned LLAMA_BUILD. When the pinned build is already
+    // on disk, this is a no-op (no real upstream check here — that's the Update path's
+    // job, which de-pins and resolves the REAL latest tag honestly, ADR-085).
     if (installedBackendServer(root, def.id)) {
-      return c.json({ accepted: false, alreadyLatest: true, build: LLAMA_BUILD })
+      return c.json({ accepted: false, alreadyInstalled: true, build: LLAMA_BUILD })
     }
     if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
     const ac = new AbortController()
@@ -191,6 +205,74 @@ export function registerApi(app: Hono, d: Deps): void {
       return c.json({ ok: true })
     }
     return c.json({ ok: false })
+  })
+
+  // De-pinned, rollback-safe update for an official llama.cpp backend (ADR-085, Phase 6).
+  // Resolves the REAL latest upstream build tag, downloads it into a NEW tag-keyed dir,
+  // probes it (registry.add probes), and only on success registers + activates it and GCs
+  // the old install. On any download/probe failure the OLD install is left untouched
+  // (rollback) and the error is surfaced via the provision channel. Reports 'already latest'
+  // ONLY when the real upstream check confirms it — never the old "is the pinned build on
+  // disk?" lie. 202 + progress via GET /status engineProvision (same channel as install).
+  app.post('/api/v1/engines/backends/:id/update', async (c) => {
+    const def = availableBackends().find((x) => x.id === c.req.param('id'))
+    if (!def) return err(c, 400, 'invalid_config_value', 'Unknown backend for this platform.')
+    const root = join(d.store.dir(), 'engines')
+    const oldBin = installedBackendServer(root, def.id)
+    if (!oldBin) return err(c, 409, 'not_installed', 'Backend is not installed — download it first.')
+    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    // Honest upstream check FIRST: resolve the real latest tag. Offline → clear 503.
+    let latestTag: string
+    try {
+      latestTag = await latestReleaseTag('ggml-org/llama.cpp', AbortSignal.timeout(15_000))
+    } catch {
+      return err(c, 503, 'offline', "Couldn't reach GitHub to check for a newer build. Try again when online.")
+    }
+    if (!latestTag) return err(c, 503, 'offline', "GitHub didn't report a latest build. Try again later.")
+    const installedTag = tagFromManagedBinPath(oldBin)
+    // Already on the real latest → honest "already latest" (no download).
+    if (installedTag && installedTag === latestTag) {
+      return c.json({ accepted: false, alreadyLatest: true, build: latestTag })
+    }
+    const newDef = backendDefAt(def.id as BackendId, latestTag)
+    if (!newDef) return err(c, 500, 'internal', 'No upstream build of this backend for your platform.')
+    const ac = new AbortController()
+    provisionAbort = ac
+    void (async () => {
+      try {
+        d.provision.start(def.id)
+        // Download the latest build into its OWN tag-keyed dir. The old dir is untouched,
+        // so a failure here leaves the working install in place (rollback by construction).
+        const newBin = await provisionBackend(
+          root, newDef, latestTag,
+          (p) => d.provision.progress(p.phase, p.pct, p.part, p.parts),
+          ac.signal,
+        )
+        // Probe + register the new build (add() probes the binary). Only now do we touch
+        // the active engine / old install — if the probe throws, the old build still runs.
+        let newEng = d.registry.list().engines.find((e) => e.binPath === newBin)
+        if (!newEng) newEng = (await d.registry.add(`llama.cpp ${latestTag} (${def.id})`, newBin)).engine
+        // Stop the engine if the OLD build of this backend is the running active one, so the
+        // swap doesn't leave a stale process pointing at a dir we're about to delete.
+        const oldEng = d.registry.list().engines.find((e) => e.binPath === oldBin)
+        if (oldEng && d.registry.active()?.id === oldEng.id) await d.manager.stopAndWait()
+        d.registry.activate(newEng.id)
+        // GC the old install: unregister its engine entry + delete its tag-keyed dir.
+        if (oldEng && oldEng.id !== newEng.id) {
+          try { d.registry.remove(oldEng.id) } catch { /* already gone */ }
+        }
+        if (installedTag && installedTag !== latestTag) {
+          rmSync(backendDir(root, def.id as BackendId, installedTag), { recursive: true, force: true })
+        }
+        d.provision.done()
+      } catch (e) {
+        if ((e as Error)?.name === 'AbortError') d.provision.done() // user cancelled — old install intact
+        else d.provision.fail(`Could not update the ${def.id} engine (your existing build is unchanged): ${e instanceof Error ? e.message : e}`)
+      } finally {
+        if (provisionAbort === ac) provisionAbort = null
+      }
+    })()
+    return c.json({ accepted: true, backend: def.id, build: latestTag }, 202)
   })
 
   // Enable (register without re-downloading) an installed llama.cpp backend.
@@ -268,11 +350,38 @@ export function registerApi(app: Hono, d: Deps): void {
         const tqDir = join(enginesRoot, 'turboquant')
         installed = existsSync(tqDir)
         enabled = regEngines.some((x) => /[\\/]engines[\\/]turboquant[\\/]/.test(x.binPath))
+      } else if (e.id === 'koboldcpp') {
+        // KoboldCpp: single binary under engines/koboldcpp/; enabled = a registered
+        // engine of kind 'koboldcpp' exists.
+        installed = existsSync(koboldcppBinPath(enginesRoot))
+        enabled = regEngines.some((x) => x.kind === 'koboldcpp')
+      } else if (e.id === 'llamafile') {
+        // llamafile: single binary under engines/llamafile/; enabled = a registered
+        // engine of kind 'llamafile' exists.
+        installed = existsSync(llamafileBinPath(enginesRoot))
+        enabled = regEngines.some((x) => x.kind === 'llamafile')
       }
       return { ...e, installed, enabled }
     })
     return c.json({ engines: items })
   })
+
+  // Engine recommendation (engine overhaul, Phase 2): the hardware-level fit for the
+  // WHOLE catalog. Deliberately NOT OS-prefiltered — incompatible engines come back
+  // WITH a reason so the UI can grey them rather than hide them (ADR-083 "grey +
+  // reason, don't hide"). Pure read; pass the full CatalogEngine[] (drop the
+  // per-platform `supportedHere` flag the catalog endpoint adds).
+  app.get('/api/v1/engines/recommendation', (c) => {
+    const hw = detectHardware()
+    const rec = recommendEngines(hw, catalogForPlatform().map(({ supportedHere, ...e }) => e))
+    return c.json({ hardware: hw, recommendation: rec })
+  })
+
+  // Guided compile-from-source prereq check (ADR-089). Read-only: detects the
+  // Windows + CUDA build toolchain (git / cmake / CUDA / MSVC) so the build guide can
+  // show what's missing + install links. Off Windows it reports `supported:false`
+  // (Linux/macOS guided build is parked).
+  app.get('/api/v1/build/prereqs', async (c) => c.json(await checkBuildPrereqs()))
 
   // Provision the vLLM engine (ADR-044): uv → venv → `uv pip install vllm`, then
   // register as a kind='vllm' engine. 202 + progress via GET /status engineProvision.
@@ -315,12 +424,13 @@ export function registerApi(app: Hono, d: Deps): void {
     void (async () => {
       try {
         d.provision.start('turboquant')
-        // For update: remove existing dir so provisionForkRelease re-downloads the latest.
+        // For update: remove existing dir so provisionTurboquant re-downloads the latest.
         if (upgrade) {
           const tqDir = join(root, 'turboquant')
           if (existsSync(tqDir)) rmSync(tqDir, { recursive: true, force: true })
         }
-        const bin = await provisionForkRelease(root, entry.repo!, 'turboquant', (p) =>
+        // Per-platform resolver: Windows build is on HuggingFace, macOS/Linux on GitHub.
+        const bin = await provisionTurboquant(root, entry.repo!, (p) =>
           d.provision.progress(p.phase, p.pct, p.part, p.parts),
         )
         let eng = d.registry.list().engines.find((e) => e.binPath === bin)
@@ -338,11 +448,89 @@ export function registerApi(app: Hono, d: Deps): void {
     return c.json({ accepted: true, engine: 'turboquant' }, 202)
   })
 
+  // Provision KoboldCpp (engine overhaul, Phase 4): download the single platform/GPU-
+  // matching binary from its GitHub release, register as a kind='koboldcpp' engine.
+  // 202 + progress via /status. ?update=1 removes the existing binary so the latest is
+  // re-downloaded. CUDA build is chosen on NVIDIA; portable build elsewhere.
+  app.post('/api/v1/engines/koboldcpp', (c) => {
+    const entry = catalogEngine('koboldcpp')
+    if (!entry?.repo) return err(c, 500, 'internal', 'KoboldCpp catalog entry is misconfigured.')
+    if (!entry.platforms.includes(process.platform)) {
+      return err(c, 409, 'unsupported_platform', 'KoboldCpp has no prebuilt binary for this operating system yet.')
+    }
+    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    const root = join(d.store.dir(), 'engines')
+    const upgrade = c.req.query('update') === '1'
+    const hasNvidia = primaryVendor(getSysInfo()) === 'nvidia'
+    void (async () => {
+      try {
+        d.provision.start('koboldcpp')
+        if (upgrade) {
+          const dir = koboldcppDir(root)
+          if (existsSync(dir)) rmSync(dir, { recursive: true, force: true })
+        }
+        const rt = await ensureKoboldcpp(root, hasNvidia, (p) => d.provision.progress(p.phase, p.pct, p.part, p.parts))
+        const eng = d.registry.addKoboldcpp(`KoboldCpp (${rt.version})`, rt.binPath, rt.version)
+        d.registry.activate(eng.id)
+        d.provision.done()
+      } catch (e) {
+        const msg =
+          e instanceof Error && e.message === 'no_release_asset'
+            ? 'KoboldCpp has no prebuilt binary for this operating system/architecture in its latest release.'
+            : `Could not install KoboldCpp: ${e instanceof Error ? e.message : e}`
+        d.provision.fail(msg)
+      }
+    })()
+    return c.json({ accepted: true, engine: 'koboldcpp' }, 202)
+  })
+
+  // Provision llamafile (engine overhaul, Phase 4): download the single portable
+  // executable from its GitHub release, register as a kind='llamafile' engine. 202 +
+  // progress via /status. ?update=1 removes the existing binary so the latest is
+  // re-downloaded.
+  app.post('/api/v1/engines/llamafile', (c) => {
+    const entry = catalogEngine('llamafile')
+    if (!entry?.repo) return err(c, 500, 'internal', 'llamafile catalog entry is misconfigured.')
+    if (!entry.platforms.includes(process.platform)) {
+      return err(c, 409, 'unsupported_platform', 'llamafile is not available for this operating system yet.')
+    }
+    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    const root = join(d.store.dir(), 'engines')
+    const upgrade = c.req.query('update') === '1'
+    void (async () => {
+      try {
+        d.provision.start('llamafile')
+        if (upgrade) {
+          const dir = llamafileDir(root)
+          if (existsSync(dir)) rmSync(dir, { recursive: true, force: true })
+        }
+        const rt = await ensureLlamafile(root, (p) => d.provision.progress(p.phase, p.pct, p.part, p.parts))
+        const eng = d.registry.addLlamafile(`llamafile (${rt.version})`, rt.binPath, rt.version)
+        d.registry.activate(eng.id)
+        d.provision.done()
+      } catch (e) {
+        const msg =
+          e instanceof Error && e.message === 'no_release_asset'
+            ? 'llamafile has no downloadable binary in its latest release.'
+            : `Could not install llamafile: ${e instanceof Error ? e.message : e}`
+        d.provision.fail(msg)
+      }
+    })()
+    return c.json({ accepted: true, engine: 'llamafile' }, 202)
+  })
+
   app.post('/api/v1/engines', async (c) => {
-    const b = await body<{ name?: string; binPath?: string }>(c)
+    // Adding an engine probes (executes) a caller-supplied binary — a local-admin action.
+    // Refuse it from non-loopback callers even with a key (defense in depth).
+    if (!isLocalRequest(c, d))
+      return err(c, 403, 'forbidden', 'Engines can only be added from the machine running TurboLLM.')
+    const b = await body<{ name?: string; binPath?: string; sourceRepo?: string; sourceBranch?: string }>(c)
     if (!b.binPath || !b.binPath.trim()) return err(c, 400, 'invalid_config_value', 'binPath is required.')
     try {
-      const { engine, warning } = await d.registry.add(b.name ?? '', b.binPath)
+      const { engine, warning } = await d.registry.add(b.name ?? '', b.binPath, {
+        sourceRepo: b.sourceRepo,
+        sourceBranch: b.sourceBranch,
+      })
       // `probe_no_version` is non-blocking (spec 03 §2): the engine is saved, but
       // the response carries a warning flag so the dialog can prompt the user.
       return c.json({ ...engine, warning: warning ?? null }, 201)
@@ -353,10 +541,53 @@ export function registerApi(app: Hono, d: Deps): void {
     }
   })
 
-  app.put('/api/v1/engines/:id', async (c) => {
-    const b = await body<{ name?: string }>(c)
+  // Guided add (engine overhaul, Phase 3): scan a chosen FOLDER (or a binary file)
+  // for the server binary and probe it — read-only preflight for the Add-engine
+  // flow. Registration still happens via POST /api/v1/engines. `{found:false}` (200)
+  // when no binary turns up; ProbeError → 400 so wrong-OS / timeout reach the UI.
+  app.post('/api/v1/engines/scan', async (c) => {
+    // Scanning probes (executes) the binary it finds — gate to the local host so a LAN
+    // client can't trigger arbitrary execution by pointing at any path (matches POST /engines).
+    if (!isLocalRequest(c, d))
+      return err(c, 403, 'forbidden', 'Engine scanning is only available on the machine running TurboLLM.')
+    const b = await body<{ path?: string }>(c)
+    const path = (b.path ?? '').trim()
+    if (!path) return err(c, 400, 'invalid_config_value', 'path is required.')
+    const binPath = resolveServerBinary(path)
+    if (!binPath) return c.json({ found: false })
     try {
-      return c.json(d.registry.rename(c.req.param('id'), b.name ?? ''))
+      const { version, capabilities } = await probe(binPath)
+      return c.json({
+        found: true,
+        binPath,
+        version,
+        capabilities,
+        suggestedName: suggestEngineName(binPath, version),
+      })
+    } catch (e) {
+      if (e instanceof ProbeError) return err(c, 400, e.code, e.message)
+      return err(c, 500, 'internal', (e as Error).message)
+    }
+  })
+
+  app.put('/api/v1/engines/:id', async (c) => {
+    const b = await body<{ name?: string; sourceRepo?: string; sourceBranch?: string }>(c)
+    const id = c.req.param('id')
+    try {
+      // Source-repo provenance (ADR-088): a user can attach the GitHub repo an existing
+      // build came from so TurboLLM can detect "newer source available → rebuild". Set
+      // it (alone or alongside a rename) when either source field is present.
+      if (b.sourceRepo !== undefined || b.sourceBranch !== undefined) {
+        d.registry.setSource(id, { sourceRepo: b.sourceRepo, sourceBranch: b.sourceBranch })
+      }
+      // Only rename when a name was supplied (rename rejects an empty name); a
+      // source-only PUT just returns the updated engine.
+      if (b.name !== undefined && b.name.trim()) {
+        return c.json(d.registry.rename(id, b.name))
+      }
+      const eng = d.registry.get(id)
+      if (!eng) throw new NotFoundError()
+      return c.json(eng)
     } catch (e) {
       return regErr(c, e)
     }
@@ -405,6 +636,43 @@ export function registerApi(app: Hono, d: Deps): void {
       return c.json(await d.registry.reprobe(c.req.param('id')))
     } catch (e) {
       if (e instanceof ProbeError) return err(c, 400, e.code, e.message)
+      return regErr(c, e)
+    }
+  })
+
+  // ---- honest per-engine update status (ADR-085, Phase 6) ----
+  // Per-engine installed/latest/hasUpdate/checkedAt(/error). Offline-first: works
+  // without network by returning each engine's cached or "couldn't check" state — it
+  // NEVER fabricates a "latest" it didn't actually fetch. `?refresh=1` forces a live
+  // re-check (otherwise the cache is served and a background refresh is kicked off).
+  app.get('/api/v1/engines/updates', async (c) => {
+    if (!d.updates) return c.json({ updates: {}, policies: {} })
+    const engines = d.registry.list().engines
+    const refresh = c.req.query('refresh') === '1'
+    d.updates.prune(new Set(engines.map((e) => e.id)))
+    if (refresh) {
+      await d.updates.checkAll(engines, AbortSignal.timeout(20_000)).catch(() => {})
+    } else {
+      // Kick a background check for any engine we've never checked, but return immediately.
+      const unchecked = engines.filter((e) => !d.updates!.get(e.id))
+      if (unchecked.length) void d.updates.checkAll(unchecked).catch(() => {})
+    }
+    const updates = d.updates.all()
+    // Surface each engine's current policy alongside (default 'notify').
+    const policies: Record<string, string> = {}
+    for (const e of engines) policies[e.id] = normalizeUpdatePolicy(e.updatePolicy)
+    return c.json({ updates, policies })
+  })
+
+  // Set an engine's per-engine auto-update policy (off | notify | auto). Default notify.
+  app.put('/api/v1/engines/:id/update-policy', async (c) => {
+    const b = await body<{ policy?: string }>(c)
+    if (b.policy !== 'off' && b.policy !== 'notify' && b.policy !== 'auto') {
+      return err(c, 400, 'invalid_config_value', 'policy must be off, notify, or auto.')
+    }
+    try {
+      return c.json(d.registry.setUpdatePolicy(c.req.param('id'), b.policy))
+    } catch (e) {
       return regErr(c, e)
     }
   })
@@ -517,11 +785,18 @@ export function registerApi(app: Hono, d: Deps): void {
       } else {
         const saved = cfg.modelProfiles[entry.key] as Partial<LoadProfile> | undefined
         const profile = resolveProfile(entry, sys, saved, b.profileOverrides, cfg.modelDefaults)
+        // KoboldCpp is a GGUF engine with its OWN flag names — build its arg-map instead of
+        // the llama-server profileToArgs. llamafile IS llama.cpp's server, so it keeps the
+        // full profileToArgs flags (the manager only prepends --server --no-webui for it).
+        const extraArgs =
+          active.kind === 'koboldcpp'
+            ? koboldcppProfileToArgs(profile, primaryVendor(sys), sys.gpus.length > 0)
+            : profileToArgs(profile, entry, active.capabilities, sys.cores)
         opts = {
           engine: active,
           model: { key: entry.key, name: entry.name, quant: entry.quant, ctx: profile.ctx, vision: entry.vision },
           modelPath: entry.path,
-          extraArgs: profileToArgs(profile, entry, active.capabilities, sys.cores),
+          extraArgs,
         }
       }
       // Single chokepoint (rule 3): load() stops the current model, runs the reverse
@@ -1505,6 +1780,16 @@ function engineInstallDir(eng: Engine, enginesRoot: string): string | null {
   // TurboQuant fork (llama-server kind, binPath under engines/turboquant/)
   if (/[\\/]engines[\\/]turboquant[\\/]/.test(eng.binPath)) {
     const d = join(enginesRoot, 'turboquant')
+    return inside(d) ? d : null
+  }
+  // KoboldCpp single binary (engines/koboldcpp/)
+  if (eng.kind === 'koboldcpp') {
+    const d = koboldcppDir(enginesRoot)
+    return inside(d) ? d : null
+  }
+  // llamafile single binary (engines/llamafile/)
+  if (eng.kind === 'llamafile') {
+    const d = llamafileDir(enginesRoot)
     return inside(d) ? d : null
   }
   return null

@@ -94,9 +94,12 @@ TurboLLM does the opposite:
 
 **Engines**
 - Bring any `llama-server`-compatible engine — stock builds or community forks — with real capability probing
+- **Hardware-aware recommendation** — detects your GPU and tells you which engine/build fits; engines that can't run here are greyed with the reason
+- **Curated catalog** — llama.cpp, KoboldCpp, llamafile, MLX, vLLM, plus forks (ik_llama, TurboQuant) — one-click install where a prebuilt exists
+- **Build-from-source guide** for source-only forks (prerequisite check + the exact commands), then add the binary via a guided folder scan
+- **Honest updates** — checks the real upstream release/commit and flags *Update available* / *Rebuild available* (never a fake "you're on the latest"), with per-engine auto-update
 - Auto-provision a GPU-matched `llama-server` build on first run (CUDA / ROCm / Metal / SYCL / Vulkan, CPU fallback)
-- **vLLM** and **MLX** backends in addition to llama.cpp
-- One-click backend install + switch from the Engines screen
+- One engine dropdown, grouped — pick the engine; a version dropdown appears when you have more than one build
 
 **Models**
 - Use your own local GGUF / safetensors, or browse & download from Hugging Face in-app
@@ -151,13 +154,15 @@ turbollm
 Then open **Models**, download or pick a GGUF, click **Load**, and start chatting. Stop the
 daemon any time with **Ctrl+C**.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/engines.png" width="860" alt="TurboLLM Engines screen: hardware-aware recommendation, a unified engine catalog (llama.cpp, KoboldCpp, llamafile, vLLM, forks), and build-from-source" />
+</p>
+
 <!--
-  📸 SCREENSHOTS — drop PNGs into assets/screenshots/ and uncomment. Suggested shots:
+  📸 More screenshots — drop PNGs into assets/screenshots/ and add. Suggested shots:
   - chat.png      : a chat mid-stream showing the live t/s + context meter
   - models.png    : the Models › Library with measured t/s per model
-  - engines.png   : the Engines screen + backend picker (the USP)
   - tuning.png    : the model load-params panel (ctx/ngl/NextN/VRAM verdict)
-  <p align="center"><img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/chat.png" width="860" alt="TurboLLM chat" /></p>
 -->
 
 ---
@@ -171,18 +176,23 @@ the engine as a swappable component.
 
 1. Compile or download any `llama-server`-compatible binary — stock
    [llama.cpp](https://github.com/ggml-org/llama.cpp), a community fork, or your own build.
-2. Point TurboLLM at the binary. It runs a **capability probe** and learns exactly which
-   flags and features that build supports.
+2. Point TurboLLM at the **folder** — it scans for the `llama-server` binary, runs a
+   **capability probe**, and learns exactly which flags and features that build supports.
+   *(Optional: paste the source repo URL so TurboLLM flags when a newer build ships.)*
 3. Activate it. The load-parameter UI **adapts to that engine** — features the build doesn't
    support are hidden; ones it adds (e.g. low-bit KV cache, NextN) light up.
+
+No prebuilt for your OS? The **build-from-source guide** checks your toolchain (git / CMake /
+CUDA / MSVC), hands you the exact build commands, then drops you into the folder scan above.
 
 **Auto-provisioned default.** Don't want to fetch anything? On first run TurboLLM downloads
 the right upstream prebuilt for your GPU automatically — and a **backend picker** lets you
 switch between CUDA / ROCm / Metal / SYCL / Vulkan / CPU at any time (it downloads the variant
 you choose, LM Studio-style).
 
-**Engine types.** Both **llama.cpp / GGUF** and **MLX** (on macOS) are first-class engine
-kinds — pick the right one per model.
+**Engine types.** **llama.cpp / GGUF**, **KoboldCpp** and **llamafile** (GGUF, every OS),
+**MLX** (macOS), and **vLLM** (Linux + NVIDIA) are all first-class engine kinds — install from
+the curated catalog, pick the right one per model, and switch from a single dropdown.
 
 **Fully supervised.** Every engine runs under a real state machine: health-gated readiness,
 graceful stop, an **idle auto-stop** watchdog, and **live logs + clear error surfacing** in
@@ -450,6 +460,30 @@ turbollm/
     models/ · chat/ · hf/ · bench/ · downloads/
   web/                  React + TS + Tailwind + shadcn frontend (own package.json)
 ```
+
+---
+
+## Screenshots
+
+The unified engine catalog: a hardware-aware recommendation up top, then every supported engine (llama.cpp, KoboldCpp, llamafile, vLLM, and forks) with build-from-source for the rest.
+
+<p align="center"><img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/engines.png" width="860" alt="TurboLLM Engines screen: hardware-aware recommendation and a unified engine catalog" /></p>
+
+Chat mid-conversation: pinned model selector, a live context meter, streaming reply with running token count and tokens/sec.
+
+<p align="center"><img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/chat.png" width="860" alt="TurboLLM Chat screen: model selector, live context meter, streaming reply with tokens/sec" /></p>
+
+The Models library: GGUF and MLX models discovered in your folders, each with measured tokens/sec and a VRAM-fit verdict, grouped by quant.
+
+<p align="center"><img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/models.png" width="860" alt="TurboLLM Models library: discovered models with measured tokens/sec and quant grouping" /></p>
+
+Per-model tuning: context length, GPU layers, KV-cache type, flash attention, and speculative decoding, all with a live VRAM-fit verdict.
+
+<p align="center"><img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/tuning.png" width="860" alt="TurboLLM model tuning panel: context, GPU layers, KV-cache type, flash attention, VRAM-fit verdict" /></p>
+
+Customize: pick a web-search provider and wire up MCP tool servers the model can call during conversations.
+
+<p align="center"><img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/customize.png" width="860" alt="TurboLLM Customize screen: web-search provider and MCP tool servers" /></p>
 
 ---
 

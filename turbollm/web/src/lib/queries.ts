@@ -31,9 +31,14 @@ import {
   deleteEngineBackend,
   enableBackend,
   purgeEngine,
+  updateBackend,
   updateVllm,
   updateMlx,
   updateTurboquant,
+  updateKoboldcpp,
+  updateLlamafile,
+  getEngineUpdates,
+  setEngineUpdatePolicy,
   getStatus,
   startBench,
   getSettings,
@@ -46,7 +51,11 @@ import {
   installMlx,
   installVllm,
   installTurboquant,
+  installKoboldcpp,
+  installLlamafile,
   getEngineCatalog,
+  getEngineRecommendation,
+  getBuildPrereqs,
   listDownloads,
   listEngines,
   loadModel,
@@ -54,6 +63,7 @@ import {
   removeEngine,
   removeModelDir,
   renameEngine,
+  scanEngineFolder,
   setPrimaryModelDir,
   reprobeEngine,
   rescanModels,
@@ -74,11 +84,15 @@ import {
 } from './api'
 import type {
   BenchState,
+  BuildPrereqs,
   DownloadsList,
   EngineBackends,
   EngineCatalog,
+  EngineRecommendationResult,
   EngineStats,
+  EngineUpdates,
   EnginesList,
+  UpdatePolicy,
   HfRepoDetail,
   HfSearchResult,
   LoadProfile,
@@ -95,6 +109,8 @@ export const queryKeys = {
   engines: ['engines'] as const,
   engineBackends: ['engine-backends'] as const,
   engineCatalog: ['engine-catalog'] as const,
+  engineRecommendation: ['engine-recommendation'] as const,
+  engineUpdates: ['engine-updates'] as const,
   models: ['models'] as const,
   modelDirs: ['modeldirs'] as const,
   downloads: ['downloads'] as const,
@@ -190,12 +206,38 @@ export function useEngineCatalog(provisioning: boolean): UseQueryResult<EngineCa
   })
 }
 
+/** Hardware-level engine recommendation over the WHOLE catalog (engine overhaul,
+ *  Phase 2). Same `provisioning` gating as useEngineBackends so the fits refresh
+ *  while an install runs. Hardware is stable, so a longer staleTime is fine. */
+export function useEngineRecommendation(provisioning: boolean): UseQueryResult<EngineRecommendationResult> {
+  return useQuery({
+    queryKey: queryKeys.engineRecommendation,
+    queryFn: getEngineRecommendation,
+    refetchInterval: provisioning ? 2000 : false,
+    retry: false,
+  })
+}
+
+/** Guided compile-from-source prereqs (ADR-089). Detects the Windows + CUDA build
+ *  toolchain. Disabled until the build guide opens so it doesn't probe on mount; the
+ *  result is stable for the session, so cache it. */
+export function useBuildPrereqs(enabled = true): UseQueryResult<BuildPrereqs> {
+  return useQuery({
+    queryKey: ['build-prereqs'],
+    queryFn: getBuildPrereqs,
+    enabled,
+    staleTime: 60_000,
+    retry: false,
+  })
+}
+
 export function useBackendInstall() {
   const qc = useQueryClient()
   const invalidate = () => {
     void qc.invalidateQueries({ queryKey: queryKeys.engineBackends })
     void qc.invalidateQueries({ queryKey: queryKeys.engineCatalog })
     void qc.invalidateQueries({ queryKey: queryKeys.engines })
+    void qc.invalidateQueries({ queryKey: queryKeys.engineUpdates })
     void qc.invalidateQueries({ queryKey: queryKeys.status })
   }
   return {
@@ -203,6 +245,8 @@ export function useBackendInstall() {
     mlx: useMutation({ mutationFn: () => installMlx(), onSuccess: invalidate }),
     vllm: useMutation({ mutationFn: () => installVllm(), onSuccess: invalidate }),
     turboquant: useMutation({ mutationFn: () => installTurboquant(), onSuccess: invalidate }),
+    koboldcpp: useMutation({ mutationFn: () => installKoboldcpp(), onSuccess: invalidate }),
+    llamafile: useMutation({ mutationFn: () => installLlamafile(), onSuccess: invalidate }),
     cancel: useMutation({ mutationFn: () => cancelBackendDownload(), onSuccess: invalidate }),
     remove: useMutation({ mutationFn: (id: string) => deleteEngineBackend(id), onSuccess: invalidate }),
     // Enable registers an already-installed backend binary without re-downloading.
@@ -211,9 +255,37 @@ export function useBackendInstall() {
     updateVllm: useMutation({ mutationFn: () => updateVllm(), onSuccess: invalidate }),
     updateMlx: useMutation({ mutationFn: () => updateMlx(), onSuccess: invalidate }),
     updateTurboquant: useMutation({ mutationFn: () => updateTurboquant(), onSuccess: invalidate }),
-    // Backend update re-runs the provision (same as install, idempotent via re-download).
-    updateBackend: useMutation({ mutationFn: (id: string) => installBackend(id), onSuccess: invalidate }),
+    updateKoboldcpp: useMutation({ mutationFn: () => updateKoboldcpp(), onSuccess: invalidate }),
+    updateLlamafile: useMutation({ mutationFn: () => updateLlamafile(), onSuccess: invalidate }),
+    // De-pinned, rollback-safe llama.cpp backend update (ADR-085): resolves the REAL latest
+    // upstream tag, downloads + probes it, swaps + GCs the old build only on success.
+    updateBackend: useMutation({ mutationFn: (id: string) => updateBackend(id), onSuccess: invalidate }),
   }
+}
+
+/** Honest per-engine update status (ADR-085, Phase 6). Offline-first: serves the cache,
+ *  never a fabricated "latest". Polls while a provision/update is active so a freshly
+ *  applied update flips hasUpdate off. */
+export function useEngineUpdates(provisioning = false): UseQueryResult<EngineUpdates> {
+  return useQuery({
+    queryKey: queryKeys.engineUpdates,
+    queryFn: () => getEngineUpdates(false),
+    refetchInterval: provisioning ? 3000 : false,
+    retry: false,
+  })
+}
+
+/** Set an engine's auto-update policy (off | notify | auto). Invalidates the updates +
+ *  engines queries so the control + badge reflect the new policy. */
+export function useUpdatePolicyMutation() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, policy }: { id: string; policy: UpdatePolicy }) => setEngineUpdatePolicy(id, policy),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: queryKeys.engineUpdates })
+      void qc.invalidateQueries({ queryKey: queryKeys.engines })
+    },
+  })
 }
 
 export function useEngineMutations() {
@@ -257,6 +329,13 @@ export function useEngineMutations() {
     stop: useMutation({ mutationFn: stopEngine, onSuccess: invalidate }),
     restart: useMutation({ mutationFn: restartEngine, onSuccess: invalidate }),
   }
+}
+
+/** Scan a chosen folder (or binary file) for the server binary (engine overhaul,
+ *  Phase 3). Read-only preflight for the guided Add-engine flow — no invalidation,
+ *  the actual add still goes through {@link useEngineMutations}.add. */
+export function useEngineScan() {
+  return useMutation({ mutationFn: (path: string) => scanEngineFolder(path) })
 }
 
 /** Browse a directory for the engine-binary picker (spec 03 §9). `path` is the

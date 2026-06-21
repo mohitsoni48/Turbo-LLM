@@ -3,6 +3,7 @@
 // daemon's error envelope { code, message } (spec 00 §3).
 
 import type {
+  BuildPrereqs,
   ChatCompletionResponse,
   ChatMessage,
   DownloadRecord,
@@ -10,8 +11,12 @@ import type {
   Engine,
   EngineBackends,
   EngineCatalog,
+  EngineRecommendationResult,
   EngineLogs,
+  EngineUpdates,
   EnginesList,
+  EngineScanResult,
+  UpdatePolicy,
   HfRepoDetail,
   HfSearchResult,
   HfTokenTest,
@@ -110,19 +115,34 @@ export function listEngines(): Promise<EnginesList> {
  *  probed OK but no version string was found (spec 03 §2 `probe_no_version`). */
 export type AddEngineResult = Engine & { warning: 'no_version' | null }
 
-export function addEngine(input: { name: string; binPath: string }): Promise<AddEngineResult> {
+export function addEngine(input: {
+  name: string
+  binPath: string
+  /** Optional GitHub source-repo URL the build came from (ADR-088) — enables the
+   *  notify-only "newer source available → rebuild" check. Omitted when empty. */
+  sourceRepo?: string
+  sourceBranch?: string
+}): Promise<AddEngineResult> {
   return request<AddEngineResult>('/api/v1/engines', { method: 'POST', json: input })
+}
+
+/** Guided Add-engine scan (engine overhaul, Phase 3): given a chosen FOLDER or a
+ *  binary file, locate + probe the server binary. Read-only — registration still
+ *  goes through {@link addEngine}. Throws ApiError on a ProbeError (wrong-OS/timeout). */
+export function scanEngineFolder(path: string): Promise<EngineScanResult> {
+  return request<EngineScanResult>('/api/v1/engines/scan', { method: 'POST', json: { path } })
 }
 
 export function getEngineBackends(): Promise<EngineBackends> {
   return request<EngineBackends>('/api/v1/engines/backends')
 }
 
-/** Install/update a llama.cpp backend build. When the current pinned build is already installed,
- *  the daemon returns `{ accepted: false, alreadyLatest: true, build }` (no download). */
+/** First-install a llama.cpp backend build (seeds the pinned LLAMA_BUILD). When the build
+ *  is already on disk the daemon returns `{ accepted: false, alreadyInstalled: true, build }`
+ *  (no download). Use {@link updateBackend} to honestly check + upgrade to the real latest. */
 export function installBackend(
   backend: string,
-): Promise<{ accepted: boolean; backend?: string; alreadyLatest?: boolean; build?: string }> {
+): Promise<{ accepted: boolean; backend?: string; alreadyInstalled?: boolean; build?: string }> {
   return request('/api/v1/engines/backends/install', { method: 'POST', json: { backend } })
 }
 
@@ -134,6 +154,18 @@ export function getEngineCatalog(): Promise<EngineCatalog> {
   return request<EngineCatalog>('/api/v1/engines/catalog')
 }
 
+/** Hardware-level fit for the WHOLE catalog (engine overhaul, Phase 2). Incompatible
+ *  engines come back WITH a reason so the UI greys them ("grey + reason, don't hide"). */
+export function getEngineRecommendation(): Promise<EngineRecommendationResult> {
+  return request<EngineRecommendationResult>('/api/v1/engines/recommendation')
+}
+
+/** Guided compile-from-source prereq check (ADR-089). Read-only: detects the
+ *  Windows + CUDA build toolchain. `supported:false` off Windows (parked elsewhere). */
+export function getBuildPrereqs(): Promise<BuildPrereqs> {
+  return request<BuildPrereqs>('/api/v1/build/prereqs')
+}
+
 export function installVllm(): Promise<{ accepted: true; engine: 'vllm' }> {
   return request('/api/v1/engines/vllm', { method: 'POST', json: {} })
 }
@@ -142,12 +174,45 @@ export function installTurboquant(): Promise<{ accepted: true; engine: 'turboqua
   return request('/api/v1/engines/turboquant', { method: 'POST', json: {} })
 }
 
+export function installKoboldcpp(): Promise<{ accepted: true; engine: 'koboldcpp' }> {
+  return request('/api/v1/engines/koboldcpp', { method: 'POST', json: {} })
+}
+
+export function installLlamafile(): Promise<{ accepted: true; engine: 'llamafile' }> {
+  return request('/api/v1/engines/llamafile', { method: 'POST', json: {} })
+}
+
 export function cancelBackendDownload(): Promise<{ ok: boolean }> {
   return request('/api/v1/engines/backends/cancel', { method: 'POST', json: {} })
 }
 
 export function deleteEngineBackend(id: string): Promise<{ ok: true }> {
   return request(`/api/v1/engines/backends/${encodeURIComponent(id)}`, { method: 'DELETE', json: {} })
+}
+
+/** De-pinned, rollback-safe update for an official llama.cpp backend (ADR-085). Resolves
+ *  the REAL latest upstream tag, downloads + probes it, swaps + GCs the old build only on
+ *  success. Returns `{ accepted:false, alreadyLatest:true, build }` when a real check
+ *  confirms you're current; 503 `offline` when GitHub couldn't be reached. */
+export function updateBackend(
+  id: string,
+): Promise<{ accepted: boolean; backend?: string; build?: string; alreadyLatest?: boolean }> {
+  return request(`/api/v1/engines/backends/${encodeURIComponent(id)}/update`, { method: 'POST', json: {} })
+}
+
+// ── Honest engine update status + auto-update policy (ADR-085, Phase 6) ────────
+/** Per-engine update status (installed/latest/hasUpdate/checkedAt) + current policies.
+ *  `?refresh=1` forces a live re-check; otherwise the cache is served (offline-first). */
+export function getEngineUpdates(refresh = false): Promise<EngineUpdates> {
+  return request<EngineUpdates>(`/api/v1/engines/updates${refresh ? '?refresh=1' : ''}`)
+}
+
+/** Set an engine's auto-update policy (off | notify | auto). */
+export function setEngineUpdatePolicy(id: string, policy: UpdatePolicy): Promise<unknown> {
+  return request(`/api/v1/engines/${encodeURIComponent(id)}/update-policy`, {
+    method: 'PUT',
+    json: { policy },
+  })
 }
 
 export function renameEngine(id: string, name: string): Promise<Engine> {
@@ -192,6 +257,16 @@ export function updateMlx(): Promise<{ accepted: true; engine: 'mlx' }> {
 /** Update (re-download latest release) the TurboQuant engine. */
 export function updateTurboquant(): Promise<{ accepted: true; engine: 'turboquant' }> {
   return request('/api/v1/engines/turboquant?update=1', { method: 'POST', json: {} })
+}
+
+/** Update (re-download latest release) the KoboldCpp engine. */
+export function updateKoboldcpp(): Promise<{ accepted: true; engine: 'koboldcpp' }> {
+  return request('/api/v1/engines/koboldcpp?update=1', { method: 'POST', json: {} })
+}
+
+/** Update (re-download latest release) the llamafile engine. */
+export function updateLlamafile(): Promise<{ accepted: true; engine: 'llamafile' }> {
+  return request('/api/v1/engines/llamafile?update=1', { method: 'POST', json: {} })
 }
 
 export function activateEngine(id: string): Promise<{ ok: true }> {

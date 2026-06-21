@@ -13,6 +13,13 @@ test('engineAcceptsFormat: gguf for llama.cpp forks, mlx for python engines', ()
   assert.equal(engineAcceptsFormat('vllm', 'gguf'), false)
 })
 
+test('engineAcceptsFormat: koboldcpp + llamafile are GGUF engines (Phase 4)', () => {
+  assert.equal(engineAcceptsFormat('koboldcpp', 'gguf'), true)
+  assert.equal(engineAcceptsFormat('koboldcpp', 'mlx'), false)
+  assert.equal(engineAcceptsFormat('llamafile', 'gguf'), true)
+  assert.equal(engineAcceptsFormat('llamafile', 'mlx'), false)
+})
+
 test('engineModelAlias: fixed alias for mlx/vllm, null (keep caller value) for llama.cpp', () => {
   // mlx-lm / vLLM serve under a fixed name and 404 on TurboLLM's internal key.
   assert.equal(engineModelAlias('mlx'), ENGINE_MODEL_ALIAS)
@@ -20,6 +27,12 @@ test('engineModelAlias: fixed alias for mlx/vllm, null (keep caller value) for l
   // llama.cpp ignores the request model field — keep whatever the caller sent.
   assert.equal(engineModelAlias('llama-server'), null)
   assert.equal(engineModelAlias(''), null)
+})
+
+test('engineModelAlias: null for koboldcpp + llamafile (they ignore the model field)', () => {
+  // Both serve the single loaded model and ignore the request model field, like llama.cpp.
+  assert.equal(engineModelAlias('koboldcpp'), null)
+  assert.equal(engineModelAlias('llamafile'), null)
 })
 
 test('vllmServerCommand serves under the shared default_model alias', () => {

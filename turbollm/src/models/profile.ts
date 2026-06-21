@@ -314,8 +314,13 @@ export function profileToArgs(p: LoadProfile, m: ModelEntry, caps: Capabilities,
   if (has('--parallel')) a.push('--parallel', String(p.parallel))
   if (p.parallel > 1 && p.kvUnified && has('--kv-unified')) a.push('--kv-unified')
   if (m.moe && p.nCpuMoe > 0 && has('--n-cpu-moe')) a.push('--n-cpu-moe', String(p.nCpuMoe))
-  if (p.kvTypeK !== 'f16' && has('--cache-type-k')) a.push('--cache-type-k', p.kvTypeK)
-  if (p.kvTypeV !== 'f16' && has('--cache-type-v')) a.push('--cache-type-v', p.kvTypeV)
+  // Emit a non-default KV cache type only when the engine supports the VALUE, not just
+  // the --cache-type-k FLAG: e.g. TurboQuant's turbo2/3/4 must NOT leak into a standard
+  // llama.cpp / llamafile engine (which has the flag but rejects the value → launch fails).
+  // The probe captures the supported set in caps.kvTypes; empty/unknown → only f16 is safe.
+  const kvOk = (t: string) => caps.kvTypes.includes(t)
+  if (p.kvTypeK !== 'f16' && has('--cache-type-k') && kvOk(p.kvTypeK)) a.push('--cache-type-k', p.kvTypeK)
+  if (p.kvTypeV !== 'f16' && has('--cache-type-v') && kvOk(p.kvTypeV)) a.push('--cache-type-v', p.kvTypeV)
   if (p.flashAttn !== 'auto' && has('--flash-attn')) a.push('--flash-attn', p.flashAttn)
   // threads 0 = auto → half the logical cores (matches the UI's "Auto" label).
   const threads = p.threads > 0 ? p.threads : cores > 0 ? Math.max(1, Math.floor(cores / 2)) : 0

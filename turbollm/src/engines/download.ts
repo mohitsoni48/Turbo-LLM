@@ -110,18 +110,28 @@ export function backendDir(enginesRoot: string, id: BackendId, tag = LLAMA_BUILD
   return join(enginesRoot, `llama.cpp-${tag}-${id}`)
 }
 
+/** The BackendDef for `id` at a SPECIFIC tag (the update path targets the real latest
+ *  tag, not the pinned LLAMA_BUILD). Returns null when this OS/arch has no such backend. */
+export function backendDefAt(id: BackendId, tag: string): BackendDef | null {
+  return availableBackends(tag).find((b) => b.id === id) ?? null
+}
+
 /** Path to an already-extracted backend's server binary, or null if not installed. */
 export function installedBackendServer(enginesRoot: string, id: BackendId, tag = LLAMA_BUILD): string | null {
   const dir = backendDir(enginesRoot, id, tag)
   return existsSync(dir) ? findServer(dir) : null
 }
 
-/** Recursively find a file by exact name under dir (first match), or null. */
-export function findFile(dir: string, name: string): string | null {
+/** Recursively find a file by exact name under dir (first match), or null.
+ *  `skipDir(name)` lets a caller prune subtrees (e.g. node_modules / dotdirs) so a
+ *  huge tree can't make the scan hang — default keeps the original full-walk
+ *  behavior for existing callers. */
+export function findFile(dir: string, name: string, skipDir?: (dirName: string) => boolean): string | null {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, e.name)
     if (e.isDirectory()) {
-      const r = findFile(full, name)
+      if (skipDir?.(e.name)) continue
+      const r = findFile(full, name, skipDir)
       if (r) return r
     } else if (e.name === name) {
       return full
@@ -292,6 +302,49 @@ export function pickReleaseAsset(
   return best
 }
 
+/** One GitHub release as we consume it (latest-release resolution). */
+export interface GithubRelease {
+  tag_name?: string
+  assets?: ReleaseAsset[]
+}
+
+/** Resolve the latest GitHub release of `repo` (tag + assets) via the public API.
+ *  Single source of truth for "what is upstream's latest" — used both by the
+ *  provisioning path (provisionForkRelease) and the honest update check (update.ts).
+ *  Throws on a non-2xx response (caller maps it to an offline/error state). */
+export async function latestGithubRelease(repo: string, signal?: AbortSignal): Promise<GithubRelease> {
+  const apiUrl = `https://api.github.com/repos/${repo}/releases/latest`
+  const res = await fetch(apiUrl, {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'turbollm' },
+    signal,
+  })
+  if (!res.ok) throw new Error(`could not query ${repo} releases: HTTP ${res.status}`)
+  return (await res.json()) as GithubRelease
+}
+
+/** Resolve just the latest release tag of `repo` (e.g. `b9761`), or '' when the
+ *  release carries no tag. Thin wrapper over {@link latestGithubRelease} for the
+ *  update checker, which only needs the tag to compare. */
+export async function latestReleaseTag(repo: string, signal?: AbortSignal): Promise<string> {
+  const rel = await latestGithubRelease(repo, signal)
+  return rel.tag_name ?? ''
+}
+
+/** Resolve the latest commit SHA on a branch of `repo` (ADR-088). `branch` empty →
+ *  the repo's default branch (the `HEAD` commits ref resolves it). Used by the honest
+ *  source-built update check to detect "newer source available → rebuild". Throws on a
+ *  non-2xx response (caller maps it to an offline/error state — never fabricates a sha). */
+export async function latestCommitSha(repo: string, branch = '', signal?: AbortSignal): Promise<string> {
+  const ref = branch.trim() ? encodeURIComponent(branch.trim()) : 'HEAD'
+  const res = await fetch(`https://api.github.com/repos/${repo}/commits/${ref}`, {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'turbollm' },
+    signal,
+  })
+  if (!res.ok) throw new Error(`could not query ${repo} commits: HTTP ${res.status}`)
+  const data = (await res.json()) as { sha?: string }
+  return data.sha ?? ''
+}
+
 /** Resolve the latest release of `repo` and provision its platform-matching
  *  `llama-server` into `<enginesRoot>/<destName>/`. Returns the server binary path.
  *  Throws `no_release_asset` (Error.message) when the latest release has no asset
@@ -311,13 +364,7 @@ export async function provisionForkRelease(
   }
 
   // Resolve the latest release + its assets via the GitHub API.
-  const apiUrl = `https://api.github.com/repos/${repo}/releases/latest`
-  const res = await fetch(apiUrl, {
-    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'turbollm' },
-    signal,
-  })
-  if (!res.ok) throw new Error(`could not query ${repo} releases: HTTP ${res.status}`)
-  const rel = (await res.json()) as { tag_name?: string; assets?: ReleaseAsset[] }
+  const rel = await latestGithubRelease(repo, signal)
   const asset = pickReleaseAsset(rel.assets ?? [])
   if (!asset) throw new Error('no_release_asset')
 
@@ -337,5 +384,75 @@ export async function provisionForkRelease(
 
   const bin = findServer(destDir)
   if (!bin) throw new Error('llama-server not found in extracted release archive')
+  return bin
+}
+
+// TurboQuant ships self-contained prebuilts for macOS-arm64 and Linux-x64 (Vulkan) as
+// GitHub releases tagged PER PLATFORM (turboquant-macos-arm64-*, turboquant-linux-x64-*)
+// — so `releases/latest` can't be used (it's whichever platform published most recently);
+// this resolver finds the newest release whose TAG matches the OS. Windows has no usable
+// self-contained prebuilt (the only one, on HuggingFace, is a MinGW build with a UCRT
+// linkage defect that won't load), so it returns null → "build from source".
+
+/** Resolve the TurboQuant archive URL for this platform, or null when no self-contained
+ *  prebuilt exists (→ caller falls back to "build from source"). macOS/Linux → the newest
+ *  GitHub release whose TAG names this OS and carries a matching asset; Windows → null. */
+export async function turboquantAssetUrl(
+  repo: string,
+  platform = process.platform,
+  archStr = process.arch,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  if (platform === 'win32') return null // no usable self-contained Windows prebuilt
+  const res = await fetch(`https://api.github.com/repos/${repo}/releases?per_page=100`, {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'turbollm' },
+    signal,
+  })
+  if (!res.ok) throw new Error(`could not query ${repo} releases: HTTP ${res.status}`)
+  const releases = (await res.json()) as GithubRelease[]
+  const osTag = platform === 'darwin' ? 'macos' : 'linux'
+  for (const rel of releases) {
+    if (!(rel.tag_name ?? '').toLowerCase().includes(osTag)) continue
+    const asset = pickReleaseAsset(rel.assets ?? [], platform, archStr)
+    if (asset) return asset.browser_download_url
+  }
+  return null
+}
+
+/** Provision TurboQuant's prebuilt `llama-server` into `<enginesRoot>/turboquant/`,
+ *  resolving the right per-platform source (HF on Windows, GitHub elsewhere). Same
+ *  download → extract → locate pipeline as {@link provisionForkRelease}. Throws
+ *  `no_release_asset` when this platform has no prebuilt. */
+export async function provisionTurboquant(
+  enginesRoot: string,
+  repo: string,
+  onProgress?: (p: ProvisionProgress) => void,
+  signal?: AbortSignal,
+): Promise<string> {
+  const destDir = join(enginesRoot, 'turboquant')
+  if (existsSync(destDir)) {
+    const found = findServer(destDir)
+    if (found) return found
+  }
+  const url = await turboquantAssetUrl(repo, process.platform, process.arch, signal)
+  if (!url) throw new Error('no_release_asset')
+
+  mkdirSync(destDir, { recursive: true })
+  const fname = url.split('/').pop()?.split('?')[0] || 'turboquant-download.zip'
+  const tmp = join(enginesRoot, fname)
+  try {
+    onProgress?.({ phase: 'downloading', pct: 0 })
+    await downloadFile(url, tmp, onProgress, signal)
+    onProgress?.({ phase: 'extracting', pct: -1 })
+    await extractArchive(tmp, destDir)
+    rmSync(tmp, { force: true })
+  } catch (e) {
+    rmSync(tmp, { force: true })
+    rmSync(destDir, { recursive: true, force: true })
+    throw e
+  }
+
+  const bin = findServer(destDir)
+  if (!bin) throw new Error('llama-server not found in extracted TurboQuant archive')
   return bin
 }

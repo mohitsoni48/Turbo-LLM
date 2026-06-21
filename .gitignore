@@ -36,6 +36,8 @@
 /turbollm/.preview-config.json
 /turbollm/.preview-config.json.broken-*
 /turbollm/daemon.pid
+# Daemon runtime dir (engine pid files) — lands here when the data dir resolves to the repo
+/turbollm/run/
 # Runtime scan/hash caches (hold the dev box's absolute local model paths)
 /turbollm/models-cache.json
 /turbollm/model-hashes.json

@@ -144,12 +144,32 @@ export type Engine = {
   version: string
   capabilities: EngineCapabilities
   addedAt?: string
+  /** Optional source-repo URL this engine was built from (ADR-088). When set, the
+   *  update check compares the built commit against the repo's latest commit and shows
+   *  a notify-only "newer source available → rebuild". */
+  sourceRepo?: string
+  /** Optional branch to compare commits against (ADR-088). Empty → default branch. */
+  sourceBranch?: string
 }
 
 export type EnginesList = {
   engines: Engine[]
   activeEngineId: string
 }
+
+/** POST /api/v1/engines/scan result (engine overhaul, Phase 3). Read-only preflight
+ *  for the guided Add-engine flow: `found:false` when no server binary turned up in
+ *  the chosen folder, else the located binary + its probed version/capabilities and
+ *  a pre-filled suggested name. ProbeError surfaces as an ApiError (wrong-OS / timeout). */
+export type EngineScanResult =
+  | { found: false }
+  | {
+      found: true
+      binPath: string
+      version: string
+      capabilities: EngineCapabilities
+      suggestedName: string
+    }
 
 /** A selectable llama.cpp backend variant (ADR-025). A "build" of the official
  *  engine. `engineId` is the registered engine to activate once installed.
@@ -187,6 +207,32 @@ export type EngineLogs = {
   lines: string[]
 }
 
+// ── Honest engine update status (ADR-085, Phase 6) ────────────────────────────
+/** Per-engine auto-update policy. Default 'notify'. */
+export type UpdatePolicy = 'off' | 'notify' | 'auto'
+
+/** One engine's update status from GET /api/v1/engines/updates. `latest` is null when
+ *  the check could not complete (offline) — the UI must show "couldn't check", never a
+ *  fabricated "up to date". `comparable` is false when latest couldn't be parsed/compared. */
+export type EngineUpdateStatus = {
+  installed: string
+  latest: string | null
+  hasUpdate: boolean
+  checkedAt: string
+  error?: 'offline' | 'no_source'
+  comparable: boolean
+  /** Set for source-built engines (ADR-088): the update is a source change that can't be
+   *  auto-applied (TurboLLM can't recompile). The UI shows "newer source available →
+   *  rebuild" + a repo link instead of a one-click Update. Absent for release/pip. */
+  rebuild?: boolean
+}
+
+/** GET /api/v1/engines/updates payload: per-engine-id status + current policy. */
+export type EngineUpdates = {
+  updates: Record<string, EngineUpdateStatus>
+  policies: Record<string, UpdatePolicy>
+}
+
 /** One entry in the engine catalog (ADR-044). Mirrors src/engines/catalog.ts. */
 export type CatalogEngine = {
   id: string
@@ -211,6 +257,81 @@ export type CatalogEngine = {
 
 export type EngineCatalog = {
   engines: CatalogEngine[]
+}
+
+// ── Guided compile-from-source prereqs (ADR-089) ─────────────────────────────
+/** One build-toolchain prerequisite from GET /api/v1/build/prereqs. Mirrors
+ *  src/engines/build-prereqs.ts BuildPrereqTool. */
+export type BuildPrereqTool = {
+  id: 'git' | 'cmake' | 'cuda' | 'msvc'
+  name: string
+  found: boolean
+  version?: string
+  installUrl: string
+}
+
+/** GET /api/v1/build/prereqs payload. `supported` is false off Windows (guided build is
+ *  Windows + CUDA only for now); `tools` is empty there. */
+export type BuildPrereqs = {
+  supported: boolean
+  tools: BuildPrereqTool[]
+}
+
+// ── Engine recommendation (engine overhaul, Phase 2) ─────────────────────────
+// Mirrors the backend shapes from src/engines/{hardware,catalog,recommend}.ts.
+// Returned by GET /api/v1/engines/recommendation.
+
+/** Detected hardware, mirrors src/engines/hardware.ts HardwareProfile. */
+export type HardwareProfile = {
+  platform: string
+  arch: 'x64' | 'arm64'
+  gpuVendor: 'nvidia' | 'amd' | 'intel' | 'apple' | 'unknown'
+  hasGpu: boolean
+  vramMb: number
+  gpuName?: string
+}
+
+/** One hardware path of a catalog engine, mirrors src/engines/catalog.ts EngineVariant. */
+export type EngineVariant = {
+  id: string
+  label: string
+  repo: string
+  requires: {
+    platform?: string[]
+    arch?: ('x64' | 'arm64')[]
+    gpuVendor?: string[]
+    backend?: string
+    minVramMb?: number
+    minCudaCC?: number
+  }
+  stability: 'stable' | 'experimental'
+  speed?: 'baseline' | 'fast' | 'fastest'
+  backendId?: string
+  hasPrebuilt: boolean
+}
+
+/** Per-engine fit over the detected hardware, mirrors src/engines/recommend.ts EngineFit.
+ *  The recommendation endpoint passes plain CatalogEngine[] (no `supportedHere`/disk
+ *  flags), so the embedded engine omits those projection-only fields. */
+export type EngineFit = {
+  engine: Omit<CatalogEngine, 'supportedHere' | 'installed' | 'enabled'>
+  variants: EngineVariant[]
+  compatible: EngineVariant[]
+  /** Set when compatible.length === 0 — why this box can't run the engine. */
+  incompatibleReason?: string
+  recommended: boolean
+}
+
+/** The headline pick + per-engine fits, mirrors src/engines/recommend.ts EngineRecommendation. */
+export type EngineRecommendation = {
+  recommended: { engineId: string; variantId: string } | null
+  fits: EngineFit[]
+}
+
+/** GET /api/v1/engines/recommendation payload. */
+export type EngineRecommendationResult = {
+  hardware: HardwareProfile
+  recommendation: EngineRecommendation
 }
 
 /** Error envelope used for every non-2xx response (spec 00 §3). */

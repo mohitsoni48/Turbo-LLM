@@ -70,6 +70,19 @@ test('sampling flags are gated by engine capability', () => {
   assert.equal(args.includes('--frequency-penalty'), false)
 })
 
+test('non-f16 KV cache type is gated by engine kvTypes (turbo3 must not leak to llamafile)', () => {
+  const flags = ['--cache-type-k', '--cache-type-v']
+  const p = { ...base(), kvTypeK: 'turbo3', kvTypeV: 'turbo3' }
+  // Engine has the FLAG but not the VALUE (standard llama.cpp / llamafile) → skip (else it crashes).
+  const noTurbo = profileToArgs(p, model(), { kvTypes: ['f16', 'q8_0'], flags })
+  assert.equal(noTurbo.includes('--cache-type-k'), false)
+  assert.equal(noTurbo.includes('--cache-type-v'), false)
+  // Engine supports the value (TurboQuant) → emitted.
+  const turbo = profileToArgs(p, model(), { kvTypes: ['f16', 'turbo2', 'turbo3', 'turbo4'], flags })
+  assert.equal(turbo[turbo.indexOf('--cache-type-k') + 1], 'turbo3')
+  assert.equal(turbo[turbo.indexOf('--cache-type-v') + 1], 'turbo3')
+})
+
 test('stop strings do not appear in profileToArgs (they are per-request only)', () => {
   const p = { ...base(), sampling: { ...defaultSampling(), stop: ['</s>', '<|im_end|>'] } }
   const args = profileToArgs(p, model(), caps)
