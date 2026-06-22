@@ -53,9 +53,11 @@ export interface BenchState {
     tps: number
     ttftMs: number
     vramMb: number | null
-    /** Recommended sampling read from the model's HF card (ADR-099), when one was found.
-     *  Already merged into the winning profile so Save persists it; surfaced here so the
-     *  results dialog can show what the card recommended. Absent when no card / nothing parsed. */
+    /** The COMPLETE sampling the winning profile will be saved with (card values already
+     *  merged in). Lets the results dialog show the full config as a table. */
+    sampling?: CardSampling
+    /** The subset of `sampling` that came from the HF card (ADR-099), when any was found —
+     *  used to mark those rows "from model card". Absent when no card / nothing parsed. */
     recommendedSampling?: CardSampling
   }
 }
@@ -256,6 +258,14 @@ export class BenchRunner {
           tps: best.cand.tps ?? 0,
           ttftMs: best.cand.ttftMs ?? 0,
           vramMb: best.cand.vramMb,
+          // The full sampling that Save will persist (winning profile, card values merged in) so
+          // the results dialog can show the COMPLETE config — not just the card-derived delta.
+          sampling: {
+            temp: profile.sampling.temp,
+            topK: profile.sampling.topK,
+            topP: profile.sampling.topP,
+            minP: profile.sampling.minP,
+          },
           ...(recommended && hasAnySampling(recommended) ? { recommendedSampling: recommended } : {}),
         },
         candidates: results,
@@ -688,11 +698,16 @@ export class BenchRunner {
   // ---- card-derived recommended sampling (ADR-099) ------------------------
 
   /** Resolve the model's HF card and extract recommended sampling (temp/top_k/top_p/min_p).
-   *  HYBRID: the deterministic heuristic parser runs first; only if it finds nothing does the
-   *  just-tuned local model read its own card and emit JSON (the LLM fallback). Returns
-   *  undefined when the model's repo can't be resolved (e.g. a hand-placed file), the card is
-   *  missing/unreachable, or nothing parseable is found — the caller then leaves sampling at the
-   *  resolved defaults. Never throws (all failures collapse to undefined). */
+   *  Order (ADR-099): (1) heuristic on the LOCAL repo card; (2) heuristic on the BASE model's card
+   *  — most local GGUFs are third-party requants (lmstudio-community/unsloth/noctrex/…) whose card
+   *  omits the author's recommended sampling, but they declare the original model, whose card has
+   *  it (e.g. Gemma QAT → `google/gemma-…`); (3) LLM fallback (one reload) on the richer card for
+   *  prose-only recommendations. Returns undefined when the repo can't be resolved (hand-placed
+   *  file), no card is reachable, or nothing parseable is found — the caller then leaves sampling
+   *  at the resolved defaults. Never throws.
+   *
+   *  NOTE: a gated base model (e.g. Gemma's `google/…`) needs a configured HF token to fetch — without
+   *  one its card 401s and we fall through (sampling unchanged). */
   private async extractCardSampling(
     entry: ModelEntry,
     winningProfile: LoadProfile,
@@ -702,19 +717,27 @@ export class BenchRunner {
     const repo = inferRepoFromPath(entry.path, this.store.snapshot().modelDirs)
     if (!repo) return undefined // hand-placed file outside a model dir → no upstream card
     this.state = { ...this.state, step: 'Reading model-card recommendations…' }
-    let card = ''
-    try {
-      card = await this.hf.fetchModelCard(repo)
-    } catch {
-      return undefined
+
+    // 1. Local GGUF repo card — heuristic.
+    const localCard = await this.hf.fetchModelCard(repo).catch(() => '')
+    const localH = parseCardSampling(localCard)
+    if (hasAnySampling(localH)) return localH
+
+    // 2. Base-model fallback — the original model's card (where the author states the recommendation).
+    let baseCard = ''
+    if (!this.cancelled) {
+      const baseRepo = await this.hf.baseModelOf(repo).catch(() => null)
+      if (baseRepo && baseRepo !== repo) {
+        baseCard = await this.hf.fetchModelCard(baseRepo).catch(() => '')
+        const baseH = parseCardSampling(baseCard)
+        if (hasAnySampling(baseH)) return baseH
+      }
     }
-    if (!card) return undefined
 
-    const heuristic = parseCardSampling(card)
-    if (hasAnySampling(heuristic)) return heuristic // deterministic fast path
-
-    // LLM fallback: prose-only / unusual card — ask the just-tuned model to read it.
+    // 3. LLM fallback (one reload) on the richer card — prose-only / unusual phrasing the scan misses.
     if (this.cancelled) return undefined
+    const card = baseCard.length > localCard.length ? baseCard : localCard
+    if (!card) return undefined
     const llm = await this.llmExtractSampling(entry, winningProfile, caps, sys, card).catch(() => undefined)
     return llm && hasAnySampling(llm) ? llm : undefined
   }
@@ -757,7 +780,14 @@ export class BenchRunner {
 
   /** One non-streaming completion that returns the generated TEXT (vs {@link chat}, which
    *  returns timings). Used by the card-sampling LLM fallback. Honors the per-call timeout and
-   *  the cancel kill-switch; null on a non-OK response. */
+   *  the cancel kill-switch; null on a non-OK response.
+   *
+   *  `enable_thinking: false` is REQUIRED here (live-verified): a reasoning model (Gemma 4,
+   *  Qwen3, …) otherwise spends the whole token budget on hidden reasoning and either emits no
+   *  JSON or truncates it (`finish_reason: length`) — the extraction returns nothing on exactly
+   *  the models people run. Card extraction is a structured task that needs no reasoning; with
+   *  thinking off, even a 4B model emits clean JSON in well under 200 tokens. Templates that
+   *  don't know the kwarg ignore it. */
   private async chatText(target: string, content: string, maxTokens: number, timeoutMs: number): Promise<string | null> {
     const signals: AbortSignal[] = [AbortSignal.timeout(timeoutMs)]
     if (this.abort) signals.push(this.abort.signal)
@@ -770,6 +800,7 @@ export class BenchRunner {
         max_tokens: maxTokens,
         temperature: 0,
         stream: false,
+        chat_template_kwargs: { enable_thinking: false },
       }),
       signal: signals.length > 1 ? AbortSignal.any(signals) : signals[0],
     })

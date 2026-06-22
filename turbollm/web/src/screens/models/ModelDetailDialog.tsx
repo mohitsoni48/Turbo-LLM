@@ -570,64 +570,108 @@ function ConfigResizeHandle() {
   )
 }
 
-/** Shown when an auto-tune run finishes: the winning config + Save/Cancel. Both close the model
- *  dialog (handled by the parent); Save persists the tuned profile, Cancel discards it. */
+/** One label/value line in the auto-tune config table; `tag` badges a value's source. */
+function ConfigRow({ label, value, tag }: { label: string; value: ReactNode; tag?: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-[3px]">
+      <span className="text-muted">{label}</span>
+      <span className="flex items-center gap-1.5">
+        {tag && (
+          <span
+            className="rounded px-1 py-0.5 text-[10px] font-medium uppercase tracking-wide"
+            style={{ color: 'var(--accent)', background: 'color-mix(in srgb, var(--accent) 12%, transparent)' }}
+          >
+            {tag}
+          </span>
+        )}
+        <span className="font-mono text-ink">{value}</span>
+      </span>
+    </div>
+  )
+}
+
+function ConfigSection({ title }: { title: string }) {
+  return <div className="mt-2 pb-1 pt-1 text-[11px] font-semibold uppercase tracking-wide text-faint first:mt-0 first:pt-0">{title}</div>
+}
+
+/** Shown when an auto-tune run finishes: the COMPLETE winning config as a table + Save/Cancel.
+ *  Both close the model dialog (handled by the parent); Save persists the tuned profile, Cancel
+ *  discards it. Sampling rows read from the model's HF card are tagged "from card" (ADR-099). */
 function AutoTuneResultDialog({
   result,
   modelName,
   onSave,
   onCancel,
 }: {
-  result?: { params: { ctx: number; ngl: number; nCpuMoe: number }; tps: number; vramMb: number | null; recommendedSampling?: CardSampling }
+  result?: {
+    params: { ctx: number; ngl: number; nCpuMoe: number; parallel: number; kvTypeK: string; flashAttn: string }
+    tps: number
+    ttftMs?: number
+    vramMb: number | null
+    sampling?: CardSampling
+    recommendedSampling?: CardSampling
+  }
   modelName?: string
   onSave: () => void
   onCancel: () => void
 }) {
   const rec = result?.recommendedSampling
-  const recParts = rec
-    ? ([
-        rec.temp != null && `temp ${rec.temp}`,
-        rec.topP != null && `top_p ${rec.topP}`,
-        rec.topK != null && `top_k ${rec.topK}`,
-        rec.minP != null && `min_p ${rec.minP}`,
-      ].filter(Boolean) as string[])
-    : []
+  const s = result?.sampling
+  const fromCard = (k: keyof CardSampling) => rec?.[k] != null
+  const anyFromCard = !!rec && (rec.temp != null || rec.topP != null || rec.topK != null || rec.minP != null)
+  const samplingRows: { label: string; key: keyof CardSampling }[] = [
+    { label: 'Temperature', key: 'temp' },
+    { label: 'Top-K', key: 'topK' },
+    { label: 'Top-P', key: 'topP' },
+    { label: 'Min-P', key: 'minP' },
+  ]
   return (
     <AlertDialog open={!!result} onOpenChange={(o) => { if (!o) onCancel() }}>
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>Auto-tune complete</AlertDialogTitle>
           <AlertDialogDescription asChild>
-            <div className="flex flex-col gap-2 text-[13px]">
-              <span>
-                Fastest config found:{' '}
-                <span className="font-mono font-medium" style={{ color: 'var(--ok)' }}>{result?.tps.toFixed(1)} tok/s</span>{' '}
-                on your machine.
+            <div className="flex flex-col gap-2.5 text-[13px]">
+              <span className="text-muted">
+                Fastest config found on your machine —{' '}
+                <span className="font-mono font-medium" style={{ color: 'var(--ok)' }}>{result?.tps.toFixed(1)} tok/s</span>.
+                Save applies this complete config to {modelName ?? 'this model'}:
               </span>
+
               {result && (
-                <span className="text-muted">
-                  GPU layers <span className="font-mono text-ink">{result.params.ngl}</span>
-                  {result.params.nCpuMoe > 0 && (
-                    <> · MoE experts on CPU <span className="font-mono text-ink">{result.params.nCpuMoe}</span></>
+                <div className="rounded-md border border-border bg-panel-2 px-3 py-1.5">
+                  <ConfigSection title="Runtime" />
+                  <ConfigRow label="GPU layers" value={result.params.ngl} />
+                  {result.params.nCpuMoe > 0 && <ConfigRow label="MoE experts on CPU" value={result.params.nCpuMoe} />}
+                  <ConfigRow label="Context length" value={`${result.params.ctx.toLocaleString()} tok`} />
+                  <ConfigRow label="KV cache type" value={result.params.kvTypeK} />
+                  <ConfigRow label="Flash attention" value={result.params.flashAttn} />
+                  {result.params.parallel > 1 && <ConfigRow label="Parallel slots" value={result.params.parallel} />}
+
+                  <ConfigSection title="Sampling" />
+                  {s ? (
+                    samplingRows.map(({ label, key }) => (
+                      <ConfigRow key={key} label={label} value={s[key] ?? '—'} tag={fromCard(key) ? 'from card' : undefined} />
+                    ))
+                  ) : (
+                    <ConfigRow label="Sampling" value="model defaults" />
                   )}
-                  {' '}· <span className="font-mono text-ink">{result.params.ctx.toLocaleString()}</span> ctx
-                  {result.vramMb != null && <> · ~<span className="font-mono text-ink">{result.vramMb}</span> MB VRAM</>}
-                </span>
+
+                  <ConfigSection title="Measured" />
+                  <ConfigRow label="Speed" value={`${result.tps.toFixed(1)} tok/s`} />
+                  {result.vramMb != null && <ConfigRow label="VRAM used" value={`~${result.vramMb.toLocaleString()} MB`} />}
+                  {result.ttftMs ? <ConfigRow label="First token" value={`${Math.round(result.ttftMs)} ms`} /> : null}
+                </div>
               )}
-              {recParts.length > 0 && (
-                <span
-                  className="rounded-md border px-2.5 py-2"
-                  style={{
-                    borderColor: 'color-mix(in srgb, var(--accent) 35%, var(--border))',
-                    background: 'color-mix(in srgb, var(--accent) 5%, transparent)',
-                  }}
-                >
-                  <span className="text-ink">Recommended sampling from the model card:</span>{' '}
-                  <span className="font-mono text-ink">{recParts.join(' · ')}</span>
-                  <span className="mt-0.5 block text-faint">Applied on Save — adjust any time in Sampling below.</span>
-                </span>
-              )}
-              <span className="text-faint">Save applies these settings to {modelName ?? 'this model'} and closes.</span>
+
+              <span className="text-faint">
+                {anyFromCard ? (
+                  <>Values tagged <span style={{ color: 'var(--accent)' }}>from card</span> were read from the model's Hugging Face page. </>
+                ) : (
+                  <>No sampling recommendation was found on the model's card — sampling stays at your current values. </>
+                )}
+                Change any of these later in Sampling.
+              </span>
             </div>
           </AlertDialogDescription>
         </AlertDialogHeader>

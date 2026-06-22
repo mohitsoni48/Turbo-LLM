@@ -89,8 +89,11 @@ export type BenchState = {
     tps: number
     ttftMs: number
     vramMb: number | null
-    /** Sampling recommended by the model's HF card (ADR-099), already merged into the winning
-     *  profile so Save persists it. Absent when no card / nothing parsed. */
+    /** The complete sampling the winning profile will be saved with (card values merged in) —
+     *  drives the full-config table in the results dialog. */
+    sampling?: CardSampling
+    /** The subset of `sampling` that came from the model's HF card (ADR-099) — marks those rows
+     *  "from model card". Absent when no card / nothing parsed. */
     recommendedSampling?: CardSampling
   }
 }

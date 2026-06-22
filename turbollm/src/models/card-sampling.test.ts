@@ -6,6 +6,7 @@ import {
   hasAnySampling,
   parseLlmSampling,
   buildCardExtractionPrompt,
+  relevantCardExcerpt,
   type CardSampling,
 } from './card-sampling'
 
@@ -123,6 +124,41 @@ test('parseLlmSampling: non-JSON / garbage → empty, never throws', () => {
   assert.deepEqual(parseLlmSampling('I could not find any recommended settings.'), {})
   assert.deepEqual(parseLlmSampling('{ not valid json '), {})
   assert.deepEqual(parseLlmSampling(''), {})
+})
+
+// ─── relevant excerpt (long-card windowing) ──────────────────────────────────
+
+test('relevantCardExcerpt: short card returned whole', () => {
+  const card = 'A short card with temperature: 0.6.'
+  assert.equal(relevantCardExcerpt(card, 8000), card)
+})
+
+test('relevantCardExcerpt: long card centers the window on a back-half settings cue', () => {
+  // Mimics the unsloth case: recommendation buried ~16k chars into a long card.
+  const filler = 'lorem ipsum '.repeat(1400) // ~16.8k chars, no cue
+  const card = filler + '\n## Recommended Settings\ntemperature: 1.0, top_p: 0.95, top_k: 64\n' + 'tail '.repeat(400)
+  const ex = relevantCardExcerpt(card, 8000)
+  assert.ok(ex.length <= 8000)
+  assert.ok(ex.includes('temperature: 1.0'), 'excerpt must include the back-half recommendation')
+  assert.ok(ex.includes('Recommended Settings'), 'window should include the surrounding heading')
+})
+
+test('relevantCardExcerpt: prefers a "recommended settings" heading over an early bare param', () => {
+  // An early bare `temperature 0` (a demo) sits in the head; the real recommendation block is
+  // deep in the card. The window should center on the heading, not the early demo mention.
+  const head = 'Run with temperature 0 for the demo.\n' + 'lorem '.repeat(2000) // ~12k chars
+  const card = head + '\n## Recommended Settings\ntemperature: 1.0, top_p: 0.95\n' + 'tail '.repeat(400)
+  const ex = relevantCardExcerpt(card, 8000)
+  assert.ok(ex.includes('Recommended Settings'), 'window centers on the recommendation heading')
+  assert.ok(ex.includes('temperature: 1.0'))
+  assert.ok(!ex.includes('for the demo'), 'the early demo mention is outside the window')
+})
+
+test('relevantCardExcerpt: cue already in the head → head window', () => {
+  const card = 'temperature: 0.6 at the very top\n' + 'x'.repeat(20000)
+  const ex = relevantCardExcerpt(card, 8000)
+  assert.equal(ex, card.slice(0, 8000))
+  assert.ok(ex.includes('temperature: 0.6'))
 })
 
 // ─── prompt builder ──────────────────────────────────────────────────────────

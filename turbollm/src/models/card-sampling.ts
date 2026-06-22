@@ -92,11 +92,31 @@ export function hasAnySampling(s: CardSampling): boolean {
   return s.temp != null || s.topP != null || s.topK != null || s.minP != null
 }
 
+/** Pick the most relevant ~`maxLen`-char slice of a (possibly long) card for the LLM
+ *  fallback. A card under the limit is returned whole; otherwise we center the window on
+ *  the first sampling cue (temperature/top_k/top_p/min_p or a "recommended settings" /
+ *  "sampling" heading) so a recommendation in the BACK HALF of a long card stays in-window
+ *  — the head-only slice would miss it (live-verified: unsloth cards put settings ~char 16k).
+ *  Falls back to the head when no cue is found or the cue is already in the head. */
+export function relevantCardExcerpt(card: string, maxLen = 8000): string {
+  if (card.length <= maxLen) return card
+  // Prefer a recommendation-context cue (a "recommended settings / sampling parameters / best
+  // practices" heading) over a bare param name — a bare `temperature` often first appears in an
+  // early usage snippet, whereas the heading marks the real recommendation block.
+  const strong = /\b(?:recommended\s+(?:settings|sampling|parameters)|sampling\s+(?:settings|parameters|params)|best\s+practices?|generation\s+config)\b/i.exec(card)
+  const cue = strong ?? /\b(?:temp(?:erature)?|top[_\-\s]?[pk]|min[_\-\s]?p)\b/i.exec(card)
+  if (!cue || cue.index < maxLen) return card.slice(0, maxLen)
+  // Start a little before the cue so its surrounding heading/context is included.
+  const start = Math.max(0, cue.index - Math.floor(maxLen * 0.3))
+  return card.slice(start, start + maxLen)
+}
+
 /** Build the LLM-fallback prompt: ask the model to read its own card and emit ONLY a JSON
- *  object of recommended sampling values (null for anything not stated). The card is
- *  capped so a small-context model can still take it alongside the instruction. */
+ *  object of recommended sampling values (null for anything not stated). The card is reduced
+ *  to the most relevant window (see {@link relevantCardExcerpt}) so a small-context model can
+ *  take it alongside the instruction without the recommendation falling outside the window. */
 export function buildCardExtractionPrompt(card: string): string {
-  const trimmed = card.slice(0, 8000)
+  const trimmed = relevantCardExcerpt(card, 8000)
   return [
     "Extract the model author's RECOMMENDED sampling settings from the model card below.",
     'Output ONLY a single JSON object, no prose, with exactly these keys:',
