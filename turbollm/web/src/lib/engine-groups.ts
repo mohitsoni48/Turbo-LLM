@@ -14,11 +14,17 @@ export function isOfficialLlama(binPath: string): boolean {
 }
 
 /** A logical-engine grouping key. Engines that share a key collapse into one row.
- *  Official llama.cpp builds (any backend/tag) all share `'official-llama'`; pip
- *  engines share their kind; TurboQuant builds share `'turboquant'`; everything else
- *  is treated as a distinct user-added engine (`'user:'+id`) and never merged. */
+ *  Each official llama.cpp BACKEND is its own engine (`'official-llama-<backend>'`, e.g.
+ *  cuda/rocm) so the "Running now" dropdown lists them individually — the user switches
+ *  among "llama.cpp (CUDA)", "llama.cpp (ROCm)", TurboQuant, … from there. Multiple builds
+ *  of the SAME backend (after an update) still collapse into that backend's group. Pip
+ *  engines share their kind; TurboQuant builds share `'turboquant'`; everything else is a
+ *  distinct user-added engine (`'user:'+id`). */
 export function engineGroupKey(e: Engine): string {
-  if (isOfficialLlama(e.binPath)) return 'official-llama'
+  if (isOfficialLlama(e.binPath)) {
+    const backend = parseLlamaBuild(e.binPath)?.backend
+    return backend ? `official-llama-${backend}` : 'official-llama'
+  }
   if (e.kind === 'koboldcpp' || e.kind === 'mlx' || e.kind === 'vllm') return e.kind
   if (/[\\/]engines[\\/]turboquant[\\/]/.test(e.binPath)) return 'turboquant'
   return `user:${e.id}`
@@ -32,9 +38,13 @@ const GROUP_LABEL: Record<string, string> = {
   turboquant: 'TurboQuant',
 }
 
-/** Display label for a logical-engine group. User-added engines (no fixed label)
- *  fall back to the engine's own name. */
+/** Display label for a logical-engine group. Per-backend llama.cpp groups read as
+ *  "llama.cpp (CUDA)"; user-added engines fall back to the engine's own name. */
 export function groupLabel(key: string, members: Engine[]): string {
+  if (key.startsWith('official-llama-')) {
+    const backend = key.slice('official-llama-'.length)
+    return `llama.cpp (${BACKEND_LABEL[backend] ?? backend.toUpperCase()})`
+  }
   return GROUP_LABEL[key] ?? members[0]?.name ?? key
 }
 
@@ -117,7 +127,14 @@ export function groupEngines(engines: Engine[]): EngineGroup[] {
   }
   return order.map((key) => {
     const members = byKey.get(key)!
-    return { key, label: groupLabel(key, members), members, latestId: latestMemberId(members) }
+    // Newest build first (e.g. b9754 before b9744) so the version dropdown reads latest→oldest;
+    // members without a parseable build number keep their relative order at the end.
+    const sorted = [...members].sort((a, b) => {
+      const na = llamaBuildNumber(parseLlamaBuild(a.binPath)?.tag)
+      const nb = llamaBuildNumber(parseLlamaBuild(b.binPath)?.tag)
+      return (nb ?? -1) - (na ?? -1)
+    })
+    return { key, label: groupLabel(key, sorted), members: sorted, latestId: latestMemberId(sorted) }
   })
 }
 

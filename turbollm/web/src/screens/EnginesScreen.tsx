@@ -43,11 +43,6 @@ import { Button } from '../components/ui/button'
 import { Skeleton } from '../components/ui/skeleton'
 import { toast } from '../components/ui/sonner'
 import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from '../components/ui/collapsible'
-import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -161,11 +156,12 @@ export function EnginesScreen() {
             rec={recQ.data}
             isLoading={recQ.isLoading}
             activeCatalogId={activeEngine ? catalogIdFor(activeEngine) : null}
-            list={list}
-            backends={backendsQ.data}
             provisioning={provisioning}
           />
         )}
+
+        {/* Other installed llama.cpp builds — separate, below all engines (newest-first). */}
+        <OtherLlamaBuildsSection />
 
         {/* Live engine log */}
         {activeEngine && <EngineLogPanel open={logPanelOpen} onOpenChange={setLogPanelOpen} />}
@@ -407,15 +403,11 @@ function InstallManageCatalog({
   rec,
   isLoading,
   activeCatalogId,
-  list,
-  backends,
   provisioning,
 }: {
   rec: EngineRecommendationResult | undefined
   isLoading: boolean
   activeCatalogId: string | null
-  list: EnginesList | undefined
-  backends: EngineBackends | undefined
   provisioning: boolean
 }) {
   const catalogQ = useEngineCatalog(provisioning)
@@ -571,17 +563,9 @@ function InstallManageCatalog({
         // llama.cpp is the built-in default: its GPU builds are managed inline here (no
         // separate "Advanced" section), so it gets a dedicated row, not the generic one.
         if (fit.engine.id === 'llama.cpp') {
-          return (
-            <LlamaCppManageRow
-              key={fit.engine.id}
-              fit={fit}
-              catalog={catalogById.get(fit.engine.id)}
-              isActive={activeCatalogId === fit.engine.id}
-              list={list}
-              backends={backends}
-              provisioning={provisioning}
-            />
-          )
+          // llama.cpp = the recommended backend (e.g. CUDA), as its own manage-only row.
+          // The other backends live in the "Other llama.cpp builds" section below all engines.
+          return <LlamaCppBackendRows key={fit.engine.id} filter="recommended" />
         }
         const regId = registryEngineId(catalogById.get(fit.engine.id) ?? fit.engine as CatalogEngine)
         return (
@@ -873,150 +857,44 @@ function CatalogFitRow({
   )
 }
 
-// ─── llama.cpp manage row — its GPU builds live inline (no separate "Advanced" zone) ──
+// ─── "Other llama.cpp" section — the non-recommended backends, below all engines ──────
 
-/** llama.cpp is the built-in default, so instead of a second "Advanced" section we manage
- *  it right in its "Install & manage" row: the GPU-build (backend) picker inline, and an
- *  expandable list of installed builds for per-build update/delete. */
-function LlamaCppManageRow({
-  fit,
-  catalog,
-  isActive,
-  list,
-  backends,
-  provisioning,
-}: {
-  fit: EngineFit
-  catalog: CatalogEngine | undefined
-  isActive: boolean
-  list: EnginesList | undefined
-  backends: EngineBackends | undefined
-  provisioning: boolean
-}) {
-  const e = fit.engine
+/** A section BELOW all engines listing the OTHER official llama.cpp backends (ROCm, CPU,
+ *  Vulkan, SYCL — everything except the GPU-recommended one, which lives in "Install &
+ *  manage"). Manage-only (download / update / delete); switching the active engine is done
+ *  from the top "Running now" dropdown, not here. */
+function OtherLlamaBuildsSection() {
+  // Collapsed by default — these are the non-recommended backends, secondary to the catalog.
   const [open, setOpen] = useState(false)
   return (
-    <div className="flex flex-col gap-3 rounded-[var(--radius)] border border-border bg-panel p-4">
-      <div className="flex items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-sm font-semibold text-ink">{e.name}</span>
-            {fit.recommended ? (
-              <Badge variant="accent">
-                <Sparkles size={10} /> Recommended for you
-              </Badge>
-            ) : isActive ? (
-              <span className="flex items-center gap-1 text-[11px] font-medium" style={{ color: 'var(--ok)' }}>
-                <Check size={11} /> Active
-              </span>
-            ) : (
-              <span className="flex items-center gap-1 text-[11px] font-medium text-muted">
-                <Check size={11} /> Installed
-              </span>
-            )}
-            <Badge variant="mono">built-in</Badge>
-            {catalog && (
-              <a
-                href={catalog.homepage}
-                target="_blank"
-                rel="noreferrer"
-                className="flex items-center gap-0.5 text-[11px] text-muted hover:text-ink"
-                title={catalog.homepage}
-              >
-                <ExternalLink size={10} /> docs
-              </a>
-            )}
-          </div>
-          <div className="mt-0.5 text-[12px] text-muted">{e.description}</div>
+    <section className="flex flex-col gap-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 text-left"
+      >
+        <ChevronDown
+          size={14}
+          className="shrink-0 text-muted transition-transform"
+          style={{ transform: open ? 'rotate(0deg)' : 'rotate(-90deg)' }}
+        />
+        <SectionLabel>Other llama.cpp builds</SectionLabel>
+        <span className="text-[11px] text-faint">ROCm · CPU · Vulkan · SYCL</span>
+      </button>
+      {open && (
+        <div className="flex flex-col gap-2">
+          <p className="text-[12px] text-muted">
+            The other GPU/CPU backends for llama.cpp. Download one, then switch to it from the engine
+            dropdown up top. The recommended backend is in “Install &amp; manage”.
+          </p>
+          <LlamaCppBackendRows filter="others" />
         </div>
-        <div className="shrink-0 pt-0.5">
-          <BuildPicker list={list} backends={backends} provisioning={provisioning} />
-        </div>
-      </div>
-
-      <Collapsible open={open} onOpenChange={setOpen}>
-        <CollapsibleTrigger className="flex items-center gap-1.5 text-[12px] text-muted hover:text-ink">
-          <ChevronDown size={14} className={`shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
-          Installed builds
-        </CollapsibleTrigger>
-        <CollapsibleContent>
-          <div className="mt-2">
-            <LlamaCppBackendRows />
-          </div>
-        </CollapsibleContent>
-      </Collapsible>
-    </div>
+      )}
+    </section>
   )
 }
 
-/** GPU build dropdown for official llama.cpp (the Build-dropdown behavior lifted out
- *  of the old EngineSelector). Selecting an installed build activates it; selecting an
- *  uninstalled build downloads (then activates) it. */
-function BuildPicker({
-  list,
-  backends,
-  provisioning,
-}: {
-  list: EnginesList | undefined
-  backends: EngineBackends | undefined
-  provisioning: boolean
-}) {
-  const mut = useEngineMutations()
-  const install = useBackendInstall()
-
-  if (!list || !backends) return null
-
-  const busy = provisioning || mut.activate.isPending || install.backend.isPending
-  const activeBuild = backends.backends.find((b) => b.active)
-
-  const selectBuild = (b: EngineBackends['backends'][number]) => {
-    if (b.active) return
-    if (b.installed && b.engineId) {
-      mut.activate.mutate(b.engineId, {
-        onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not switch build.'),
-      })
-    } else {
-      install.backend.mutate(b.id, {
-        onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not download build.'),
-      })
-    }
-  }
-
-  return (
-    <label className="flex flex-col gap-1">
-      <span className="text-[11px] font-medium uppercase tracking-wide text-faint">Build (GPU backend)</span>
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          disabled={busy}
-          className="flex h-9 min-w-[220px] items-center gap-2 rounded-lg border border-border bg-bg px-3 text-[13px] text-ink transition-colors hover:border-[color:var(--accent)] disabled:opacity-60"
-        >
-          <Layers size={15} className="text-accent" />
-          <span className="flex-1 truncate text-left">{activeBuild?.label ?? 'Choose a build'}</span>
-          <ChevronDown size={14} className="shrink-0 text-muted" />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-[260px]">
-          <div className="px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-faint">
-            Build — which GPU backend
-          </div>
-          {backends.backends.map((b) => (
-            <DropdownMenuItem key={b.id} onSelect={() => selectBuild(b)} className="flex items-center gap-2">
-              <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-                {b.active && <Check size={14} className="text-accent" />}
-              </span>
-              <span className="min-w-0 flex-1 truncate text-ink">{b.label}</span>
-              {b.recommended && (
-                <Sparkles size={11} className="shrink-0 text-accent" aria-label="recommended" />
-              )}
-              <span className="shrink-0 text-[11px] text-muted">
-                {b.active ? 'active' : b.installed ? 'installed' : 'download'}
-              </span>
-            </DropdownMenuItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </label>
-  )
-}
 
 // ─── shared helpers ───────────────────────────────────────────────────────────
 

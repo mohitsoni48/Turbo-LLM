@@ -19,8 +19,8 @@ import {
   availableBackends,
   backendDefAt,
   backendDir,
-  deleteBackend,
-  installedBackendServer,
+  deleteAllBackendBuilds,
+  installedBackendBuild,
   latestReleaseTag,
   provisionBackend,
   provisionTurboquant,
@@ -138,17 +138,28 @@ export function registerApi(app: Hono, d: Deps): void {
     const root = join(d.store.dir(), 'engines')
     const active = d.registry.active()
     const regEngines = d.registry.list().engines
+    // Backend state is REGISTRY-driven (the accurate source): a backend is installed when ANY
+    // official llama.cpp build of it is registered — not just the pinned LLAMA_BUILD tag (which
+    // a de-pinned update moves off, making the old check falsely report "not installed" and
+    // prompting a confusing re-download). The backend's engine = its newest installed build.
+    const backendOf = (p: string): string | undefined =>
+      p.match(/llama\.cpp-[^/\\]+-(cuda|rocm|sycl|vulkan|metal|cpu)/i)?.[1]?.toLowerCase()
+    const buildNumOf = (p: string): number => {
+      const m = p.match(/llama\.cpp-b(\d+)/i)
+      return m ? Number(m[1]) : -1
+    }
     const backends = availableBackends().map((b) => {
-      const bin = installedBackendServer(root, b.id)
-      // `enabled` = a registry engine is registered with this binary path.
-      const eng = bin ? regEngines.find((e) => e.binPath === bin) : undefined
+      const builds = regEngines
+        .filter((e) => backendOf(e.binPath) === b.id)
+        .sort((x, y) => buildNumOf(y.binPath) - buildNumOf(x.binPath))
+      const eng = builds[0]
       return {
         id: b.id,
         label: b.label,
-        installed: !!bin,
+        installed: !!eng,
         enabled: !!eng,
         recommended: b.id === recommended,
-        active: !!bin && !!active && active.binPath === bin,
+        active: !!eng && !!active && active.id === eng.id,
         engineId: eng?.id ?? '',
       }
     })
@@ -173,11 +184,13 @@ export function registerApi(app: Hono, d: Deps): void {
     const def = availableBackends().find((x) => x.id === b.backend)
     if (!def) return err(c, 400, 'invalid_config_value', 'Unknown backend for this platform.')
     const root = join(d.store.dir(), 'engines')
-    // First-install only: seed the pinned LLAMA_BUILD. When the pinned build is already
-    // on disk, this is a no-op (no real upstream check here — that's the Update path's
-    // job, which de-pins and resolves the REAL latest tag honestly, ADR-085).
-    if (installedBackendServer(root, def.id)) {
-      return c.json({ accepted: false, alreadyInstalled: true, build: LLAMA_BUILD })
+    // First-install only: seed the pinned LLAMA_BUILD. When ANY build of this backend is
+    // already on disk (tag-agnostic — an update may have de-pinned it off LLAMA_BUILD,
+    // ADR-085), this is a no-op so we never re-download a working install. The real upstream
+    // check is the Update path's job, which resolves the REAL latest tag honestly.
+    const existing = installedBackendBuild(root, def.id)
+    if (existing) {
+      return c.json({ accepted: false, alreadyInstalled: true, build: existing.tag })
     }
     { const busy = engineWorkBusy(d); if (busy) return err(c, 409, 'engine_already_running', busy) }
     const ac = new AbortController()
@@ -224,7 +237,9 @@ export function registerApi(app: Hono, d: Deps): void {
     const def = availableBackends().find((x) => x.id === c.req.param('id'))
     if (!def) return err(c, 400, 'invalid_config_value', 'Unknown backend for this platform.')
     const root = join(d.store.dir(), 'engines')
-    const oldBin = installedBackendServer(root, def.id)
+    // Tag-agnostic: the currently-installed build may have been de-pinned off LLAMA_BUILD by a
+    // prior update (ADR-085), so resolve the newest build on disk rather than the pinned tag.
+    const oldBin = installedBackendBuild(root, def.id)?.bin ?? null
     if (!oldBin) return err(c, 409, 'not_installed', 'Backend is not installed — download it first.')
     { const busy = engineWorkBusy(d); if (busy) return err(c, 409, 'engine_already_running', busy) }
     // Honest upstream check FIRST: resolve the real latest tag. Offline → clear 503.
@@ -288,10 +303,12 @@ export function registerApi(app: Hono, d: Deps): void {
     const def = availableBackends().find((x) => x.id === c.req.param('id'))
     if (!def) return err(c, 400, 'invalid_config_value', 'Unknown backend for this platform.')
     const root = join(d.store.dir(), 'engines')
-    const bin = installedBackendServer(root, def.id)
-    if (!bin) return err(c, 409, 'not_installed', 'Backend is not installed on disk — download it first.')
-    let eng = d.registry.list().engines.find((e) => e.binPath === bin)
-    if (!eng) eng = (await d.registry.add(`llama.cpp ${LLAMA_BUILD} (${def.id})`, bin)).engine
+    // Tag-agnostic: enable whatever build is on disk (a de-pinned update may have left a
+    // non-LLAMA_BUILD tag), naming the registry entry after that build's real tag.
+    const build = installedBackendBuild(root, def.id)
+    if (!build) return err(c, 409, 'not_installed', 'Backend is not installed on disk — download it first.')
+    let eng = d.registry.list().engines.find((e) => e.binPath === build.bin)
+    if (!eng) eng = (await d.registry.add(`llama.cpp ${build.tag} (${def.id})`, build.bin)).engine
     d.registry.activate(eng.id)
     return c.json({ ok: true, engineId: eng.id })
   })
@@ -302,11 +319,16 @@ export function registerApi(app: Hono, d: Deps): void {
     const def = availableBackends().find((x) => x.id === c.req.param('id'))
     if (!def) return err(c, 400, 'invalid_config_value', 'Unknown backend for this platform.')
     const root = join(d.store.dir(), 'engines')
-    const bin = installedBackendServer(root, def.id)
-    const eng = bin ? d.registry.list().engines.find((e) => e.binPath === bin) : undefined
-    if (eng && d.registry.active()?.id === eng.id) await d.manager.stopAndWait()
-    if (eng) d.registry.remove(eng.id)
-    deleteBackend(root, def.id, LLAMA_BUILD)
+    // Tag-agnostic: unregister + delete EVERY build of this backend (an update may have left
+    // more than one tag-keyed dir / registry entry). Stop first if the active engine is one of them.
+    const backendDirRe = new RegExp(`[\\\\/]engines[\\\\/]llama\\.cpp-.+-${def.id}[\\\\/]`)
+    const engs = d.registry.list().engines.filter((e) => backendDirRe.test(e.binPath))
+    const activeId = d.registry.active()?.id
+    if (engs.some((e) => e.id === activeId)) await d.manager.stopAndWait()
+    for (const e of engs) {
+      try { d.registry.remove(e.id) } catch { /* already gone */ }
+    }
+    deleteAllBackendBuilds(root, def.id)
     return c.json({ ok: true })
   })
 
@@ -2020,6 +2042,15 @@ function engineInstallDir(eng: Engine, enginesRoot: string): string | null {
   // whole build dir (clone + objects + binary), which can be several GB.
   const srcDir = sourceBuildDirOf(eng.binPath, enginesRoot)
   if (srcDir) return inside(srcDir) ? srcDir : null
+  // Official llama.cpp build (engines/llama.cpp-<tag>-<backend>/): purge THIS specific
+  // version's dir so a user can delete an individual build (e.g. an old b9744) without
+  // touching others. The generic backend-delete only knows the pinned tag, so without this
+  // a per-version delete would leave the files on disk.
+  const llamaMatch = eng.binPath.replace(/\\/g, '/').match(/\/(llama\.cpp-[^/]+)\//i)
+  if (llamaMatch) {
+    const d = join(enginesRoot, llamaMatch[1])
+    return inside(d) ? d : null
+  }
   return null
 }
 
