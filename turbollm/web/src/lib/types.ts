@@ -299,6 +299,15 @@ export type CatalogEngine = {
   installed?: boolean
   /** Whether a registry engine entry exists for this engine (files installed AND registered). */
   enabled?: boolean
+  /** This catalog engine was compiled from source (ADR-100): manage it via Rebuild, not a
+   *  prebuilt Update. True whether currently registered or just on disk (disabled). */
+  sourceBuilt?: boolean
+  /** Registry id of the matched source-built engine (when enabled) — for disable/delete/policy. */
+  sourceEngineId?: string
+  /** Branch the source-built engine was compiled from (for a Rebuild). */
+  sourceBranch?: string
+  /** Path to the built binary (used to Enable a built-but-disabled source engine). */
+  sourceBinPath?: string
 }
 
 export type EngineCatalog = {

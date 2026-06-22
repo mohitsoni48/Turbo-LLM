@@ -8,6 +8,7 @@ import {
   Layers,
   Loader2,
   MoreHorizontal,
+  RefreshCw,
   Settings2,
   Sparkles,
   Wrench,
@@ -195,12 +196,22 @@ function StatusHero({
   const [rebuildOpen, setRebuildOpen] = useState(false)
 
   // Pull the newly-built engine into the lists whenever ANY in-app build settles — even if
-  // the build dialog that started it was closed mid-build (ADR-100). Watches the active→
-  // settled transition on the status poll's `engineBuild` so we refresh exactly once.
+  // the build dialog that started it was closed mid-build (ADR-100) — and surface a global
+  // success/error toast so the user always gets confirmation the engine was added. Watches
+  // the active→settled transition on the status poll's `engineBuild` so it fires exactly once.
   const wasBuilding = useRef(false)
-  const buildActive = !!status?.engineBuild?.active
+  const eb = status?.engineBuild
+  const buildActive = !!eb?.active
   useEffect(() => {
-    if (wasBuilding.current && !buildActive) build.refresh()
+    if (wasBuilding.current && !buildActive && eb) {
+      build.refresh()
+      // The CUDA-download step also uses engineBuild; only celebrate an actual engine build.
+      if (eb.phase === 'done' && eb.engine && eb.engine !== 'CUDA Toolkit') {
+        toast.success(`${eb.engine} built and added — it's now your active engine.`)
+      } else if (eb.phase === 'error' && eb.error && eb.engine !== 'CUDA Toolkit') {
+        toast.error(eb.error)
+      }
+    }
     wasBuilding.current = buildActive
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [buildActive])
@@ -463,6 +474,8 @@ function InstallManageCatalog({
   }
   const registryEngineId = (e: CatalogEngine): string | undefined => {
     const eng = registry?.engines ?? []
+    // Source-built engines (ADR-100): the backend already matched the registry entry by repo.
+    if (e.sourceEngineId) return e.sourceEngineId
     if (e.provision === 'pip') return eng.find((x) => x.kind === e.kind)?.id
     if (e.id === 'turboquant') return eng.find((x) => /[\\/]engines[\\/]turboquant[\\/]/.test(x.binPath))?.id
     if (e.id === 'koboldcpp' || e.id === 'llamafile') return eng.find((x) => x.kind === e.kind)?.id
@@ -476,6 +489,18 @@ function InstallManageCatalog({
     })
   }
   const doEnable = (e: CatalogEngine) => {
+    // Source-built engine that was disabled (registry entry removed, build output still on
+    // disk): re-register the built binary rather than the prebuilt-install path (ADR-100).
+    if (e.sourceBuilt && e.sourceBinPath) {
+      engineMut.add.mutate(
+        { binPath: e.sourceBinPath, name: e.name, sourceRepo: e.homepage, sourceBranch: e.sourceBranch || undefined },
+        {
+          onSuccess: () => toast.success(`${e.name} enabled`),
+          onError: (err) => toast.error(err instanceof ApiError ? err.message : `Could not enable ${e.name}.`),
+        },
+      )
+      return
+    }
     const m = installFor(e)
     if (!m) return
     m.mutate(undefined, {
@@ -637,7 +662,9 @@ function CatalogFitRow({
 }) {
   const e = fit.engine
   const [guideOpen, setGuideOpen] = useState(false)
+  const [rebuildOpen, setRebuildOpen] = useState(false)
   const isLlama = e.id === 'llama.cpp'
+  const sourceBuilt = !!catalog?.sourceBuilt
   const incompatible = fit.compatible.length === 0
   // Compatible here, but no prebuilt for this OS (e.g. ik_llama everywhere, TurboQuant
   // on Windows/Linux) → "build from source → Add your own" instead of a dead Install.
@@ -714,6 +741,7 @@ function CatalogFitRow({
           // llama.cpp is the built-in default — its builds are managed in Zone 3.
           <span className="text-[12px] text-faint">built-in</span>
         ) : !catalog ? null : isInstalled ? (
+          <>
           <DropdownMenu>
             <DropdownMenuTrigger
               aria-label={`Actions for ${e.name}`}
@@ -723,9 +751,17 @@ function CatalogFitRow({
               <MoreHorizontal size={16} />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem onSelect={() => onUpdate(catalog)} disabled={provisioning}>
-                <Download size={14} /> {updateStatus?.hasUpdate ? 'Update now' : 'Update'}
-              </DropdownMenuItem>
+              {sourceBuilt ? (
+                // Source-built engines update by RECOMPILING at the latest commit (ADR-088/100),
+                // not by downloading a prebuilt. `rebuild` flags a newer commit on the source repo.
+                <DropdownMenuItem onSelect={() => setRebuildOpen(true)} disabled={anyPending}>
+                  <RefreshCw size={14} /> {updateStatus?.rebuild ? 'Rebuild (new commit)' : 'Rebuild'}
+                </DropdownMenuItem>
+              ) : (
+                <DropdownMenuItem onSelect={() => onUpdate(catalog)} disabled={provisioning}>
+                  <Download size={14} /> {updateStatus?.hasUpdate ? 'Update now' : 'Update'}
+                </DropdownMenuItem>
+              )}
               {isEnabled ? (
                 <DropdownMenuItem onSelect={() => onDisable(catalog)}>Disable</DropdownMenuItem>
               ) : (
@@ -757,6 +793,18 @@ function CatalogFitRow({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+          {/* Rebuild: recompile the source-built engine at the latest commit (ADR-088/100). */}
+          {sourceBuilt && catalog && (
+            <BuildGuideDialog
+              open={rebuildOpen}
+              onOpenChange={setRebuildOpen}
+              repoUrl={catalog.homepage}
+              branch={catalog.sourceBranch || undefined}
+              engineName={e.name}
+              mode="rebuild"
+            />
+          )}
+          </>
         ) : buildYourself ? (
           // Build-it-yourself fork — compatible here but no prebuilt for this OS
           // (ik_llama everywhere; TurboQuant on Windows/Linux). Open the guided build

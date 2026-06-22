@@ -37,7 +37,7 @@ import { ensureKoboldcpp, koboldcppBinPath, koboldcppDir, koboldcppProfileToArgs
 import { ensureLlamafile, llamafileBinPath, llamafileDir } from '../engines/llamafile'
 import { catalogForPlatform, catalogEngine } from '../engines/catalog'
 import { checkBuildPrereqs } from '../engines/build-prereqs'
-import { runBuild, buildDirName } from '../engines/build-runner'
+import { runBuild, buildDirName, sameRepo, sourceBuildBinary, sourceBuildDirOf } from '../engines/build-runner'
 import { provisionCuda } from '../engines/cuda-provision'
 import { detectHardware } from '../engines/hardware'
 import { recommendEngines } from '../engines/recommend'
@@ -367,7 +367,31 @@ export function registerApi(app: Hono, d: Deps): void {
         installed = existsSync(llamafileBinPath(enginesRoot))
         enabled = regEngines.some((x) => x.kind === 'llamafile')
       }
-      return { ...e, installed, enabled }
+      // Source-built recognition (ADR-100): a fork the user compiled from THIS catalog repo
+      // (matched by the engine's sourceRepo) is installed + enabled — so the card shows the
+      // manage menu (rebuild/disable/delete) instead of a stale "Build from source". Also
+      // detect a built-but-disabled engine (registry entry removed, build output still on disk)
+      // so Enable can re-register it.
+      const srcEng = regEngines.find((x) => sameRepo(x.sourceRepo, e.homepage))
+      let sourceBinPath: string | undefined = srcEng?.binPath
+      if (!srcEng) sourceBinPath = sourceBuildBinary(enginesRoot, e.homepage) ?? undefined
+      const sourceBuilt = !!srcEng || !!sourceBinPath
+      if (srcEng) {
+        installed = true
+        enabled = true
+      } else if (sourceBinPath) {
+        installed = true
+        enabled = enabled ?? false
+      }
+      return {
+        ...e,
+        installed,
+        enabled,
+        sourceBuilt,
+        sourceEngineId: srcEng?.id,
+        sourceBranch: srcEng?.sourceBranch ?? '',
+        sourceBinPath: sourceBinPath ?? '',
+      }
     })
     return c.json({ engines: items })
   })
@@ -1992,6 +2016,10 @@ function engineInstallDir(eng: Engine, enginesRoot: string): string | null {
     const d = llamafileDir(enginesRoot)
     return inside(d) ? d : null
   }
+  // Source-built engine (ADR-100): binary lives under engines/build/<slug>/ — purge the
+  // whole build dir (clone + objects + binary), which can be several GB.
+  const srcDir = sourceBuildDirOf(eng.binPath, enginesRoot)
+  if (srcDir) return inside(srcDir) ? srcDir : null
   return null
 }
 

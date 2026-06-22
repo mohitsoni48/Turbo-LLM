@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildDirName, CMAKE_CONFIGURE_ARGS, pickGenerator, vcvarsBatch, stripGenericAsmLanguage } from './build-runner'
+import { buildDirName, CMAKE_CONFIGURE_ARGS, pickGenerator, vcvarsBatch, stripGenericAsmLanguage, sameRepo, sourceBuildDirOf } from './build-runner'
+import { join } from 'node:path'
 
 test('buildDirName: repo name from a .git URL, branch appended', () => {
   assert.equal(buildDirName('https://github.com/ikawrakow/ik_llama.cpp.git', 'sidestream'), 'ik_llama.cpp-sidestream')
@@ -74,4 +75,27 @@ test('stripGenericAsmLanguage: does not touch unrelated tokens containing the le
   const { text, changed } = stripGenericAsmLanguage('set(MY_WASM_FLAG ON)')
   assert.equal(changed, false)
   assert.ok(text.includes('MY_WASM_FLAG'))
+})
+
+test('sameRepo: matches a homepage URL to a stored sourceRepo regardless of scheme/.git/case', () => {
+  assert.ok(sameRepo('https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant', 'https://github.com/atomicbot-ai/atomic-llama-cpp-turboquant'))
+  assert.ok(sameRepo('https://github.com/owner/repo', 'owner/repo'))
+  assert.ok(sameRepo('https://github.com/owner/repo.git', 'https://github.com/owner/repo/'))
+})
+
+test('sameRepo: distinct repos do not match; empty never matches', () => {
+  assert.ok(!sameRepo('https://github.com/owner/repo-a', 'https://github.com/owner/repo-b'))
+  assert.ok(!sameRepo('', 'owner/repo'))
+  assert.ok(!sameRepo(undefined, undefined))
+})
+
+test('sourceBuildDirOf: derives the build dir from a source-built binPath', () => {
+  const root = join('C:', 'Users', 'x', '.turbollm', 'engines')
+  const bin = join(root, 'build', 'atomic-llama-cpp-turboquant', 'build', 'bin', 'llama-server.exe')
+  assert.equal(sourceBuildDirOf(bin, root), join(root, 'build', 'atomic-llama-cpp-turboquant'))
+})
+
+test('sourceBuildDirOf: null for a non-source-build binary path', () => {
+  const root = join('C:', 'e')
+  assert.equal(sourceBuildDirOf(join(root, 'turboquant', 'llama-server.exe'), root), null)
 })

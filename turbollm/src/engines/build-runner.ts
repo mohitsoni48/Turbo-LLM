@@ -57,6 +57,38 @@ export function buildDirName(repoUrl: string, branch?: string): string {
   return raw.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'engine'
 }
 
+/** PURE: loose equality of two repo identifiers (full URL or `owner/repo`), ignoring scheme,
+ *  a `github.com/` host prefix, a trailing `.git`/slash, and case. Lets us match a catalog
+ *  entry's homepage to a source-built engine's stored `sourceRepo`. */
+export function sameRepo(a?: string, b?: string): boolean {
+  const norm = (s?: string) =>
+    (s ?? '')
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/^github\.com\//, '')
+      .replace(/\.git$/, '')
+      .replace(/\/+$/, '')
+  const na = norm(a)
+  return na !== '' && na === norm(b)
+}
+
+/** The built `llama-server` for a repo (+optional branch) under `enginesRoot`, or null. Used
+ *  to detect a source-built engine whose registry entry was removed (disabled) but whose build
+ *  output still sits on disk under `engines/build/<slug>/`. */
+export function sourceBuildBinary(enginesRoot: string, repoUrl: string, branch?: string): string | null {
+  const root = join(enginesRoot, 'build', buildDirName(repoUrl, branch))
+  return resolveServerBinary(join(root, 'build')) ?? resolveServerBinary(root)
+}
+
+/** PURE: given a built engine's binPath, the `engines/build/<slug>` dir it lives under (for
+ *  purge), or null when the path isn't a source-build output. */
+export function sourceBuildDirOf(binPath: string, enginesRoot: string): string | null {
+  const m = binPath.replace(/\\/g, '/').match(/\/engines\/build\/([^/]+)(?:\/|$)/i)
+  if (!m) return null
+  return join(enginesRoot, 'build', m[1])
+}
+
 /** PURE: prefer Ninja (fast, parallel) when a ninja.exe is reachable; else NMake Makefiles
  *  (ships with the MSVC Build Tools — always available after vcvars, just single-threaded). */
 export function pickGenerator(hasNinja: boolean): 'Ninja' | 'NMake Makefiles' {
