@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildDirName, CMAKE_CONFIGURE_ARGS, pickGenerator, vcvarsBatch } from './build-runner'
+import { buildDirName, CMAKE_CONFIGURE_ARGS, pickGenerator, vcvarsBatch, stripGenericAsmLanguage } from './build-runner'
 
 test('buildDirName: repo name from a .git URL, branch appended', () => {
   assert.equal(buildDirName('https://github.com/ikawrakow/ik_llama.cpp.git', 'sidestream'), 'ik_llama.cpp-sidestream')
@@ -43,4 +43,35 @@ test('vcvarsBatch: calls vcvars x64, then cmake, quotes spaced args, propagates 
 test('vcvarsBatch: leaves space-free args unquoted', () => {
   const bat = vcvarsBatch('C:\\vc.bat', ['-G', 'Ninja', '-DGGML_CUDA=ON'])
   assert.ok(bat.includes('cmake -G Ninja -DGGML_CUDA=ON'))
+})
+
+test('stripGenericAsmLanguage: removes ASM from a project() language list (TurboQuant case)', () => {
+  const { text, changed } = stripGenericAsmLanguage('project("ggml" C CXX ASM)\nset(X 1)')
+  assert.equal(changed, true)
+  assert.match(text, /project\("ggml" C CXX\)/)
+  assert.ok(!/\bASM\b/.test(text))
+})
+
+test('stripGenericAsmLanguage: handles unquoted project name + extra spacing', () => {
+  const { text } = stripGenericAsmLanguage('project(ggml-htp C CXX ASM)')
+  assert.equal(text, 'project(ggml-htp C CXX)')
+})
+
+test('stripGenericAsmLanguage: comments out a standalone enable_language(ASM)', () => {
+  const { text, changed } = stripGenericAsmLanguage('    enable_language(ASM)')
+  assert.equal(changed, true)
+  assert.match(text, /^#\s+enable_language\(ASM\)/)
+})
+
+test('stripGenericAsmLanguage: leaves CMake without ASM untouched', () => {
+  const src = 'project("ggml" C CXX)\nenable_language(CUDA)\n'
+  const { text, changed } = stripGenericAsmLanguage(src)
+  assert.equal(changed, false)
+  assert.equal(text, src)
+})
+
+test('stripGenericAsmLanguage: does not touch unrelated tokens containing the letters ASM', () => {
+  const { text, changed } = stripGenericAsmLanguage('set(MY_WASM_FLAG ON)')
+  assert.equal(changed, false)
+  assert.ok(text.includes('MY_WASM_FLAG'))
 })

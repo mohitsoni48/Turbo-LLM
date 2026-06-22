@@ -13,7 +13,7 @@
 // The toolchain PATH override (build-prereqs.ts `buildEnv`) is applied so a conda-env /
 // custom-path CUDA Toolkit (and a user-provided ninja) are found. Windows + CUDA only.
 import { execFile, spawn } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { delimiter, dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { buildEnv, checkBuildPrereqs } from './build-prereqs'
@@ -226,6 +226,91 @@ function runStep(
   })
 }
 
+/** True if `dir` (recursively) contains any assembly source the build could compile. We skip
+ *  VCS / build / dep dirs. Used to decide whether an enabled CMake `ASM` language is real or
+ *  gratuitous. */
+function hasAssemblySources(dir: string): boolean {
+  const SKIP = new Set(['.git', 'build', 'node_modules', '.cache', 'vendor'])
+  const stack = [dir]
+  while (stack.length) {
+    const d = stack.pop()!
+    let entries
+    try {
+      entries = readdirSync(d, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const e of entries) {
+      if (e.isDirectory()) {
+        if (!SKIP.has(e.name.toLowerCase()) && !e.name.startsWith('.')) stack.push(join(d, e.name))
+      } else if (/\.(s|asm)$/i.test(e.name)) {
+        return true
+      }
+    }
+  }
+  return false
+}
+
+/** PURE: remove the generic CMake `ASM` language enablement from one CMakeLists' text. Strips
+ *  the `ASM` token from `project(... ASM ...)` and comments out standalone `enable_language(ASM)`
+ *  lines. Returns the new text + whether anything changed. Only safe to apply when the repo has
+ *  NO assembly sources (nothing to actually assemble). */
+export function stripGenericAsmLanguage(text: string): { text: string; changed: boolean } {
+  let changed = false
+  const out = text.split(/\r?\n/).map((line) => {
+    if (/\bproject\s*\(/i.test(line) && /\bASM\b/.test(line)) {
+      const next = line.replace(/\s+ASM\b/g, '')
+      if (next !== line) {
+        changed = true
+        return next
+      }
+    }
+    if (/^\s*enable_language\s*\(\s*ASM\s*\)/i.test(line)) {
+      changed = true
+      return `# ${line}  # neutralized by TurboLLM (no assembly sources)`
+    }
+    return line
+  })
+  return { text: out.join('\n'), changed }
+}
+
+/** Some llama.cpp forks (e.g. TurboQuant) enable CMake's generic `ASM` language in their ggml
+ *  project even though they ship NO assembly sources. On modern CMake (CMP0194 NEW) MSVC isn't
+ *  accepted as an ASM assembler, so configure dies with "No CMAKE_ASM_COMPILER could be found"
+ *  for a language nothing uses. When the repo genuinely has no `.s`/`.asm` files, strip that
+ *  unused declaration from its CMakeLists so the MSVC build can proceed — provably a no-op
+ *  (there is no assembly to compile). If real assembly exists, we leave it alone. */
+function neutralizeGratuitousAsm(srcDir: string, log: (l: string) => void): void {
+  if (hasAssemblySources(srcDir)) return // real assembly — needs a real assembler; don't touch
+  // The CMakeLists files that can enable the generic ASM language for our Windows+CUDA config.
+  const candidates = [join(srcDir, 'CMakeLists.txt'), join(srcDir, 'ggml', 'CMakeLists.txt')]
+  let patched = 0
+  for (const file of candidates) {
+    if (!existsSync(file)) continue
+    let text: string
+    try {
+      text = readFileSync(file, 'utf8')
+    } catch {
+      continue
+    }
+    const { text: next, changed } = stripGenericAsmLanguage(text)
+    if (changed) {
+      try {
+        writeFileSync(file, next)
+        patched++
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+  if (patched > 0) {
+    log(
+      'Removed an unused CMake ASM-language declaration (the repo ships no assembly sources) so ' +
+        'the build works with MSVC — this fork enables ASM gratuitously, which modern CMake rejects with MSVC.',
+    )
+  }
+}
+
 /** Run the full clone → configure → compile → locate flow. Throws on any failure (the
  *  caller surfaces it via BuildState.fail); on success returns the built binary + commit. */
 export async function runBuild(req: BuildRequest, hooks: BuildHooks, signal: AbortSignal): Promise<BuildOutput> {
@@ -272,6 +357,10 @@ export async function runBuild(req: BuildRequest, hooks: BuildHooks, signal: Abo
 
   // Record the built commit (ADR-088 provenance / rebuild comparison).
   const commit = (await runStep('git', ['-C', srcDir, 'rev-parse', 'HEAD'], { env, signal, onLine: () => {} })).trim()
+
+  // Drop a gratuitous ASM-language declaration some forks ship (no assembly sources) so the
+  // MSVC build doesn't die on "No CMAKE_ASM_COMPILER could be found" for a language nothing uses.
+  neutralizeGratuitousAsm(srcDir, hooks.log)
 
   // Pick the generator from what's reachable on PATH (incl. the user's toolchain dirs).
   const generator = pickGenerator(onPath(env, 'ninja.exe'))
