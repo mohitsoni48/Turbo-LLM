@@ -225,6 +225,10 @@ the UI when something fails to load.
 ## Auto-tuning & performance
 
 - **Auto-benchmark on load** derives fast defaults for your exact GPU.
+- **Recommended sampling from the model card** — auto-tune reads the model's Hugging Face card
+  (falling back to the original model behind a requant) and prefills the author's recommended
+  `temperature / top_k / top_p / min_p`, shown in the results table and applied on Save. No
+  recommendation → your sampling is left untouched.
 - **Real measured tokens/sec** in the model list — **live** while a model is generating,
   **last-session** when it's idle (never a synthetic estimate).
 - **Full load-parameter UI**, a superset of what other tools expose:

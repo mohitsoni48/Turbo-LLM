@@ -25,6 +25,43 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
+## [1.2.1] - 2026-06-22
+
+**Auto-tuning that knows the model, a roomier config panel, and a built-in update check.**
+Bundles the work tracked internally as 1.1.0 + 1.2.0 + 1.2.1 into one release off 1.0.0.
+
+### Added
+- **Auto-tune reads the model card** — after a sweep, TurboLLM reads the model's Hugging Face
+  card and prefills the profile's sampling (temperature / top_k / top_p / min_p) with the
+  author's recommended values, shown in the results dialog and applied on Save. Hybrid
+  extraction: a deterministic scan first, then the just-tuned model itself as a fallback for
+  prose-only cards. No card / no recommendation → your sampling is left unchanged.
+- **Base-model fallback for recommended sampling** — most local GGUFs are third-party requants
+  whose card omits the recommendation, so TurboLLM resolves the original model (via HF
+  `base_model`) and reads its card. Well-known models (Gemma, Qwen, GLM, …) now get their
+  recommended sampling even from a bare requant repo. Gated bases (e.g. Gemma) need a
+  configured HuggingFace token.
+- **Complete tuned config as a table** in the auto-tune results dialog — runtime (GPU layers,
+  MoE offload, context, KV cache, flash attention), the full sampling (values from the card
+  tagged "from card"), and measured speed / VRAM / first-token latency.
+- **App self-update check** — Settings → About shows the running version and, when a newer
+  TurboLLM is published on npm, an "update available" chip with a copy-paste
+  `npm i -g turbollm` command. Cached 24h; silent when offline; never auto-updates.
+
+### Changed
+- **Model config is now a resizable side panel** — load/tune settings open as a right-docked
+  panel that resizes the page instead of overlaying it (drag the edge to resize; width is
+  remembered), shared by the Models screen and the Chat header. On narrow screens it becomes
+  a full-screen takeover.
+
+### Fixed
+- Card-sampling extraction now works on **reasoning models** (Gemma 4, Qwen3) — thinking is
+  disabled for the extraction step, so they emit usable JSON instead of empty or truncated
+  output.
+- **Large model cards** (e.g. Qwen3.5, ~80–95k chars) — the recommended-settings block deep
+  in the card is now within the extraction window; values inside usage code blocks are
+  ignored so demo numbers aren't mistaken for recommendations.
+
 ## [1.0.0] - 2026-06-21
 
 **The engine overhaul — TurboLLM 1.0.** Engines are now hardware-aware, self-updating, and

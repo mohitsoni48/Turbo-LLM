@@ -68,3 +68,6 @@ Thumbs.db
 /docs/
 /CLAUDE.md
 /RESOURCES.md
+
+# local-only test/marketing notes — never ship in the public repo
+/turbollm/posts/
