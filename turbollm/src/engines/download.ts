@@ -421,9 +421,9 @@ export async function turboquantAssetUrl(
 }
 
 /** Provision TurboQuant's prebuilt `llama-server` into `<enginesRoot>/turboquant/`,
- *  resolving the right per-platform source (HF on Windows, GitHub elsewhere). Same
- *  download → extract → locate pipeline as {@link provisionForkRelease}. Throws
- *  `no_release_asset` when this platform has no prebuilt. */
+ *  resolving the right per-platform source (HF on Windows, GitHub elsewhere) via the
+ *  download → extract → locate pipeline. Throws `no_release_asset` when this platform
+ *  has no prebuilt. */
 export async function provisionTurboquant(
   enginesRoot: string,
   repo: string,
