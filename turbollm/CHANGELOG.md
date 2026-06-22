@@ -25,9 +25,9 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
-## [1.3.1] - 2026-06-22
+## [1.3.2] - 2026-06-22
 
-**TurboQuant installs and updates on macOS again, plus a Linux build and a Metal first-run fix.**
+**TurboQuant now installs on macOS end-to-end — the Gatekeeper quarantine block, the per-platform release scan, and the Metal first-run timeout are all fixed — plus a Linux build.**
 
 ### Added
 - **CPU option on macOS.** The Apple-Silicon Metal binary also runs CPU-only, so it now appears
@@ -35,6 +35,10 @@ _Nothing yet._
 - **TurboQuant on Linux.** Linux x64 (Vulkan) is now listed as installable in the engine catalog.
 
 ### Fixed
+- **macOS Gatekeeper blocking engine binaries.** Downloaded engine binaries carry the
+  `com.apple.quarantine` attribute, which Gatekeeper uses to block execution — so the engine
+  probe timed out even after the right binary downloaded. TurboLLM now strips the quarantine
+  attribute from every extracted engine on macOS (and on re-install). Thanks @manish026.
 - **TurboQuant install/update failing on macOS** with `no_release_asset`. The resolver used
   GitHub's `/releases/latest`, but TurboQuant publishes one release per OS, so the latest tag was
   often Linux-only and Mac users got nothing. It now scans releases for the newest one carrying a
