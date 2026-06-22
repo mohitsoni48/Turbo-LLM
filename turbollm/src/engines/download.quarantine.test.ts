@@ -1,10 +1,18 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { execSync } from 'node:child_process'
-import { stripMacOsQuarantine } from './download.js'
+import { execFileSync } from 'node:child_process'
+import { stripMacOsQuarantine } from './download'
+
+function xattrList(path: string): string {
+  try {
+    return execFileSync('xattr', ['-l', path]).toString()
+  } catch {
+    return ''
+  }
+}
 
 describe('stripMacOsQuarantine', () => {
   test('is a no-op and does not throw on non-darwin platforms', () => {
@@ -22,17 +30,12 @@ describe('stripMacOsQuarantine', () => {
   }, () => {
     const tmp = mkdtempSync(join(tmpdir(), 'turbollm-quarantine-test-'))
     try {
-      // Simulate what macOS sets on a downloaded file
-      execSync(
-        `xattr -w com.apple.quarantine "0083;00000000;test;00000000-0000-0000-0000-000000000000" "${tmp}"`,
-      )
-      const before = execSync(`xattr -l "${tmp}"`).toString()
-      assert.ok(before.includes('com.apple.quarantine'), 'precondition: quarantine attribute was not set')
+      execFileSync('xattr', ['-w', 'com.apple.quarantine', '0083;00000000;test;00000000-0000-0000-0000-000000000000', tmp])
+      assert.ok(xattrList(tmp).includes('com.apple.quarantine'), 'precondition: quarantine attribute was not set')
 
       stripMacOsQuarantine(tmp)
 
-      const after = execSync(`xattr -l "${tmp}" 2>&1 || true`).toString()
-      assert.ok(!after.includes('com.apple.quarantine'), 'quarantine attribute was not removed')
+      assert.ok(!xattrList(tmp).includes('com.apple.quarantine'), 'quarantine attribute was not removed')
     } finally {
       rmSync(tmp, { recursive: true, force: true })
     }
@@ -43,7 +46,6 @@ describe('stripMacOsQuarantine', () => {
   }, () => {
     const tmp = mkdtempSync(join(tmpdir(), 'turbollm-quarantine-test-'))
     try {
-      // No quarantine attribute — must not throw even though xattr -d exits non-zero
       assert.doesNotThrow(() => stripMacOsQuarantine(tmp))
     } finally {
       rmSync(tmp, { recursive: true, force: true })
@@ -58,16 +60,12 @@ describe('stripMacOsQuarantine', () => {
     const nestedFile = join(nested, 'llama-server')
     try {
       mkdirSync(nested, { recursive: true })
-      execSync(`touch "${nestedFile}"`)
-      // Set quarantine on the nested file (simulating a bundled dylib)
-      execSync(
-        `xattr -w com.apple.quarantine "0083;00000000;test;00000000-0000-0000-0000-000000000000" "${nestedFile}"`,
-      )
+      writeFileSync(nestedFile, '')
+      execFileSync('xattr', ['-w', 'com.apple.quarantine', '0083;00000000;test;00000000-0000-0000-0000-000000000000', nestedFile])
 
       stripMacOsQuarantine(tmp)
 
-      const after = execSync(`xattr -l "${nestedFile}" 2>&1 || true`).toString()
-      assert.ok(!after.includes('com.apple.quarantine'), 'quarantine was not stripped from nested file')
+      assert.ok(!xattrList(nestedFile).includes('com.apple.quarantine'), 'quarantine was not stripped from nested file')
     } finally {
       rmSync(tmp, { recursive: true, force: true })
     }
