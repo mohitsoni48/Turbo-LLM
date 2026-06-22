@@ -321,7 +321,8 @@ export function registerApi(app: Hono, d: Deps): void {
     const root = join(d.store.dir(), 'engines')
     // Tag-agnostic: unregister + delete EVERY build of this backend (an update may have left
     // more than one tag-keyed dir / registry entry). Stop first if the active engine is one of them.
-    const backendDirRe = new RegExp(`[\\\\/]engines[\\\\/]llama\\.cpp-.+-${def.id}[\\\\/]`)
+    // `[^\\/]+` (not `.+`) so the tag can't greedily span path separators into another segment.
+    const backendDirRe = new RegExp(`[\\\\/]engines[\\\\/]llama\\.cpp-[^\\\\/]+-${def.id}[\\\\/]`)
     const engs = d.registry.list().engines.filter((e) => backendDirRe.test(e.binPath))
     const activeId = d.registry.active()?.id
     if (engs.some((e) => e.id === activeId)) await d.manager.stopAndWait()

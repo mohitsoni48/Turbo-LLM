@@ -116,17 +116,10 @@ export function backendDefAt(id: BackendId, tag: string): BackendDef | null {
   return availableBackends(tag).find((b) => b.id === id) ?? null
 }
 
-/** Path to an already-extracted backend's server binary, or null if not installed. */
-export function installedBackendServer(enginesRoot: string, id: BackendId, tag = LLAMA_BUILD): string | null {
-  const dir = backendDir(enginesRoot, id, tag)
-  return existsSync(dir) ? findServer(dir) : null
-}
-
 /** An installed official-llama build of a backend, tag-AGNOSTIC: scans the engines root for
  *  every `llama.cpp-<tag>-<id>` dir and returns the NEWEST (highest `b<N>` build number) that
- *  has a server binary, or null. Use this instead of `installedBackendServer` whenever a build
- *  may have been de-pinned off `LLAMA_BUILD` by an update (ADR-085) — otherwise a working,
- *  updated install falsely reads as "not installed". */
+ *  has a server binary, or null. Resolving by scan (not by the pinned `LLAMA_BUILD` tag) is what
+ *  keeps a build de-pinned by an update (ADR-085) from falsely reading as "not installed". */
 export function installedBackendBuild(
   enginesRoot: string,
   id: BackendId,
@@ -266,14 +259,6 @@ export async function provisionBackend(
   const bin = findServer(destDir)
   if (!bin) throw new Error('llama-server not found in extracted archive(s)')
   return bin
-}
-
-/** Remove an installed backend's extracted files. Returns true if anything existed. */
-export function deleteBackend(enginesRoot: string, id: BackendId, tag = LLAMA_BUILD): boolean {
-  const dir = backendDir(enginesRoot, id, tag)
-  if (!existsSync(dir)) return false
-  rmSync(dir, { recursive: true, force: true })
-  return true
 }
 
 /** Remove EVERY installed build of a backend, tag-agnostic (`llama.cpp-<tag>-<id>` dirs —
