@@ -79,7 +79,10 @@ export async function ensureMlxEnv(root: string, onProgress?: (p: ProvisionProgr
 
   if (!existsSync(py)) {
     onProgress?.({ phase: 'extracting', pct: -1 })
-    await execFileP(uv, ['venv', envDir], { cwd: root })
+    // Pass --clear when the venv dir already exists (e.g. from a broken prior
+    // install where Python is missing): uv 0.11+ refuses to overwrite without it.
+    const venvArgs = existsSync(envDir) ? ['venv', '--clear', envDir] : ['venv', envDir]
+    await execFileP(uv, venvArgs, { cwd: root })
   }
   // Install (or no-op if already satisfied) mlx-lm into the venv.
   // `--upgrade` forces an upgrade to the latest release when requested.
