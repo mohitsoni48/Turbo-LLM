@@ -42,7 +42,9 @@ function runCaptured(bin: string, arg: string): Promise<{ out: string; err: Erro
     // corrupt / wrong-arch binary can make it throw synchronously — catch that so
     // it folds into a clean `probe_failed` instead of escaping as a 500.
     try {
-      execFile(bin, [arg], { cwd: dirname(bin), timeout: 10_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
+      // 30 s — Metal GPU libraries (TurboQuant, llama.cpp metal) compile shaders on
+      // first invocation; that alone can take 15+ s on Apple Silicon.
+      execFile(bin, [arg], { cwd: dirname(bin), timeout: 30_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
         resolve({ out: (stdout || '') + (stderr || ''), err: error })
       })
     } catch (e) {
@@ -80,7 +82,7 @@ export async function probe(bin: string): Promise<ProbeResult> {
     // timeout — surface a distinct `probe_timeout` (spec 03 §2) so the UI can
     // tell a hung/arg-hungry binary apart from one that exited non-zero.
     if (isTimeout(v.err) && isTimeout(h.err)) {
-      throw new ProbeError('probe_timeout', 'The binary did not respond within 10 seconds.')
+      throw new ProbeError('probe_timeout', 'The binary did not respond within 30 seconds.')
     }
     let msg = 'Could not run the binary (--version and --help both failed).'
     const tail = lastLine(v.out)
