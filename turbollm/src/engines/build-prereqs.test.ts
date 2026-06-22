@@ -11,21 +11,23 @@ test('buildEnv: no dirs → a copy of process.env (PATH unchanged)', () => {
   assert.notEqual(env, process.env) // a copy, not the live object
 })
 
+// NOTE: use delimiter-free dir names below — on Linux `path.delimiter` is ':', so a Windows
+// drive path like "C:\\x" would split on its own colon and make these assertions platform-fragile.
 test('buildEnv: prepends dirs to PATH in order, before the inherited PATH', () => {
-  const env = buildEnv(['C:\\conda\\env\\bin', 'C:\\cuda\\bin'])
-  const parts = (env[PATH_KEY] ?? '').split(delimiter)
-  assert.equal(parts[0], 'C:\\conda\\env\\bin')
-  assert.equal(parts[1], 'C:\\cuda\\bin')
+  const a = 'tllm_dir_a'
+  const b = 'tllm_dir_b'
+  const env = buildEnv([a, b])
+  assert.ok((env[PATH_KEY] ?? '').startsWith(a + delimiter + b + delimiter))
   assert.ok((env[PATH_KEY] ?? '').endsWith(process.env[PATH_KEY] ?? ''))
 })
 
 test('buildEnv: drops empty/whitespace dirs', () => {
-  const env = buildEnv(['', '   ', 'C:\\real'])
-  assert.equal((env[PATH_KEY] ?? '').split(delimiter)[0], 'C:\\real')
+  const env = buildEnv(['', '   ', 'tllm_real_dir'])
+  assert.ok((env[PATH_KEY] ?? '').startsWith('tllm_real_dir' + delimiter))
 })
 
 test('buildEnv: does not create a duplicate PATH/Path key', () => {
-  const env = buildEnv(['C:\\x'])
+  const env = buildEnv(['tllm_x'])
   const pathKeys = Object.keys(env).filter((k) => k.toLowerCase() === 'path')
   assert.equal(pathKeys.length, Object.keys(process.env).filter((k) => k.toLowerCase() === 'path').length)
 })
