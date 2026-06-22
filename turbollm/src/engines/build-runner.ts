@@ -1,18 +1,26 @@
-// In-app 1-click compile-from-source (ADR-100, Windows + CUDA). Runs the same commands
-// the guide shows (git clone → cmake configure → cmake build llama-server) inside the
-// daemon, streaming each line to a {@link BuildState} so the UI can show live progress,
-// then hands the built binary to the registry. The toolchain PATH override (ADR-100,
-// build-prereqs.ts `buildEnv`) is applied so a conda-env / custom-path CUDA Toolkit and
-// compiler are found by both `cmake`'s detection and `nvcc`.
+// In-app 1-click compile-from-source (ADR-100, Windows + CUDA). Runs git clone → cmake
+// configure → cmake build inside the daemon, streaming each line to a {@link BuildState}
+// so the UI shows live progress, then hands the built binary to the registry.
 //
-// Scope mirrors the guide: Windows + CUDA only (the caller gates on `checkBuildPrereqs`).
-// We never run the build off Windows.
-import { spawn } from 'node:child_process'
-import { mkdirSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+// Generator choice matters (ADR-100 follow-up). The default "Visual Studio" generator needs
+// the CUDA *Visual Studio integration* (.props) that only the full CUDA installer adds — a
+// standalone / conda CUDA Toolkit doesn't have it, so the VS generator fails with "No CUDA
+// toolset found". We instead build with **Ninja** (or NMake as a no-extra-install fallback)
+// *inside the MSVC developer environment* (vcvars): that generator drives `nvcc` directly off
+// PATH (no VS integration needed) and is much faster. vcvars is required because Ninja/NMake —
+// unlike the VS generator — don't auto-find cl.exe; vcvars puts cl/ml64/INCLUDE/LIB on PATH.
+//
+// The toolchain PATH override (build-prereqs.ts `buildEnv`) is applied so a conda-env /
+// custom-path CUDA Toolkit (and a user-provided ninja) are found. Windows + CUDA only.
+import { execFile, spawn } from 'node:child_process'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { delimiter, dirname, join } from 'node:path'
+import { promisify } from 'node:util'
 import { buildEnv, checkBuildPrereqs } from './build-prereqs'
 import { resolveServerBinary } from './scan'
 import type { BuildPhase } from './build-state'
+
+const execFileP = promisify(execFile)
 
 export interface BuildRequest {
   repoUrl: string
@@ -49,8 +57,130 @@ export function buildDirName(repoUrl: string, branch?: string): string {
   return raw.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'engine'
 }
 
-/** The cmake configure args (Windows + CUDA). Kept here so the runner and any test agree. */
+/** PURE: prefer Ninja (fast, parallel) when a ninja.exe is reachable; else NMake Makefiles
+ *  (ships with the MSVC Build Tools — always available after vcvars, just single-threaded). */
+export function pickGenerator(hasNinja: boolean): 'Ninja' | 'NMake Makefiles' {
+  return hasNinja ? 'Ninja' : 'NMake Makefiles'
+}
+
+/** The cmake CUDA flags (single-config generators honor CMAKE_BUILD_TYPE). */
 export const CMAKE_CONFIGURE_ARGS = ['-DGGML_CUDA=ON', '-DCMAKE_BUILD_TYPE=Release']
+
+/** PURE: a Windows .bat that enters the MSVC dev env (vcvars x64) then runs one cmake step.
+ *  All paths are quoted (vcvars/src/build dirs can contain spaces); the cmake exit code is
+ *  propagated so a non-zero build fails the step. `cmakeArgs` is the full cmake argv. */
+export function vcvarsBatch(vcvars: string, cmakeArgs: string[]): string {
+  const quoted = cmakeArgs.map((a) => (/[\s"]/.test(a) ? `"${a}"` : a)).join(' ')
+  return [
+    '@echo off',
+    `call "${vcvars}" x64`,
+    'if errorlevel 1 exit /b 1',
+    `cmake ${quoted}`,
+    'exit /b %errorlevel%',
+    '',
+  ].join('\r\n')
+}
+
+/** True if `exe` is reachable from any directory on the env's PATH. */
+function onPath(env: NodeJS.ProcessEnv, exe: string): boolean {
+  const key = Object.keys(env).find((k) => k.toLowerCase() === 'path') ?? 'PATH'
+  return (env[key] ?? '')
+    .split(delimiter)
+    .filter(Boolean)
+    .some((dir) => {
+      try {
+        return existsSync(join(dir, exe))
+      } catch {
+        return false
+      }
+    })
+}
+
+/** CUDA runtime DLLs a llama.cpp CUDA build links against at runtime. A SOURCE build does
+ *  NOT bundle these (unlike the prebuilt release zips), so the produced exe can't start —
+ *  and our probe (`--version`) fails — unless they sit beside it or on PATH. We copy them
+ *  next to the exe so the engine is self-contained + portable (works even after the CUDA
+ *  toolkit dir is removed). Versioned names (e.g. cudart64_13.dll) → match by prefix. */
+const CUDA_RUNTIME_DLL_PREFIXES = ['cudart64_', 'cublas64_', 'cublaslt64_', 'nvrtc64_', 'nvrtc-builtins64_', 'nvjitlink_']
+
+/** Find the directories that hold the CUDA toolkit's runtime DLLs, version-matched to the
+ *  build by anchoring on the toolkit that owns `nvcc` (NOT a stray cudart from an unrelated
+ *  app on PATH — e.g. a PyTorch install, which would bundle the wrong version). CUDA 13 ships
+ *  the runtime DLLs in `<bin>\x64`; CUDA 12 in `<bin>` itself, so we return both when present.
+ *  The build already required nvcc on PATH, so it is found here by construction. */
+function cudaDllSourceDirs(env: NodeJS.ProcessEnv): string[] {
+  const key = Object.keys(env).find((k) => k.toLowerCase() === 'path') ?? 'PATH'
+  const pathDirs = (env[key] ?? '').split(delimiter).filter(Boolean)
+  const nvccDir = pathDirs.find((dir) => {
+    try {
+      return existsSync(join(dir, 'nvcc.exe'))
+    } catch {
+      return false
+    }
+  })
+  if (!nvccDir) return []
+  return [nvccDir, join(nvccDir, 'x64')].filter((d) => {
+    try {
+      return existsSync(d)
+    } catch {
+      return false
+    }
+  })
+}
+
+/** Copy the CUDA runtime DLLs from the build's CUDA toolkit into `destDir`, so the produced
+ *  exe is self-contained (a source build doesn't bundle them, unlike the prebuilt release
+ *  zips). Each DLL name is copied at most once (first/toolkit source wins). Returns the count. */
+function copyCudaRuntimeDlls(env: NodeJS.ProcessEnv, destDir: string, log: (l: string) => void): number {
+  const sources = cudaDllSourceDirs(env)
+  if (sources.length === 0) {
+    log('Note: could not find the CUDA toolkit DLLs to bundle — the engine may need the CUDA bin on PATH to run.')
+    return 0
+  }
+  const seen = new Set<string>()
+  let copied = 0
+  for (const dir of sources) {
+    let names: string[]
+    try {
+      names = readdirSync(dir)
+    } catch {
+      continue
+    }
+    for (const name of names) {
+      const lower = name.toLowerCase()
+      if (!lower.endsWith('.dll')) continue
+      if (seen.has(lower)) continue
+      if (!CUDA_RUNTIME_DLL_PREFIXES.some((p) => lower.startsWith(p))) continue
+      try {
+        copyFileSync(join(dir, name), join(destDir, name))
+        seen.add(lower)
+        copied++
+      } catch {
+        /* skip a locked/unreadable DLL — best effort */
+      }
+    }
+  }
+  if (copied > 0) log(`Bundled ${copied} CUDA runtime DLL(s) next to the binary so the engine is self-contained.`)
+  return copied
+}
+
+/** Locate vcvarsall.bat via vswhere (ships with VS / Build Tools). Returns null if VS with
+ *  the C++ tools isn't installed or vswhere can't find it. */
+async function findVcvarsall(): Promise<string | null> {
+  try {
+    const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)'
+    const vswhere = join(programFilesX86, 'Microsoft Visual Studio', 'Installer', 'vswhere.exe')
+    const { stdout } = await execFileP(
+      vswhere,
+      ['-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-find', 'VC\\Auxiliary\\Build\\vcvarsall.bat'],
+      { timeout: 8000, windowsHide: true, maxBuffer: 1024 * 1024 },
+    )
+    const p = stdout.split(/\r?\n/).map((s) => s.trim()).find(Boolean)
+    return p && existsSync(p) ? p : null
+  } catch {
+    return null
+  }
+}
 
 /** Run one child process, streaming combined stdout+stderr line-by-line to `onLine` and
  *  resolving with the full stdout text. Rejects with a clear message on a non-zero exit or
@@ -117,6 +247,14 @@ export async function runBuild(req: BuildRequest, hooks: BuildHooks, signal: Abo
         `add that folder under Build environment so TurboLLM can find them.`,
     )
   }
+  // We compile with Ninja/NMake (not the VS generator), so we need the MSVC dev env.
+  const vcvars = await findVcvarsall()
+  if (!vcvars) {
+    throw new Error(
+      'Could not locate the Visual Studio C++ build environment (vcvarsall.bat). Install the ' +
+        '"Desktop development with C++" workload from the Visual Studio Build Tools.',
+    )
+  }
 
   const buildRoot = join(req.enginesRoot, 'build', buildDirName(req.repoUrl, req.branch))
   const srcDir = join(buildRoot, 'src')
@@ -135,27 +273,35 @@ export async function runBuild(req: BuildRequest, hooks: BuildHooks, signal: Abo
   // Record the built commit (ADR-088 provenance / rebuild comparison).
   const commit = (await runStep('git', ['-C', srcDir, 'rev-parse', 'HEAD'], { env, signal, onLine: () => {} })).trim()
 
-  // 2) Configure.
+  // Pick the generator from what's reachable on PATH (incl. the user's toolchain dirs).
+  const generator = pickGenerator(onPath(env, 'ninja.exe'))
+  hooks.log(
+    generator === 'Ninja'
+      ? 'Using the Ninja generator (drives nvcc directly — no Visual Studio CUDA integration needed).'
+      : 'Ninja not found on PATH — using the NMake generator (works, but single-threaded and slower; ' +
+          'add a folder containing ninja.exe under Build environment for much faster builds).',
+  )
+
+  // 2) Configure — inside the MSVC dev env so cl/ml64/INCLUDE/LIB are set; nvcc comes off PATH.
   hooks.phase('configuring')
-  await runStep('cmake', ['-B', buildSubdir, '-S', srcDir, ...CMAKE_CONFIGURE_ARGS], {
-    env,
-    signal,
-    onLine: hooks.log,
-  })
+  const configureBat = join(buildRoot, '_tllm_configure.bat')
+  writeFileSync(configureBat, vcvarsBatch(vcvars, ['-G', generator, '-B', buildSubdir, '-S', srcDir, ...CMAKE_CONFIGURE_ARGS]))
+  await runStep('cmd.exe', ['/c', configureBat], { cwd: buildRoot, env, signal, onLine: hooks.log })
 
-  // 3) Compile just the server target.
+  // 3) Compile just the server target (Ninja parallelizes with -j; NMake ignores it).
   hooks.phase('compiling')
-  await runStep('cmake', ['--build', buildSubdir, '--config', 'Release', '-j', '--target', 'llama-server'], {
-    env,
-    signal,
-    onLine: hooks.log,
-  })
+  const compileBat = join(buildRoot, '_tllm_build.bat')
+  writeFileSync(compileBat, vcvarsBatch(vcvars, ['--build', buildSubdir, '-j', '--target', 'llama-server']))
+  await runStep('cmd.exe', ['/c', compileBat], { cwd: buildRoot, env, signal, onLine: hooks.log })
 
-  // 4) Locate the produced binary (MSVC: build/bin/Release/llama-server.exe; others vary).
+  // 4) Locate the produced binary (Ninja: build/bin/llama-server.exe; layouts vary).
   hooks.phase('registering')
   const binPath = resolveServerBinary(buildSubdir) ?? resolveServerBinary(buildRoot)
   if (!binPath) {
     throw new Error('Build finished but no llama-server binary was found in the output — see the log above.')
   }
+  // Make the engine self-contained: a source build doesn't bundle the CUDA runtime DLLs, so
+  // copy them next to the exe (else the probe + every launch fail to start with missing DLLs).
+  copyCudaRuntimeDlls(env, dirname(binPath), hooks.log)
   return { binPath, commit, buildRoot }
 }

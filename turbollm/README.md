@@ -96,7 +96,7 @@ TurboLLM does the opposite:
 - Bring any `llama-server`-compatible engine — stock builds or community forks — with real capability probing
 - **Hardware-aware recommendation** — detects your GPU and tells you which engine/build fits; engines that can't run here are greyed with the reason
 - **Curated catalog** — llama.cpp, KoboldCpp, llamafile, MLX, vLLM, plus forks (ik_llama, TurboQuant) — one-click install where a prebuilt exists
-- **1-click build from source** (Windows + CUDA) — clone, `cmake`, compile `llama-server` and auto-register it from inside the app, with a live compiler log; point it at a conda-env / custom CUDA path if your toolchain isn't on PATH. (Manual command guide kept for other setups.)
+- **End-to-end build from source** (Windows + CUDA) — clone, `cmake` (Ninja + `nvcc`), compile `llama-server`, bundle its CUDA runtime, and auto-register it from inside the app, with a live compiler log and a success screen. **No CUDA Toolkit? Click "Download CUDA"** — it fetches NVIDIA's official build components (~0.5 GB) and assembles a toolkit for you. Or point it at a conda-env / custom CUDA path. (Manual command guide kept for other setups.)
 - **Honest updates** — checks the real upstream release/commit and flags *Update available* / *Rebuild available* (never a fake "you're on the latest"), with per-engine auto-update
 - Auto-provision a GPU-matched `llama-server` build on first run (CUDA / ROCm / Metal / SYCL / Vulkan, CPU fallback)
 - One engine dropdown, grouped — pick the engine; a version dropdown appears when you have more than one build

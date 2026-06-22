@@ -38,6 +38,7 @@ import { ensureLlamafile, llamafileBinPath, llamafileDir } from '../engines/llam
 import { catalogForPlatform, catalogEngine } from '../engines/catalog'
 import { checkBuildPrereqs } from '../engines/build-prereqs'
 import { runBuild, buildDirName } from '../engines/build-runner'
+import { provisionCuda } from '../engines/cuda-provision'
 import { detectHardware } from '../engines/hardware'
 import { recommendEngines } from '../engines/recommend'
 import { engineAcceptsFormat } from '../engines/compat'
@@ -422,17 +423,33 @@ export function registerApi(app: Hono, d: Deps): void {
     d.build.start(name ?? repoUrl)
     void (async () => {
       try {
-        const out = await runBuild(
-          { repoUrl, branch, enginesRoot, toolchainDirs },
-          { phase: (p) => d.build.phase(p), log: (line) => d.build.log(line) },
-          ac.signal,
-        )
-        // Register (probe) the built binary, carrying its source provenance for the ADR-088
-        // "newer source → rebuild" check. For a REBUILD, match the existing engine by
-        // binPath OR by source repo+branch (a fresh compile can land at a slightly different
-        // binPath — e.g. an MSVC subdir — which would otherwise make add() throw NameTaken).
-        // Replace it in place (stop it first if it's the running active one) so the rebuild
-        // re-probes fresh capabilities and never duplicates or 'name taken'-fails post-compile.
+        let out
+        try {
+          out = await runBuild(
+            { repoUrl, branch, enginesRoot, toolchainDirs },
+            { phase: (p) => d.build.phase(p), log: (line) => d.build.log(line) },
+            ac.signal,
+          )
+        } catch (e) {
+          // The BUILD step (clone/configure/compile) failed or was cancelled: GC the partial
+          // tree so repeated attempts don't fill the disk with multi-GB CUDA objects. Only
+          // here — never after a binary was successfully produced (that would throw away a
+          // good build over a mere registration hiccup).
+          try { rmSync(buildRoot, { recursive: true, force: true }) } catch { /* best effort */ }
+          if ((e as Error)?.name === 'AbortError') {
+            d.build.log('Build cancelled.')
+            d.build.fail('Build cancelled.')
+          } else {
+            d.build.fail(e instanceof Error ? e.message : String(e))
+          }
+          return
+        }
+        // Build SUCCEEDED — the binary is good. Register (probe) it, carrying its source
+        // provenance for the ADR-088 "newer source → rebuild" check. For a REBUILD, match the
+        // existing engine by binPath OR by source repo+branch (a fresh compile can land at a
+        // slightly different binPath) and replace it in place (stop it first if it's the
+        // running active one) so we re-probe fresh capabilities without a NameTaken clash.
+        // A failure HERE keeps the built binary on disk (no GC) so it isn't thrown away.
         const engines = d.registry.list().engines
         const prior =
           engines.find((e) => e.binPath === out.binPath) ??
@@ -449,15 +466,9 @@ export function registerApi(app: Hono, d: Deps): void {
         d.build.log(`Registered "${eng.name}" — built from ${out.commit.slice(0, 8)}.`)
         d.build.done()
       } catch (e) {
-        // GC the (partial) build tree on failure/cancel so repeated attempts don't fill the
-        // disk with multi-GB CUDA objects. A successful build keeps it (the binary lives there).
-        try { rmSync(buildRoot, { recursive: true, force: true }) } catch { /* best effort */ }
-        if ((e as Error)?.name === 'AbortError') {
-          d.build.log('Build cancelled.')
-          d.build.fail('Build cancelled.')
-        } else {
-          d.build.fail(e instanceof Error ? e.message : String(e))
-        }
+        // Registration/probe failed AFTER a successful build: keep the binary (no GC), but
+        // tell the user it built yet couldn't be registered so they can retry/inspect.
+        d.build.fail(`Built successfully, but couldn't register the engine: ${e instanceof Error ? e.message : String(e)}`)
       } finally {
         if (buildAbort === ac) buildAbort = null
       }
@@ -472,6 +483,49 @@ export function registerApi(app: Hono, d: Deps): void {
       return c.json({ ok: true })
     }
     return c.json({ ok: false })
+  })
+
+  // Auto-download a CUDA Toolkit from NVIDIA's redistributable archives (ADR-101) when the
+  // user has no CUDA installed, so the 1-click build can compile. Streams via the same
+  // engineBuild channel (phase 'provisioning'); on success the toolkit's bin dir is added to
+  // build.toolchainDirs so the prereq check + build immediately find nvcc. Local-host + Win gated.
+  app.post('/api/v1/build/cuda', async (c) => {
+    if (!isLocalRequest(c, d))
+      return err(c, 403, 'forbidden', 'Downloading CUDA is only available on the machine running TurboLLM.')
+    if (process.platform !== 'win32')
+      return err(c, 409, 'unsupported_platform', 'Automatic CUDA download is currently Windows x86_64 only.')
+    const busy = engineWorkBusy(d)
+    if (busy) return err(c, 409, 'engine_already_running', busy)
+    const dataDir = d.store.dir()
+    const ac = new AbortController()
+    buildAbort = ac
+    d.build.start('CUDA Toolkit')
+    d.build.phase('provisioning')
+    void (async () => {
+      try {
+        const tk = await provisionCuda(
+          dataDir,
+          (p) => d.build.log(p.pct != null ? `${p.message} ${Math.round(p.pct * 100)}%` : p.message),
+          ac.signal,
+        )
+        // Persist the toolkit bin dir so detection + the build find nvcc + the runtime DLLs.
+        d.store.update((cfg) => {
+          if (!cfg.build.toolchainDirs.includes(tk.binDir)) cfg.build.toolchainDirs.unshift(tk.binDir)
+        })
+        d.build.log(`CUDA ${tk.version} installed and added to your build environment.`)
+        d.build.done()
+      } catch (e) {
+        if ((e as Error)?.name === 'AbortError') {
+          d.build.log('CUDA download cancelled.')
+          d.build.fail('CUDA download cancelled.')
+        } else {
+          d.build.fail(`Could not download CUDA: ${e instanceof Error ? e.message : String(e)}`)
+        }
+      } finally {
+        if (buildAbort === ac) buildAbort = null
+      }
+    })()
+    return c.json({ accepted: true }, 202)
   })
 
   // Provision the vLLM engine (ADR-044): uv → venv → `uv pip install vllm`, then

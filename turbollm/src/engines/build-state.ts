@@ -4,8 +4,9 @@
 // useful signal is the streaming compiler output, not a byte percentage. Single in-process
 // holder; only one build runs at a time (guarded alongside the download ProvisionState).
 
-/** Coarse build phase, in order. `done`/`error` are terminal and clear `active`. */
-export type BuildPhase = 'preparing' | 'cloning' | 'configuring' | 'compiling' | 'registering' | 'done' | 'error'
+/** Coarse build phase, in order. `provisioning` is the optional CUDA-download step (ADR-101)
+ *  that runs before a build when no CUDA Toolkit is found. `done`/`error` are terminal. */
+export type BuildPhase = 'provisioning' | 'preparing' | 'cloning' | 'configuring' | 'compiling' | 'registering' | 'done' | 'error'
 
 export interface BuildStatus {
   active: boolean

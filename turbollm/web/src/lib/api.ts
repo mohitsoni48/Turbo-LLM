@@ -179,6 +179,13 @@ export function cancelBuild(): Promise<{ ok: boolean }> {
   return request('/api/v1/build/cancel', { method: 'POST', json: {} })
 }
 
+/** Auto-download a CUDA Toolkit from NVIDIA (ADR-101) so a build can compile. 202 + progress
+ *  via GET /status engineBuild (phase 'provisioning'); on success its bin dir is added to the
+ *  build environment. Windows + local-host only. */
+export function provisionCuda(): Promise<{ accepted: boolean }> {
+  return request('/api/v1/build/cuda', { method: 'POST', json: {} })
+}
+
 export function installVllm(): Promise<{ accepted: true; engine: 'vllm' }> {
   return request('/api/v1/engines/vllm', { method: 'POST', json: {} })
 }

@@ -51,7 +51,7 @@ export type EngineProvision = {
  *  a phase + a log tail (clone/cmake output) rather than a byte percentage. */
 export type EngineBuild = {
   active: boolean
-  phase: 'preparing' | 'cloning' | 'configuring' | 'compiling' | 'registering' | 'done' | 'error'
+  phase: 'provisioning' | 'preparing' | 'cloning' | 'configuring' | 'compiling' | 'registering' | 'done' | 'error'
   engine: string
   log: string[]
   error: string | null

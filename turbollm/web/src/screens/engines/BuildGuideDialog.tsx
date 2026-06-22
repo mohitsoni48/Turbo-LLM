@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   CheckCircle2,
   Copy,
+  Download,
   ExternalLink,
   Hammer,
   Loader2,
@@ -41,6 +42,7 @@ function buildCommands(repoUrl: string, branch?: string): string[] {
 }
 
 const PHASE_LABEL: Record<EngineBuild['phase'], string> = {
+  provisioning: 'Downloading CUDA Toolkit…',
   preparing: 'Preparing…',
   cloning: 'Cloning the repository…',
   configuring: 'Configuring (cmake)…',
@@ -77,7 +79,9 @@ export function BuildGuideDialog({
   const build = useBuild()
   const [copied, setCopied] = useState(false)
   const [addOpen, setAddOpen] = useState(false)
-  const [buildStarted, setBuildStarted] = useState(false)
+  // What the user last kicked off, so we can tell a CUDA download apart from a build (both
+  // stream through engineBuild + end at phase 'done', but only a build shows the success screen).
+  const [intent, setIntent] = useState<'build' | 'cuda' | null>(null)
 
   // Build-environment editor draft (null until edited → show the saved dirs).
   const savedDirs = settings.query.data?.build.toolchainDirs ?? []
@@ -94,16 +98,28 @@ export function BuildGuideDialog({
   const engineBuild = statusQ.data?.engineBuild
   const buildActive = !!engineBuild?.active
   const provisionActive = !!statusQ.data?.engineProvision?.active
-  const showProgress = buildStarted || buildActive
+  const showProgress = intent !== null || buildActive
+  const cudaMissing = tools.some((t) => t.id === 'cuda' && !t.found)
   const canBuild = supported === true && missingRequired.length === 0 && !buildActive && !provisionActive
 
-  // When a build we kicked off settles, pull the new/updated engine into the lists.
+  // When the step we kicked off settles: a finished CUDA download → re-probe so CUDA flips to
+  // ✓ and the build enables (and hide the progress); a finished build → pull the new engine
+  // into the lists. A CUDA *error* stays visible so the user sees why it failed.
   useEffect(() => {
-    if (buildStarted && engineBuild && !engineBuild.active && (engineBuild.phase === 'done' || engineBuild.phase === 'error')) {
+    if (!intent || !engineBuild || engineBuild.active) return
+    if (engineBuild.phase === 'done') {
+      if (intent === 'cuda') {
+        void prereqsQ.refetch()
+        void settings.query.refetch()
+        setIntent(null)
+      } else {
+        build.refresh()
+      }
+    } else if (engineBuild.phase === 'error' && intent === 'build') {
       build.refresh()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [buildStarted, engineBuild?.active, engineBuild?.phase])
+  }, [intent, engineBuild?.active, engineBuild?.phase])
 
   // Auto-scroll the log to the newest line.
   const logRef = useRef<HTMLPreElement>(null)
@@ -126,8 +142,13 @@ export function BuildGuideDialog({
   }
 
   const startBuild = () => {
-    setBuildStarted(true)
+    setIntent('build')
     build.start.mutate({ repoUrl, branch, name: engineName })
+  }
+
+  const downloadCuda = () => {
+    setIntent('cuda')
+    build.cuda.mutate()
   }
 
   const actionLabel = mode === 'rebuild' ? 'Rebuild now' : 'Build it for me'
@@ -175,9 +196,20 @@ export function BuildGuideDialog({
               <p className="text-[11px] font-medium uppercase tracking-wide text-faint">Build prerequisites</p>
               <div className="flex flex-col gap-1.5 rounded-lg border border-border bg-panel p-3">
                 {tools.map((t) => (
-                  <PrereqRow key={t.id} tool={t} />
+                  <PrereqRow
+                    key={t.id}
+                    tool={t}
+                    // CUDA can be auto-downloaded (ADR-101); offer it instead of just a link.
+                    onDownload={t.id === 'cuda' && !t.found && !showProgress ? downloadCuda : undefined}
+                  />
                 ))}
               </div>
+              {cudaMissing && !showProgress && (
+                <p className="text-[11px] text-faint">
+                  No CUDA Toolkit found. <span className="text-muted">Download CUDA</span> grabs NVIDIA’s
+                  official build components (~0.5&nbsp;GB) automatically — no installer needed.
+                </p>
+              )}
             </div>
 
             {/* Build environment (PATH override) — ADR-100 */}
@@ -238,7 +270,13 @@ export function BuildGuideDialog({
 
             {/* Live build progress (ADR-100) */}
             {showProgress && engineBuild && (
-              <BuildProgress build={engineBuild} logRef={logRef} onCancel={() => build.cancel.mutate()} />
+              <BuildProgress
+                build={engineBuild}
+                kind={intent === 'cuda' ? 'cuda' : 'build'}
+                logRef={logRef}
+                onCancel={() => build.cancel.mutate()}
+                onClose={() => onOpenChange(false)}
+              />
             )}
 
             {/* Manual build commands (fallback / transparency) */}
@@ -295,19 +333,55 @@ export function BuildGuideDialog({
   )
 }
 
-/** Live phase + scrolling log while a build runs, with a Cancel while active. */
+/** Live phase + scrolling log while a build runs, with a Cancel while active. On success it
+ *  becomes a celebratory "engine ready" screen; on failure it shows the error + log. */
 function BuildProgress({
   build,
+  kind,
   logRef,
   onCancel,
+  onClose,
 }: {
   build: EngineBuild
+  /** 'build' shows the celebratory engine-ready screen on success; 'cuda' (a toolkit
+   *  download) just streams progress — its completion is handled by re-probing prereqs. */
+  kind: 'build' | 'cuda'
   logRef: React.RefObject<HTMLPreElement | null>
   onCancel: () => void
+  onClose: () => void
 }) {
   const isError = build.phase === 'error'
   const isDone = build.phase === 'done'
   const accent = isError ? 'var(--err, #ef4444)' : isDone ? 'var(--ok)' : 'var(--accent)'
+
+  // Success screen — distinct, celebratory; the engine is built + active. Only for a build;
+  // a finished CUDA download is dismissed by the parent (which re-probes prereqs).
+  if (isDone && kind === 'build') {
+    return (
+      <div className="flex flex-col items-center gap-3 rounded-lg border p-5 text-center" style={{ borderColor: 'color-mix(in srgb, var(--ok) 40%, var(--border))', background: 'color-mix(in srgb, var(--ok) 8%, transparent)' }}>
+        <div className="flex h-12 w-12 items-center justify-center rounded-full" style={{ background: 'color-mix(in srgb, var(--ok) 18%, transparent)' }}>
+          <CheckCircle2 size={28} style={{ color: 'var(--ok)' }} />
+        </div>
+        <div className="flex flex-col gap-1">
+          <p className="text-[15px] font-semibold text-ink">Engine ready 🎉</p>
+          <p className="text-[13px] text-muted">
+            <span className="font-medium text-ink">{build.engine}</span> was built from source, bundled
+            with its CUDA runtime, and set as your active engine. Load a model to start using it.
+          </p>
+        </div>
+        <details className="w-full">
+          <summary className="cursor-pointer list-none text-[11px] uppercase tracking-wide text-faint hover:text-muted">
+            Build log
+          </summary>
+          <pre className="mt-1.5 max-h-40 overflow-auto rounded-md border border-border bg-panel-2 p-2 text-left font-mono text-[11px] leading-relaxed text-muted">
+            {build.log.join('\n')}
+          </pre>
+        </details>
+        <Button onClick={onClose} className="mt-1">Done</Button>
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-border bg-panel p-3">
       <div className="flex items-center gap-2 text-[13px]">
@@ -338,8 +412,9 @@ function BuildProgress({
   )
 }
 
-/** One prereq row: ✓ found (with version) or ✗ missing (with an install link). */
-function PrereqRow({ tool }: { tool: BuildPrereqTool }) {
+/** One prereq row: ✓ found (with version) or ✗ missing. A missing tool offers an install
+ *  link; CUDA additionally offers a one-click auto-download (`onDownload`, ADR-101). */
+function PrereqRow({ tool, onDownload }: { tool: BuildPrereqTool; onDownload?: () => void }) {
   return (
     <div className="flex items-center gap-2 text-[13px]">
       {tool.found ? (
@@ -350,14 +425,26 @@ function PrereqRow({ tool }: { tool: BuildPrereqTool }) {
       <span className="text-ink">{tool.name}</span>
       {tool.found && tool.version && <span className="text-[12px] text-muted">{tool.version}</span>}
       {!tool.found && (
-        <a
-          href={tool.installUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="ml-auto inline-flex items-center gap-1 text-[12px] text-accent hover:underline"
-        >
-          Install <ExternalLink size={11} />
-        </a>
+        <span className="ml-auto inline-flex items-center gap-3">
+          {onDownload && (
+            <button
+              type="button"
+              onClick={onDownload}
+              className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[12px] font-medium transition-colors hover:opacity-80"
+              style={{ background: 'color-mix(in srgb, var(--accent) 15%, transparent)', color: 'var(--accent)' }}
+            >
+              <Download size={12} /> Download CUDA
+            </button>
+          )}
+          <a
+            href={tool.installUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 text-[12px] text-accent hover:underline"
+          >
+            {onDownload ? 'or install manually' : 'Install'} <ExternalLink size={11} />
+          </a>
+        </span>
       )}
     </div>
   )
