@@ -57,6 +57,8 @@ import {
   getEngineCatalog,
   getEngineRecommendation,
   getBuildPrereqs,
+  runBuild as apiRunBuild,
+  cancelBuild,
   listDownloads,
   listEngines,
   loadModel,
@@ -128,7 +130,11 @@ export function useStatus(): UseQueryResult<Status> {
     // Poll faster (1s) while an auto-tune sweep runs OR a completion is actively
     // streaming, so the inline progress and the live "Generating…" indicator stay live.
     refetchInterval: (q) =>
-      q.state.data?.bench.running || (q.state.data?.engineStats?.activeRequests ?? 0) > 0 ? 1000 : 2000,
+      q.state.data?.bench.running ||
+      q.state.data?.engineBuild?.active ||
+      (q.state.data?.engineStats?.activeRequests ?? 0) > 0
+        ? 1000
+        : 2000,
     refetchIntervalInBackground: false,
     // Keep the prior value visible while a poll is in flight to avoid flicker.
     placeholderData: (prev) => prev,
@@ -232,6 +238,28 @@ export function useBuildPrereqs(enabled = true): UseQueryResult<BuildPrereqs> {
     staleTime: 60_000,
     retry: false,
   })
+}
+
+/** 1-click in-app build (ADR-100): start a compile + cancel. Progress streams via the
+ *  status poll (`engineBuild`); on a settled build we refresh engines/catalog/status so
+ *  the newly-built engine shows up + becomes active. */
+export function useBuild() {
+  const qc = useQueryClient()
+  const refresh = () => {
+    void qc.invalidateQueries({ queryKey: queryKeys.engines })
+    void qc.invalidateQueries({ queryKey: queryKeys.engineCatalog })
+    void qc.invalidateQueries({ queryKey: queryKeys.engineUpdates })
+    void qc.invalidateQueries({ queryKey: queryKeys.status })
+  }
+  return {
+    start: useMutation({
+      mutationFn: (v: { repoUrl: string; branch?: string; name?: string }) => apiRunBuild(v),
+      onSuccess: () => void qc.invalidateQueries({ queryKey: queryKeys.status }),
+    }),
+    cancel: useMutation({ mutationFn: () => cancelBuild(), onSuccess: refresh }),
+    /** Call when a build settles (done/error) to pull the new engine into the lists. */
+    refresh,
+  }
 }
 
 export function useBackendInstall() {

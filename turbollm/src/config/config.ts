@@ -153,6 +153,15 @@ export interface ComfyUI {
    *  text-only. See slot-cache.ts. */
   cachePersist: boolean
 }
+/** Guided/1-click compile-from-source settings (ADR-089 + ADR-100). The build runs
+ *  `git clone` + `cmake` in the daemon process, which inherits the daemon's PATH. When
+ *  the user's CUDA Toolkit / compiler lives in a conda env or a custom location (not on
+ *  the system PATH), `nvcc` etc. aren't found and the build can't see CUDA. These dirs are
+ *  prepended to PATH for BOTH the prerequisite probe and the actual build, so the user can
+ *  point at their conda env's bin (or the CUDA bin) and have it picked up. Absolute paths. */
+export interface BuildConfig {
+  toolchainDirs: string[]
+}
 /** Global model defaults (spec 05 §3): the base LoadProfile values applied when a
  *  model is first seen and has no saved per-model profile. Saved profiles and
  *  per-request overrides still take precedence; these only replace the built-in
@@ -197,6 +206,8 @@ export interface Config {
   gateway: Gateway
   tools: ToolsConfig
   mcp: McpConfig
+  /** Compile-from-source settings (ADR-089/100): toolchain dirs prepended to PATH. */
+  build: BuildConfig
   devModel?: DevModel
 }
 
@@ -306,6 +317,7 @@ export function defaultConfig(): Config {
     gateway: { autoSwap: true, keepN: 1 },
     tools: {},
     mcp: { servers: [] },
+    build: { toolchainDirs: [] },
   }
 }
 
@@ -501,6 +513,14 @@ function normalize(c: Config): void {
           (s.transport === 'stdio' || s.transport === 'sse'))
       : [],
   }
+  // Compile-from-source toolchain dirs (ADR-089/100): absent in pre-build configs → [].
+  // Keep only non-empty strings; the validator enforces absolute paths.
+  const bd = (c.build ?? {}) as Partial<BuildConfig>
+  c.build = {
+    toolchainDirs: Array.isArray(bd.toolchainDirs)
+      ? bd.toolchainDirs.filter((p): p is string => typeof p === 'string' && p.trim() !== '').map((p) => p.trim())
+      : [],
+  }
   // Telemetry level (spec 09 §3): the UI exposes 'off' | 'anon' | 'full'. Migrate
   // legacy/unknown values safely → 'off' (the conservative, opt-in default).
   c.telemetry.level = normalizeTelemetryLevel(c.telemetry.level)
@@ -548,6 +568,11 @@ function validate(c: Config): void {
   // if set, it must be an http(s):// origin so the `POST {url}/free` call is well-formed.
   if (c.comfyui.url && !/^https?:\/\//i.test(c.comfyui.url)) {
     throw new ValueError('comfyui.url', 'must be an http(s):// origin (e.g. http://127.0.0.1:8188)')
+  }
+  // Build toolchain dirs (ADR-089/100): must be absolute so they resolve the same no
+  // matter the daemon's cwd when it spawns git/cmake.
+  for (const dir of c.build.toolchainDirs) {
+    if (!isAbsolutePath(dir)) throw new ValueError('build.toolchainDirs', 'toolchain directories must be absolute paths')
   }
 }
 

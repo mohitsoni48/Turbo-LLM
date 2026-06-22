@@ -47,6 +47,16 @@ export type EngineProvision = {
   error: string | null
 }
 
+/** In-app compile-from-source status (ADR-100), from GET /api/v1/status. A build streams
+ *  a phase + a log tail (clone/cmake output) rather than a byte percentage. */
+export type EngineBuild = {
+  active: boolean
+  phase: 'preparing' | 'cloning' | 'configuring' | 'compiling' | 'registering' | 'done' | 'error'
+  engine: string
+  log: string[]
+  error: string | null
+}
+
 /** Live running-session stats (B4), from GET /api/v1/status. Null unless the
  *  engine is running; resets each time the engine starts/stops. */
 export type EngineStats = {
@@ -126,6 +136,8 @@ export type Status = {
   bench: BenchState
   downloads: { active: number }
   engineProvision?: EngineProvision
+  /** In-app compile-from-source status (ADR-100). */
+  engineBuild?: EngineBuild
   /** ComfyUI GPU coordination state (null when the feature is off / not wired). */
   comfyui?: ComfyRuntime | null
   telemetryLevel: string

@@ -3,6 +3,7 @@ import type { Manager } from './engines/manager'
 import type { ComfyGuard } from './engines/comfy-guard'
 import type { Registry } from './engines/registry'
 import type { ProvisionState } from './engines/provision-state'
+import type { BuildState } from './engines/build-state'
 import type { UpdateChecker } from './engines/update'
 import type { AppUpdateChecker } from './app-update'
 import type { Scanner } from './models/scanner'
@@ -22,6 +23,9 @@ export interface Deps {
   hashes: HashStore
   db: ConversationStore
   provision: ProvisionState
+  /** Live status of an in-app compile-from-source run (ADR-100). One build at a time;
+   *  guarded alongside `provision` so a build and a download never run concurrently. */
+  build: BuildState
   /** Honest engine update checker (ADR-085): per-engine installed/latest/hasUpdate with
    *  an in-memory cache. Optional — absent in tests that don't exercise the update routes. */
   updates?: UpdateChecker

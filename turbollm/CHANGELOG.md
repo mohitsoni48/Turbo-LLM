@@ -25,7 +25,25 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
-## [1.2.1] - 2026-06-22
+## [1.3.0] - 2026-06-22
+
+**One-click engine builds — compile a CUDA llama.cpp (or any fork) from inside the app.**
+
+### Added
+- **1-click build from source (Windows + CUDA).** The build guide now compiles for you:
+  clone → `cmake` configure → compile `llama-server` → auto-register + activate the result,
+  with a live phase + streaming compiler log right in the dialog. No copy-pasting commands
+  into a terminal. The manual command path is kept as a fallback.
+- **Build environment (PATH override).** If your CUDA Toolkit or compiler lives in a conda
+  env or a custom location (so `nvcc` wasn't on the system PATH and showed as "not
+  available"), add that folder under **Build environment** and hit **Re-check** — those
+  dirs are prepended to PATH for both prerequisite detection and the actual build.
+- **One-click rebuild.** The "newer source available" chip on source-built engines now
+  recompiles at the latest commit in place, instead of just linking to the repo.
+
+### Changed
+- Compile-from-source is no longer guidance-only; the prerequisite checker and the build
+  both honor the configured toolchain dirs.
 
 **Auto-tuning that knows the model, a roomier config panel, and a built-in update check.**
 Bundles the work tracked internally as 1.1.0 + 1.2.0 + 1.2.1 into one release off 1.0.0.

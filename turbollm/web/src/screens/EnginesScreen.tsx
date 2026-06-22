@@ -368,6 +368,7 @@ function StatusHero({
           repoUrl={activeEngine.sourceRepo}
           branch={activeEngine.sourceBranch}
           engineName={activeEngine.name}
+          mode="rebuild"
         />
       )}
     </div>

@@ -37,6 +37,7 @@ import { ensureKoboldcpp, koboldcppBinPath, koboldcppDir, koboldcppProfileToArgs
 import { ensureLlamafile, llamafileBinPath, llamafileDir } from '../engines/llamafile'
 import { catalogForPlatform, catalogEngine } from '../engines/catalog'
 import { checkBuildPrereqs } from '../engines/build-prereqs'
+import { runBuild } from '../engines/build-runner'
 import { detectHardware } from '../engines/hardware'
 import { recommendEngines } from '../engines/recommend'
 import { engineAcceptsFormat } from '../engines/compat'
@@ -94,6 +95,8 @@ export function registerApi(app: Hono, d: Deps): void {
       bench: d.bench.status(),
       downloads: { active: d.downloads.activeCount() },
       engineProvision: d.provision.get(),
+      // In-app compile-from-source status (ADR-100): live phase + log tail while a build runs.
+      engineBuild: d.build.get(),
       // ComfyUI GPU coordination: lets the UI explain a paused/unloaded engine.
       // Also expose the installed gate node version so the UI can prompt an upgrade.
       comfyui: (() => {
@@ -124,6 +127,8 @@ export function registerApi(app: Hono, d: Deps): void {
   // ---- engine backends (ADR-025): hardware-aware default + override ----
   // Tracks the in-flight backend download so it can be cancelled.
   let provisionAbort: AbortController | null = null
+  // Tracks the in-flight 1-click build so it can be cancelled (ADR-100).
+  let buildAbort: AbortController | null = null
 
   app.get('/api/v1/engines/backends', (c) => {
     const sys = getSysInfo()
@@ -377,11 +382,80 @@ export function registerApi(app: Hono, d: Deps): void {
     return c.json({ hardware: hw, recommendation: rec })
   })
 
-  // Guided compile-from-source prereq check (ADR-089). Read-only: detects the
-  // Windows + CUDA build toolchain (git / cmake / CUDA / MSVC) so the build guide can
-  // show what's missing + install links. Off Windows it reports `supported:false`
+  // Compile-from-source prereq check (ADR-089). Read-only: detects the Windows + CUDA
+  // build toolchain (git / cmake / CUDA / MSVC) so the build guide can show what's missing
+  // + install links. The configured toolchain dirs (ADR-100) are prepended to PATH so a
+  // conda-env / custom-path CUDA Toolkit is found. Off Windows it reports `supported:false`
   // (Linux/macOS guided build is parked).
-  app.get('/api/v1/build/prereqs', async (c) => c.json(await checkBuildPrereqs()))
+  app.get('/api/v1/build/prereqs', async (c) =>
+    c.json(await checkBuildPrereqs(d.store.snapshot().build.toolchainDirs)),
+  )
+
+  // 1-click compile-from-source (ADR-100, Windows + CUDA). Clones the repo, runs cmake,
+  // compiles llama-server, then registers + activates the built binary. Long-running; 202
+  // immediately + live phase/log via GET /status engineBuild. Gated to the local host —
+  // it executes a compiler from a user-supplied repo, so a LAN client must not trigger it.
+  app.post('/api/v1/build/run', async (c) => {
+    if (!isLocalRequest(c, d))
+      return err(c, 403, 'forbidden', 'Building an engine is only available on the machine running TurboLLM.')
+    if (process.platform !== 'win32')
+      return err(c, 409, 'unsupported_platform', 'In-app build is currently Windows + CUDA only.')
+    const b = await body<{ repoUrl?: string; branch?: string; name?: string }>(c)
+    const repoUrl = (b.repoUrl ?? '').trim()
+    if (!/^https?:\/\//i.test(repoUrl))
+      return err(c, 400, 'invalid_config_value', 'A http(s) repo URL is required.')
+    if (d.provision.get().active)
+      return err(c, 409, 'engine_already_running', 'An engine download is in progress — wait for it to finish.')
+    if (d.build.isActive())
+      return err(c, 409, 'engine_already_running', 'A build is already in progress.')
+    const branch = (b.branch ?? '').trim() || undefined
+    const name = (b.name ?? '').trim() || undefined
+    const enginesRoot = join(d.store.dir(), 'engines')
+    const toolchainDirs = d.store.snapshot().build.toolchainDirs
+    const ac = new AbortController()
+    buildAbort = ac
+    void (async () => {
+      try {
+        d.build.start(name ?? repoUrl)
+        const out = await runBuild(
+          { repoUrl, branch, enginesRoot, toolchainDirs },
+          { phase: (p) => d.build.phase(p), log: (line) => d.build.log(line) },
+          ac.signal,
+        )
+        // Register (probe) the built binary, carrying its source provenance so the
+        // "newer source → rebuild" check (ADR-088) works. A rebuild of the same path
+        // re-probes the existing entry instead of adding a duplicate.
+        let eng = d.registry.list().engines.find((e) => e.binPath === out.binPath)
+        if (!eng) {
+          eng = (await d.registry.add(name ?? '', out.binPath, { sourceRepo: repoUrl, sourceBranch: branch })).engine
+        } else {
+          d.registry.setSource(eng.id, { sourceRepo: repoUrl, sourceBranch: branch })
+        }
+        d.registry.activate(eng.id)
+        d.build.log(`Registered "${eng.name}" — built from ${out.commit.slice(0, 8)}.`)
+        d.build.done()
+      } catch (e) {
+        if ((e as Error)?.name === 'AbortError') {
+          d.build.log('Build cancelled.')
+          d.build.fail('Build cancelled.')
+        } else {
+          d.build.fail(e instanceof Error ? e.message : String(e))
+        }
+      } finally {
+        if (buildAbort === ac) buildAbort = null
+      }
+    })()
+    return c.json({ accepted: true }, 202)
+  })
+
+  // Cancel an in-progress 1-click build (ADR-100). Kills the child compiler/clone.
+  app.post('/api/v1/build/cancel', (c) => {
+    if (buildAbort) {
+      buildAbort.abort()
+      return c.json({ ok: true })
+    }
+    return c.json({ ok: false })
+  })
 
   // Provision the vLLM engine (ADR-044): uv → venv → `uv pip install vllm`, then
   // register as a kind='vllm' engine. 202 + progress via GET /status engineProvision.
@@ -1120,6 +1194,7 @@ export function registerApi(app: Hono, d: Deps): void {
       gateway?: { autoSwap?: boolean; keepN?: number }
       tavilyApiKey?: string
       search?: { provider?: string; tavilyApiKey?: string; kagiApiKey?: string; searxngUrl?: string }
+      build?: { toolchainDirs?: string[] }
     }>(c)
 
     const updates: Record<string, unknown> = {}
@@ -1213,12 +1288,30 @@ export function registerApi(app: Hono, d: Deps): void {
       gwUpdates.keepN = v
     }
 
+    // Build toolchain dirs (ADR-100): absolute folders prepended to PATH for the prereq
+    // probe + 1-click build, so a conda-env / custom-path CUDA Toolkit is found. Validate
+    // here for a clean 400 (config.validate() would otherwise throw a 500 on update()).
+    let toolchainDirs: string[] | undefined
+    if (b.build?.toolchainDirs !== undefined) {
+      if (!Array.isArray(b.build.toolchainDirs)) {
+        return err(c, 400, 'invalid_config_value', 'build.toolchainDirs must be an array of paths.')
+      }
+      const dirs = b.build.toolchainDirs.map((p) => String(p).trim()).filter(Boolean)
+      for (const dir of dirs) {
+        if (!/^([a-zA-Z]:[\\/]|[\\/])/.test(dir)) {
+          return err(c, 400, 'invalid_config_value', `build.toolchainDirs: "${dir}" must be an absolute path.`)
+        }
+      }
+      toolchainDirs = dirs
+    }
+
     const before = d.store.snapshot().daemon
     d.store.update((cfg) => {
       Object.assign(cfg.daemon, updates)
       Object.assign(cfg.modelDefaults, mdUpdates)
       Object.assign(cfg.comfyui, cuUpdates)
       Object.assign(cfg.gateway, gwUpdates)
+      if (toolchainDirs !== undefined) cfg.build.toolchainDirs = toolchainDirs
       if (b.autoLoadOnStart !== undefined) cfg.autoLoadOnStart = !!b.autoLoadOnStart
       if (telemetryLevel !== undefined) cfg.telemetry.level = telemetryLevel
       // HF token (spec 10 §4): write-only. An explicit '' clears it. Never logged.
@@ -1653,6 +1746,9 @@ function settingsPayload(d: Deps) {
       searxngUrl: cfg.tools.search?.searxngUrl ?? '',
     },
     mcp: cfg.mcp,
+    // Build environment (ADR-100): folders prepended to PATH for compile-from-source so a
+    // conda-env / custom-path CUDA Toolkit + compiler are found. Not secret — echoed back.
+    build: { toolchainDirs: cfg.build.toolchainDirs },
   }
 }
 

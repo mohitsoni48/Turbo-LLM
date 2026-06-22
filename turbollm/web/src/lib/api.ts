@@ -161,10 +161,22 @@ export function getEngineRecommendation(): Promise<EngineRecommendationResult> {
   return request<EngineRecommendationResult>('/api/v1/engines/recommendation')
 }
 
-/** Guided compile-from-source prereq check (ADR-089). Read-only: detects the
- *  Windows + CUDA build toolchain. `supported:false` off Windows (parked elsewhere). */
+/** Compile-from-source prereq check (ADR-089/100). Read-only: detects the Windows + CUDA
+ *  build toolchain (with the configured toolchain-dir PATH override applied).
+ *  `supported:false` off Windows (parked elsewhere). */
 export function getBuildPrereqs(): Promise<BuildPrereqs> {
   return request<BuildPrereqs>('/api/v1/build/prereqs')
+}
+
+/** Start a 1-click in-app build (ADR-100). 202 immediately; progress streams via
+ *  GET /api/v1/status `engineBuild`. Windows + CUDA only; local-host only. */
+export function runBuild(args: { repoUrl: string; branch?: string; name?: string }): Promise<{ accepted: boolean }> {
+  return request('/api/v1/build/run', { method: 'POST', json: args })
+}
+
+/** Cancel an in-progress 1-click build (ADR-100). */
+export function cancelBuild(): Promise<{ ok: boolean }> {
+  return request('/api/v1/build/cancel', { method: 'POST', json: {} })
 }
 
 export function installVllm(): Promise<{ accepted: true; engine: 'vllm' }> {
@@ -500,6 +512,9 @@ export type DaemonSettings = {
   }
   /** MCP server list. */
   mcp: { servers: McpServer[] }
+  /** Build environment (ADR-100): folders prepended to PATH for compile-from-source so a
+   *  conda-env / custom-path CUDA Toolkit + compiler are found. Not secret — echoed back. */
+  build: { toolchainDirs: string[] }
 }
 
 export type SearchProvider = 'tavily' | 'kagi' | 'searxng'
