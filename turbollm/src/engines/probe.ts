@@ -80,11 +80,12 @@ export async function probe(bin: string): Promise<ProbeResult> {
   const v = await runCaptured(bin, '--version')
   const h = await runCaptured(bin, '--help')
   if (v.err && h.err) {
-    // Both invocations failed because the binary never exited within the 10s
+    // Both invocations failed because the binary never exited within the probe
     // timeout — surface a distinct `probe_timeout` (spec 03 §2) so the UI can
     // tell a hung/arg-hungry binary apart from one that exited non-zero.
     if (isTimeout(v.err) && isTimeout(h.err)) {
-      throw new ProbeError('probe_timeout', 'The binary did not respond within 10 seconds.')
+      const timeoutSec = process.platform === 'darwin' ? 60 : 15
+      throw new ProbeError('probe_timeout', `The binary did not respond within ${timeoutSec} seconds.`)
     }
     let msg = 'Could not run the binary (--version and --help both failed).'
     const tail = lastLine(v.out)

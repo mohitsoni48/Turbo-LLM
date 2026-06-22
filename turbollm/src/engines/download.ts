@@ -449,7 +449,12 @@ export async function provisionTurboquant(
   const destDir = join(enginesRoot, 'turboquant')
   if (existsSync(destDir)) {
     const found = findServer(destDir)
-    if (found) return found
+    if (found) {
+      // Strip quarantine even on the fast-path: a previous failed probe leaves the
+      // directory intact with the quarantine attribute still set.
+      stripMacOsQuarantine(destDir)
+      return found
+    }
   }
   const url = await turboquantAssetUrl(repo, process.platform, process.arch, signal)
   if (!url) throw new Error('no_release_asset')
