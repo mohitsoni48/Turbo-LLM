@@ -25,6 +25,28 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
+## [1.3.1] - 2026-06-22
+
+**TurboQuant installs and updates on macOS again, plus a Linux build and a Metal first-run fix.**
+
+### Added
+- **CPU option on macOS.** The Apple-Silicon Metal binary also runs CPU-only, so it now appears
+  as a separate CPU backend too — the engine recommender always has a CPU variant to fall back to.
+- **TurboQuant on Linux.** Linux x64 (Vulkan) is now listed as installable in the engine catalog.
+
+### Fixed
+- **TurboQuant install/update failing on macOS** with `no_release_asset`. The resolver used
+  GitHub's `/releases/latest`, but TurboQuant publishes one release per OS, so the latest tag was
+  often Linux-only and Mac users got nothing. It now scans releases for the newest one carrying a
+  binary for the current platform.
+- **Metal engines timing out on first launch.** macOS Metal builds JIT-compile their shaders on
+  first run (10–30 s), which overran the 10 s probe and failed the engine. The probe now allows
+  60 s on macOS (15 s elsewhere).
+
+### Changed
+- Unified TurboQuant's install and update paths onto a single per-platform release resolver so
+  they can't drift apart, and removed the now-dead duplicate code.
+
 ## [1.3.0] - 2026-06-22
 
 **End-to-end engine builds — compile a CUDA llama.cpp (or any fork) from inside the app, downloading CUDA itself if you don't have it.**
