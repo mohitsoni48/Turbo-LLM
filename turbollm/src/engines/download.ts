@@ -294,7 +294,7 @@ export interface ReleaseAsset {
 
 /** Score how well an asset name matches this OS/arch; -1 = no match (wrong OS/arch
  *  or not an archive). Higher is better — used to pick the best of several assets. */
-export function scoreAsset(name: string, platform = process.platform, archStr = process.arch): number {
+export function scoreAsset(name: string, platform: string = process.platform, archStr: string = process.arch): number {
   const n = name.toLowerCase()
   const isArchive = n.endsWith('.tar.gz') || n.endsWith('.tgz') || n.endsWith('.zip')
   if (!isArchive) return -1 // skip .dmg / .sha256 / source tarballs
@@ -323,8 +323,8 @@ export function scoreAsset(name: string, platform = process.platform, archStr = 
 /** Pick the best-matching asset for this OS/arch, or null if the release has none. */
 export function pickReleaseAsset(
   assets: ReleaseAsset[],
-  platform = process.platform,
-  archStr = process.arch,
+  platform: string = process.platform,
+  archStr: string = process.arch,
 ): ReleaseAsset | null {
   let best: ReleaseAsset | null = null
   let bestScore = 0
@@ -381,11 +381,37 @@ export async function latestCommitSha(repo: string, branch = '', signal?: AbortS
   return data.sha ?? ''
 }
 
-/** Resolve the latest release of `repo` and provision its platform-matching
- *  `llama-server` into `<enginesRoot>/<destName>/`. Returns the server binary path.
- *  Throws `no_release_asset` (Error.message) when the latest release has no asset
- *  for this OS/arch — the catalog's OS prefilter should prevent reaching here, but
- *  this is the honest failure if a platform's build is missing. */
+/** Scan releases (newest-first) for the first one containing an asset that matches
+ *  `platform`/`archStr`. Forks like TurboQuant publish per-platform releases (one OS
+ *  per tag), so `/releases/latest` returns whatever OS published last. This scans the
+ *  full list and picks the newest build for the *current* platform.
+ *
+ *  `fetchFn` is injectable so tests can drive it without hitting the network.
+ *  Throws `no_release_asset` when no release has a matching asset. */
+export async function findPlatformAsset(
+  repo: string,
+  fetchFn: typeof fetch = fetch,
+  platform: NodeJS.Platform = process.platform,
+  archStr: string = process.arch,
+  signal?: AbortSignal,
+): Promise<ReleaseAsset> {
+  const listUrl = `https://api.github.com/repos/${repo}/releases?per_page=100`
+  const listRes = await fetchFn(listUrl, {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'turbollm' },
+    signal,
+  })
+  if (!listRes.ok) throw new Error(`could not query ${repo} releases: HTTP ${listRes.status}`)
+  const releases = (await listRes.json()) as Array<{ assets?: ReleaseAsset[] }>
+  for (const rel of releases) {
+    const asset = pickReleaseAsset(rel.assets ?? [], platform, archStr)
+    if (asset) return asset
+  }
+  throw new Error('no_release_asset')
+}
+
+/** Resolve the newest release of `repo` that contains an asset for this OS/arch,
+ *  then provision its `llama-server` into `<enginesRoot>/<destName>/`. Returns the
+ *  server binary path. Throws `no_release_asset` when no release has a matching asset. */
 export async function provisionForkRelease(
   enginesRoot: string,
   repo: string,
@@ -399,10 +425,7 @@ export async function provisionForkRelease(
     if (found) return found
   }
 
-  // Resolve the latest release + its assets via the GitHub API.
-  const rel = await latestGithubRelease(repo, signal)
-  const asset = pickReleaseAsset(rel.assets ?? [])
-  if (!asset) throw new Error('no_release_asset')
+  const asset = await findPlatformAsset(repo, fetch, process.platform, process.arch, signal)
 
   mkdirSync(destDir, { recursive: true })
   const tmp = join(enginesRoot, asset.name)
