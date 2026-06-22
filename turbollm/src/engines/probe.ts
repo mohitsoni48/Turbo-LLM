@@ -42,7 +42,11 @@ function runCaptured(bin: string, arg: string): Promise<{ out: string; err: Erro
     // corrupt / wrong-arch binary can make it throw synchronously — catch that so
     // it folds into a clean `probe_failed` instead of escaping as a 500.
     try {
-      execFile(bin, [arg], { cwd: dirname(bin), timeout: 10_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
+      // macOS Metal binaries JIT-compile their shader library on first run, which
+      // takes 10-30 s depending on the fork's embedded shaders. Use a longer
+      // timeout on macOS so this first-run compilation doesn't fail the probe.
+      const timeoutMs = process.platform === 'darwin' ? 60_000 : 15_000
+      execFile(bin, [arg], { cwd: dirname(bin), timeout: timeoutMs, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
         resolve({ out: (stdout || '') + (stderr || ''), err: error })
       })
     } catch (e) {

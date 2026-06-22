@@ -22,7 +22,7 @@ import {
   backendDir,
   latestReleaseTag,
   provisionBackend,
-  provisionForkRelease,
+  provisionTurboquant,
 } from './download'
 import { ensureMlxEnv } from './mlx'
 import { ensureVllmEnv } from './vllm'
@@ -104,8 +104,8 @@ async function applyForkUpdate(d: UpdateApplyDeps, engine: Engine, root: string,
     if (oldEng && d.registry.active()?.id === oldEng.id) await d.manager.stopAndWait()
     const tqDir = join(root, 'turboquant')
     rmSync(tqDir, { recursive: true, force: true })
-    const bin = await provisionForkRelease(
-      root, 'AtomicBot-ai/atomic-llama-cpp-turboquant', 'turboquant',
+    const bin = await provisionTurboquant(
+      root, 'AtomicBot-ai/atomic-llama-cpp-turboquant',
       (p) => d.provision.progress(p.phase, p.pct, p.part, p.parts),
       signal,
     )

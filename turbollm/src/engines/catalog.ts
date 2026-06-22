@@ -12,10 +12,8 @@
 //   - 'builtin':        already provisioned by another path (the auto default).
 //
 // Honesty rule (project HARD RULE / ADR-012 ethos): an engine is only listed as
-// installable when a real provisioning path exists. TurboQuant is listed but
-// `comingSoon` because the fork is currently built from source and publishes no
-// prebuilt GitHub release — it flips to installable the day it does, by setting a
-// `repo` + clearing the flag, no code change to the install machinery.
+// installable when a real provisioning path exists. Use `comingSoon: true` for
+// engines without a real release path yet; remove the flag once they publish one.
 
 import { type BackendId, availableBackends } from './download'
 import type { Arch } from './hardware'
