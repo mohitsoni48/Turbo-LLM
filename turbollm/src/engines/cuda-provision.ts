@@ -20,13 +20,23 @@ const execFileP = promisify(execFile)
 
 const REDIST_BASE = 'https://developer.download.nvidia.com/compute/cuda/redist/'
 
-/** Components required to BUILD (not just run) a CUDA llama.cpp:
- *  - cuda_nvcc:   the compiler (nvcc, ptxas, cicc) + the CRT headers it needs
- *  - cuda_cudart: the runtime (cudart.lib/dll + cuda_runtime.h)
- *  - libcublas:   cuBLAS + cuBLASLt (libs + DLLs + headers) — the large one (~430 MB)
+/** Components required to BUILD a CUDA llama.cpp:
+ *  - cuda_nvcc:   the compiler DRIVER (nvcc, ptxas) — but NOT cicc (see libnvvm below)
+ *  - cuda_cudart: the runtime (cudart.lib/dll + cuda_runtime.h + the `crt/` header WRAPPERS)
+ *  - libcublas:   cuBLAS + cuBLASLt (libs + DLLs + headers) — the large one (~400 MB)
  *  - cuda_cccl:   Thrust/CUB headers that ggml-cuda includes
- *  - cuda_nvrtc:  runtime compilation (linked by some ggml-cuda paths) */
-export const CUDA_BUILD_COMPONENTS = ['cuda_nvcc', 'cuda_cudart', 'libcublas', 'cuda_cccl', 'cuda_nvrtc']
+ *  We deliberately do NOT pull cuda_nvrtc (~318 MB): ggml-cuda is ahead-of-time compiled,
+ *  so runtime compilation isn't needed — the prebuilt llama.cpp CUDA releases omit it too. */
+export const CUDA_REQUIRED_COMPONENTS = ['cuda_nvcc', 'cuda_cudart', 'libcublas', 'cuda_cccl']
+
+/** Optional components — present in newer redists (CUDA 13+), skipped silently when absent
+ *  (in CUDA 12.x they're folded into cuda_nvcc / cuda_cudart, so they don't exist separately):
+ *  - libnvvm:  `nvvm/bin/cicc` — the internal compiler nvcc shells out to. Without it nvcc's
+ *    own compiler-identification step fails ("cicc … error 0x1"), so NOTHING CUDA compiles.
+ *  - cuda_crt: the REAL `include/crt/*.h` headers (host_config.h, …). In CUDA 13+, cuda_cudart
+ *    ships only thin `include/<name>.h` wrappers that `#include "crt/<name>"`; the real headers
+ *    live here. Without it every CUDA compile dies on "Cannot open include file: 'crt/host_config.h'". */
+export const CUDA_OPTIONAL_COMPONENTS = ['libnvvm', 'cuda_crt']
 
 /** Redist versions we know how to assemble, newest first. We pick the newest whose
  *  major.minor the installed driver supports. 12.8+ is required for Blackwell (sm_120);
@@ -131,12 +141,19 @@ export async function provisionCuda(
     return { root, binDir, version }
   }
 
-  // Resolve the component archive URLs up front (fail fast if any is missing).
-  const components = CUDA_BUILD_COMPONENTS.map((id) => {
-    const rel = manifest[id]?.['windows-x86_64']?.relative_path
+  // Resolve the component archive URLs up front. Required components fail fast if missing;
+  // optional ones (e.g. cuda_crt, absent on CUDA 12.x) are simply skipped when not present.
+  const relOf = (id: string) => manifest[id]?.['windows-x86_64']?.relative_path
+  const components: { id: string; url: string }[] = []
+  for (const id of CUDA_REQUIRED_COMPONENTS) {
+    const rel = relOf(id)
     if (!rel) throw new Error(`CUDA ${version} manifest is missing ${id} for windows-x86_64.`)
-    return { id, url: REDIST_BASE + rel }
-  })
+    components.push({ id, url: REDIST_BASE + rel })
+  }
+  for (const id of CUDA_OPTIONAL_COMPONENTS) {
+    const rel = relOf(id)
+    if (rel) components.push({ id, url: REDIST_BASE + rel })
+  }
 
   const work = join(tmpdir(), `tllm-cuda-${version}`)
   rmSync(work, { recursive: true, force: true })
