@@ -440,7 +440,16 @@ export function registerApi(app: Hono, d: Deps): void {
             d.build.log('Build cancelled.')
             d.build.fail('Build cancelled.')
           } else {
-            d.build.fail(e instanceof Error ? e.message : String(e))
+            // Friendlier message for the common "fork needs a GAS/MinGW assembler" case: some
+            // forks (e.g. TurboQuant) enable the generic CMake `ASM` language, which on Windows
+            // requires a GAS assembler — MSVC can't provide it, so the build can't run here.
+            const asmIssue = d.build.get().log.some((l) => /No CMAKE_ASM_COMPILER could be found|ASM compiler identification is unknown/i.test(l))
+            const raw = e instanceof Error ? e.message : String(e)
+            d.build.fail(
+              asmIssue
+                ? "This fork needs a GAS/MinGW assembler (it enables CMake's generic ASM language), which isn't available with the MSVC toolchain — so it can't be built here on Windows. Use a prebuilt binary, or build it under MSYS2/MinGW and add it via “Add your own engine.”"
+                : raw,
+            )
           }
           return
         }
