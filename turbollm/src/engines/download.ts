@@ -5,7 +5,7 @@
 // (Node fetch; PowerShell Expand-Archive / tar for extraction). The user can
 // override the backend; we fall back GPU → Vulkan → CPU if a build won't run.
 import { createWriteStream, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -13,6 +13,21 @@ import { promisify } from 'node:util'
 import type { GpuVendor } from '../sysinfo/sysinfo'
 
 const execFileP = promisify(execFile)
+
+/**
+ * Remove the com.apple.quarantine extended attribute that macOS sets on any
+ * file downloaded from the internet. Without this, Gatekeeper silently blocks
+ * execution of extracted engine binaries and the probe times out.
+ * Exported for unit testing; not part of the public API.
+ */
+export function stripMacOsQuarantine(dir: string): void {
+  if (process.platform !== 'darwin') return
+  try {
+    execFileSync('xattr', ['-r', '-d', 'com.apple.quarantine', dir])
+  } catch {
+    // xattr exits non-zero when the attribute is absent — not an error
+  }
+}
 
 // Pinned known-good upstream build. Bump deliberately after testing.
 export const LLAMA_BUILD = 'b9608'
@@ -188,6 +203,7 @@ export async function extractArchive(archive: string, destDir: string): Promise<
   } else {
     await execFileP('tar', ['-xzf', archive, '-C', destDir])
   }
+  stripMacOsQuarantine(destDir)
 }
 
 /**
