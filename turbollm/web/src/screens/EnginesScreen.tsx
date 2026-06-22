@@ -216,9 +216,11 @@ function StatusHero({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [buildActive])
 
-  // Rebuild chip: show when the active engine is source-built and has a newer commit.
+  // Rebuild chip: only when the active source-built engine actually has a NEWER commit.
+  // `rebuild` just flags "updates via rebuild" (always true for source engines); the
+  // availability signal is `hasUpdate` (built commit ≠ repo HEAD).
   const upd = activeEngine ? updates?.updates[activeEngine.id] : undefined
-  const showRebuildChip = !!upd?.rebuild && !!activeEngine?.sourceRepo
+  const showRebuildChip = !!upd?.rebuild && !!upd?.hasUpdate && !!activeEngine?.sourceRepo
 
   // Hardware line — prefer the recommendation's hardware, fall back to sysinfo.
   const hw = rec?.hardware
@@ -755,7 +757,7 @@ function CatalogFitRow({
                 // Source-built engines update by RECOMPILING at the latest commit (ADR-088/100),
                 // not by downloading a prebuilt. `rebuild` flags a newer commit on the source repo.
                 <DropdownMenuItem onSelect={() => setRebuildOpen(true)} disabled={anyPending}>
-                  <RefreshCw size={14} /> {updateStatus?.rebuild ? 'Rebuild (new commit)' : 'Rebuild'}
+                  <RefreshCw size={14} /> {updateStatus?.hasUpdate ? 'Rebuild (new commit)' : 'Rebuild'}
                 </DropdownMenuItem>
               ) : (
                 <DropdownMenuItem onSelect={() => onUpdate(catalog)} disabled={provisioning}>
