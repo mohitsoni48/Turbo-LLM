@@ -35,6 +35,12 @@ const SIZE_HINT: Record<string, string> = {
   cuda: '~550 MB', rocm: '~320 MB', sycl: '~110 MB', vulkan: '~40 MB', metal: '~11 MB', cpu: '~16 MB',
 }
 
+/** Short backend name so rows read "llama.cpp (CUDA)" / "llama.cpp (ROCm)" — each official
+ *  llama.cpp backend is presented as its own engine variant. */
+const SHORT_BACKEND: Record<string, string> = {
+  cuda: 'CUDA', rocm: 'ROCm', sycl: 'SYCL', vulkan: 'Vulkan', metal: 'Metal', cpu: 'CPU',
+}
+
 const POLICY_LABEL: Record<UpdatePolicy, string> = {
   off: 'Off',
   notify: 'Notify',
@@ -80,11 +86,11 @@ function UpdateStatusLine({ st }: { st: EngineUpdateStatus | undefined }) {
   )
 }
 
-/** One flat row per official llama.cpp backend variant. 3-state lifecycle:
- *  Not installed → Download button.
- *  Installed + enabled → "Installed" indicator + ⋯ menu (Update / Disable / Delete).
- *  Installed + disabled → "Disabled" badge + ⋯ menu (Update / Enable / Delete). */
-export function LlamaCppBackendRows() {
+/** One flat row per official llama.cpp backend variant. Manage-only (download / update /
+ *  delete) — switching the active engine is done from the top "Running now" dropdown, not here.
+ *  `filter` splits the list: 'recommended' shows only the GPU-recommended backend (for the
+ *  catalog), 'others' shows the rest (for the "Other llama.cpp" section). */
+export function LlamaCppBackendRows({ filter }: { filter?: 'recommended' | 'others' } = {}) {
   const { data: status } = useStatus()
   const provisioning = !!status?.engineProvision?.active
   const { data, isLoading } = useEngineBackends(provisioning)
@@ -163,9 +169,13 @@ export function LlamaCppBackendRows() {
       },
     })
 
+  const rows = data.backends.filter((b) =>
+    filter === 'recommended' ? b.recommended : filter === 'others' ? !b.recommended : true,
+  )
+
   return (
     <>
-      {data.backends.map((b) => {
+      {rows.map((b) => {
         const up = statusFor(b.engineId)
         const policy = policyFor(b.engineId)
         return (
@@ -175,8 +185,7 @@ export function LlamaCppBackendRows() {
         >
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-1.5">
-              <span className="text-sm font-semibold text-ink">{b.label}</span>
-              <Badge variant="default">official</Badge>
+              <span className="text-sm font-semibold text-ink">llama.cpp ({SHORT_BACKEND[b.id] ?? b.label})</span>
               {b.recommended && (
                 <span className="flex items-center gap-0.5 text-[11px] text-accent">
                   <Sparkles size={10} /> recommended

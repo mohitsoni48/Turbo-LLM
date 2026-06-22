@@ -19,8 +19,8 @@ import {
   availableBackends,
   backendDefAt,
   backendDir,
-  deleteBackend,
-  installedBackendServer,
+  deleteAllBackendBuilds,
+  installedBackendBuild,
   latestReleaseTag,
   provisionBackend,
   provisionTurboquant,
@@ -37,6 +37,8 @@ import { ensureKoboldcpp, koboldcppBinPath, koboldcppDir, koboldcppProfileToArgs
 import { ensureLlamafile, llamafileBinPath, llamafileDir } from '../engines/llamafile'
 import { catalogForPlatform, catalogEngine } from '../engines/catalog'
 import { checkBuildPrereqs } from '../engines/build-prereqs'
+import { runBuild, buildDirName, sameRepo, sourceBuildBinary, sourceBuildDirOf } from '../engines/build-runner'
+import { provisionCuda } from '../engines/cuda-provision'
 import { detectHardware } from '../engines/hardware'
 import { recommendEngines } from '../engines/recommend'
 import { engineAcceptsFormat } from '../engines/compat'
@@ -94,6 +96,8 @@ export function registerApi(app: Hono, d: Deps): void {
       bench: d.bench.status(),
       downloads: { active: d.downloads.activeCount() },
       engineProvision: d.provision.get(),
+      // In-app compile-from-source status (ADR-100): live phase + log tail while a build runs.
+      engineBuild: d.build.get(),
       // ComfyUI GPU coordination: lets the UI explain a paused/unloaded engine.
       // Also expose the installed gate node version so the UI can prompt an upgrade.
       comfyui: (() => {
@@ -124,6 +128,8 @@ export function registerApi(app: Hono, d: Deps): void {
   // ---- engine backends (ADR-025): hardware-aware default + override ----
   // Tracks the in-flight backend download so it can be cancelled.
   let provisionAbort: AbortController | null = null
+  // Tracks the in-flight 1-click build so it can be cancelled (ADR-100).
+  let buildAbort: AbortController | null = null
 
   app.get('/api/v1/engines/backends', (c) => {
     const sys = getSysInfo()
@@ -132,17 +138,28 @@ export function registerApi(app: Hono, d: Deps): void {
     const root = join(d.store.dir(), 'engines')
     const active = d.registry.active()
     const regEngines = d.registry.list().engines
+    // Backend state is REGISTRY-driven (the accurate source): a backend is installed when ANY
+    // official llama.cpp build of it is registered — not just the pinned LLAMA_BUILD tag (which
+    // a de-pinned update moves off, making the old check falsely report "not installed" and
+    // prompting a confusing re-download). The backend's engine = its newest installed build.
+    const backendOf = (p: string): string | undefined =>
+      p.match(/llama\.cpp-[^/\\]+-(cuda|rocm|sycl|vulkan|metal|cpu)/i)?.[1]?.toLowerCase()
+    const buildNumOf = (p: string): number => {
+      const m = p.match(/llama\.cpp-b(\d+)/i)
+      return m ? Number(m[1]) : -1
+    }
     const backends = availableBackends().map((b) => {
-      const bin = installedBackendServer(root, b.id)
-      // `enabled` = a registry engine is registered with this binary path.
-      const eng = bin ? regEngines.find((e) => e.binPath === bin) : undefined
+      const builds = regEngines
+        .filter((e) => backendOf(e.binPath) === b.id)
+        .sort((x, y) => buildNumOf(y.binPath) - buildNumOf(x.binPath))
+      const eng = builds[0]
       return {
         id: b.id,
         label: b.label,
-        installed: !!bin,
+        installed: !!eng,
         enabled: !!eng,
         recommended: b.id === recommended,
-        active: !!bin && !!active && active.binPath === bin,
+        active: !!eng && !!active && active.id === eng.id,
         engineId: eng?.id ?? '',
       }
     })
@@ -167,13 +184,15 @@ export function registerApi(app: Hono, d: Deps): void {
     const def = availableBackends().find((x) => x.id === b.backend)
     if (!def) return err(c, 400, 'invalid_config_value', 'Unknown backend for this platform.')
     const root = join(d.store.dir(), 'engines')
-    // First-install only: seed the pinned LLAMA_BUILD. When the pinned build is already
-    // on disk, this is a no-op (no real upstream check here — that's the Update path's
-    // job, which de-pins and resolves the REAL latest tag honestly, ADR-085).
-    if (installedBackendServer(root, def.id)) {
-      return c.json({ accepted: false, alreadyInstalled: true, build: LLAMA_BUILD })
+    // First-install only: seed the pinned LLAMA_BUILD. When ANY build of this backend is
+    // already on disk (tag-agnostic — an update may have de-pinned it off LLAMA_BUILD,
+    // ADR-085), this is a no-op so we never re-download a working install. The real upstream
+    // check is the Update path's job, which resolves the REAL latest tag honestly.
+    const existing = installedBackendBuild(root, def.id)
+    if (existing) {
+      return c.json({ accepted: false, alreadyInstalled: true, build: existing.tag })
     }
-    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    { const busy = engineWorkBusy(d); if (busy) return err(c, 409, 'engine_already_running', busy) }
     const ac = new AbortController()
     provisionAbort = ac
     void (async () => {
@@ -218,9 +237,11 @@ export function registerApi(app: Hono, d: Deps): void {
     const def = availableBackends().find((x) => x.id === c.req.param('id'))
     if (!def) return err(c, 400, 'invalid_config_value', 'Unknown backend for this platform.')
     const root = join(d.store.dir(), 'engines')
-    const oldBin = installedBackendServer(root, def.id)
+    // Tag-agnostic: the currently-installed build may have been de-pinned off LLAMA_BUILD by a
+    // prior update (ADR-085), so resolve the newest build on disk rather than the pinned tag.
+    const oldBin = installedBackendBuild(root, def.id)?.bin ?? null
     if (!oldBin) return err(c, 409, 'not_installed', 'Backend is not installed — download it first.')
-    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    { const busy = engineWorkBusy(d); if (busy) return err(c, 409, 'engine_already_running', busy) }
     // Honest upstream check FIRST: resolve the real latest tag. Offline → clear 503.
     let latestTag: string
     try {
@@ -282,10 +303,12 @@ export function registerApi(app: Hono, d: Deps): void {
     const def = availableBackends().find((x) => x.id === c.req.param('id'))
     if (!def) return err(c, 400, 'invalid_config_value', 'Unknown backend for this platform.')
     const root = join(d.store.dir(), 'engines')
-    const bin = installedBackendServer(root, def.id)
-    if (!bin) return err(c, 409, 'not_installed', 'Backend is not installed on disk — download it first.')
-    let eng = d.registry.list().engines.find((e) => e.binPath === bin)
-    if (!eng) eng = (await d.registry.add(`llama.cpp ${LLAMA_BUILD} (${def.id})`, bin)).engine
+    // Tag-agnostic: enable whatever build is on disk (a de-pinned update may have left a
+    // non-LLAMA_BUILD tag), naming the registry entry after that build's real tag.
+    const build = installedBackendBuild(root, def.id)
+    if (!build) return err(c, 409, 'not_installed', 'Backend is not installed on disk — download it first.')
+    let eng = d.registry.list().engines.find((e) => e.binPath === build.bin)
+    if (!eng) eng = (await d.registry.add(`llama.cpp ${build.tag} (${def.id})`, build.bin)).engine
     d.registry.activate(eng.id)
     return c.json({ ok: true, engineId: eng.id })
   })
@@ -296,11 +319,17 @@ export function registerApi(app: Hono, d: Deps): void {
     const def = availableBackends().find((x) => x.id === c.req.param('id'))
     if (!def) return err(c, 400, 'invalid_config_value', 'Unknown backend for this platform.')
     const root = join(d.store.dir(), 'engines')
-    const bin = installedBackendServer(root, def.id)
-    const eng = bin ? d.registry.list().engines.find((e) => e.binPath === bin) : undefined
-    if (eng && d.registry.active()?.id === eng.id) await d.manager.stopAndWait()
-    if (eng) d.registry.remove(eng.id)
-    deleteBackend(root, def.id, LLAMA_BUILD)
+    // Tag-agnostic: unregister + delete EVERY build of this backend (an update may have left
+    // more than one tag-keyed dir / registry entry). Stop first if the active engine is one of them.
+    // `[^\\/]+` (not `.+`) so the tag can't greedily span path separators into another segment.
+    const backendDirRe = new RegExp(`[\\\\/]engines[\\\\/]llama\\.cpp-[^\\\\/]+-${def.id}[\\\\/]`)
+    const engs = d.registry.list().engines.filter((e) => backendDirRe.test(e.binPath))
+    const activeId = d.registry.active()?.id
+    if (engs.some((e) => e.id === activeId)) await d.manager.stopAndWait()
+    for (const e of engs) {
+      try { d.registry.remove(e.id) } catch { /* already gone */ }
+    }
+    deleteAllBackendBuilds(root, def.id)
     return c.json({ ok: true })
   })
 
@@ -311,7 +340,7 @@ export function registerApi(app: Hono, d: Deps): void {
     if (process.platform !== 'darwin') {
       return err(c, 409, 'unsupported_platform', 'MLX is only available on macOS (Apple Silicon).')
     }
-    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    { const busy = engineWorkBusy(d); if (busy) return err(c, 409, 'engine_already_running', busy) }
     const root = join(d.store.dir(), 'engines')
     const upgrade = c.req.query('update') === '1'
     void (async () => {
@@ -361,7 +390,31 @@ export function registerApi(app: Hono, d: Deps): void {
         installed = existsSync(llamafileBinPath(enginesRoot))
         enabled = regEngines.some((x) => x.kind === 'llamafile')
       }
-      return { ...e, installed, enabled }
+      // Source-built recognition (ADR-100): a fork the user compiled from THIS catalog repo
+      // (matched by the engine's sourceRepo) is installed + enabled — so the card shows the
+      // manage menu (rebuild/disable/delete) instead of a stale "Build from source". Also
+      // detect a built-but-disabled engine (registry entry removed, build output still on disk)
+      // so Enable can re-register it.
+      const srcEng = regEngines.find((x) => sameRepo(x.sourceRepo, e.homepage))
+      let sourceBinPath: string | undefined = srcEng?.binPath
+      if (!srcEng) sourceBinPath = sourceBuildBinary(enginesRoot, e.homepage) ?? undefined
+      const sourceBuilt = !!srcEng || !!sourceBinPath
+      if (srcEng) {
+        installed = true
+        enabled = true
+      } else if (sourceBinPath) {
+        installed = true
+        enabled = enabled ?? false
+      }
+      return {
+        ...e,
+        installed,
+        enabled,
+        sourceBuilt,
+        sourceEngineId: srcEng?.id,
+        sourceBranch: srcEng?.sourceBranch ?? '',
+        sourceBinPath: sourceBinPath ?? '',
+      }
     })
     return c.json({ engines: items })
   })
@@ -377,11 +430,159 @@ export function registerApi(app: Hono, d: Deps): void {
     return c.json({ hardware: hw, recommendation: rec })
   })
 
-  // Guided compile-from-source prereq check (ADR-089). Read-only: detects the
-  // Windows + CUDA build toolchain (git / cmake / CUDA / MSVC) so the build guide can
-  // show what's missing + install links. Off Windows it reports `supported:false`
+  // Compile-from-source prereq check (ADR-089). Read-only: detects the Windows + CUDA
+  // build toolchain (git / cmake / CUDA / MSVC) so the build guide can show what's missing
+  // + install links. The configured toolchain dirs (ADR-100) are prepended to PATH so a
+  // conda-env / custom-path CUDA Toolkit is found. Off Windows it reports `supported:false`
   // (Linux/macOS guided build is parked).
-  app.get('/api/v1/build/prereqs', async (c) => c.json(await checkBuildPrereqs()))
+  app.get('/api/v1/build/prereqs', async (c) =>
+    c.json(await checkBuildPrereqs(d.store.snapshot().build.toolchainDirs)),
+  )
+
+  // 1-click compile-from-source (ADR-100, Windows + CUDA). Clones the repo, runs cmake,
+  // compiles llama-server, then registers + activates the built binary. Long-running; 202
+  // immediately + live phase/log via GET /status engineBuild. Gated to the local host —
+  // it executes a compiler from a user-supplied repo, so a LAN client must not trigger it.
+  app.post('/api/v1/build/run', async (c) => {
+    if (!isLocalRequest(c, d))
+      return err(c, 403, 'forbidden', 'Building an engine is only available on the machine running TurboLLM.')
+    if (process.platform !== 'win32')
+      return err(c, 409, 'unsupported_platform', 'In-app build is currently Windows + CUDA only.')
+    const b = await body<{ repoUrl?: string; branch?: string; name?: string }>(c)
+    const repoUrl = (b.repoUrl ?? '').trim()
+    if (!/^https?:\/\//i.test(repoUrl))
+      return err(c, 400, 'invalid_config_value', 'A http(s) repo URL is required.')
+    const branch = (b.branch ?? '').trim() || undefined
+    // A branch beginning with '-' would be parsed by git as an option (it sits before the
+    // positional URL). Reject it — belt-and-suspenders, even though builds are local-only.
+    if (branch && branch.startsWith('-'))
+      return err(c, 400, 'invalid_config_value', 'Branch name cannot start with "-".')
+    const busy = engineWorkBusy(d)
+    if (busy) return err(c, 409, 'engine_already_running', busy)
+    const name = (b.name ?? '').trim() || undefined
+    const enginesRoot = join(d.store.dir(), 'engines')
+    const toolchainDirs = d.store.snapshot().build.toolchainDirs
+    const buildRoot = join(enginesRoot, 'build', buildDirName(repoUrl, branch))
+    // Reserve the build slot SYNCHRONOUSLY (before returning 202) so two near-simultaneous
+    // POSTs can't both pass the busy-check and race on the same buildRoot / clobber buildAbort.
+    const ac = new AbortController()
+    buildAbort = ac
+    d.build.start(name ?? repoUrl)
+    void (async () => {
+      try {
+        let out
+        try {
+          out = await runBuild(
+            { repoUrl, branch, enginesRoot, toolchainDirs },
+            { phase: (p) => d.build.phase(p), log: (line) => d.build.log(line) },
+            ac.signal,
+          )
+        } catch (e) {
+          // The BUILD step (clone/configure/compile) failed or was cancelled: GC the partial
+          // tree so repeated attempts don't fill the disk with multi-GB CUDA objects. Only
+          // here — never after a binary was successfully produced (that would throw away a
+          // good build over a mere registration hiccup).
+          try { rmSync(buildRoot, { recursive: true, force: true }) } catch { /* best effort */ }
+          if ((e as Error)?.name === 'AbortError') {
+            d.build.log('Build cancelled.')
+            d.build.fail('Build cancelled.')
+          } else {
+            // Friendlier message for the common "fork needs a GAS/MinGW assembler" case: some
+            // forks (e.g. TurboQuant) enable the generic CMake `ASM` language, which on Windows
+            // requires a GAS assembler — MSVC can't provide it, so the build can't run here.
+            const asmIssue = d.build.get().log.some((l) => /No CMAKE_ASM_COMPILER could be found|ASM compiler identification is unknown/i.test(l))
+            const raw = e instanceof Error ? e.message : String(e)
+            d.build.fail(
+              asmIssue
+                ? "This fork needs a GAS/MinGW assembler (it enables CMake's generic ASM language), which isn't available with the MSVC toolchain — so it can't be built here on Windows. Use a prebuilt binary, or build it under MSYS2/MinGW and add it via “Add your own engine.”"
+                : raw,
+            )
+          }
+          return
+        }
+        // Build SUCCEEDED — the binary is good. Register (probe) it, carrying its source
+        // provenance for the ADR-088 "newer source → rebuild" check. For a REBUILD, match the
+        // existing engine by binPath OR by source repo+branch (a fresh compile can land at a
+        // slightly different binPath) and replace it in place (stop it first if it's the
+        // running active one) so we re-probe fresh capabilities without a NameTaken clash.
+        // A failure HERE keeps the built binary on disk (no GC) so it isn't thrown away.
+        const engines = d.registry.list().engines
+        const prior =
+          engines.find((e) => e.binPath === out.binPath) ??
+          engines.find((e) => e.sourceRepo === repoUrl && (e.sourceBranch ?? '') === (branch ?? ''))
+        if (prior) {
+          if (d.registry.active()?.id === prior.id) await d.manager.stopAndWait()
+          try { d.registry.remove(prior.id) } catch { /* already gone */ }
+        }
+        const eng = (await d.registry.add(prior?.name ?? name ?? '', out.binPath, {
+          sourceRepo: repoUrl,
+          sourceBranch: branch,
+        })).engine
+        d.registry.activate(eng.id)
+        d.build.log(`Registered "${eng.name}" — built from ${out.commit.slice(0, 8)}.`)
+        d.build.done()
+      } catch (e) {
+        // Registration/probe failed AFTER a successful build: keep the binary (no GC), but
+        // tell the user it built yet couldn't be registered so they can retry/inspect.
+        d.build.fail(`Built successfully, but couldn't register the engine: ${e instanceof Error ? e.message : String(e)}`)
+      } finally {
+        if (buildAbort === ac) buildAbort = null
+      }
+    })()
+    return c.json({ accepted: true }, 202)
+  })
+
+  // Cancel an in-progress 1-click build (ADR-100). Kills the child compiler/clone.
+  app.post('/api/v1/build/cancel', (c) => {
+    if (buildAbort) {
+      buildAbort.abort()
+      return c.json({ ok: true })
+    }
+    return c.json({ ok: false })
+  })
+
+  // Auto-download a CUDA Toolkit from NVIDIA's redistributable archives (ADR-101) when the
+  // user has no CUDA installed, so the 1-click build can compile. Streams via the same
+  // engineBuild channel (phase 'provisioning'); on success the toolkit's bin dir is added to
+  // build.toolchainDirs so the prereq check + build immediately find nvcc. Local-host + Win gated.
+  app.post('/api/v1/build/cuda', async (c) => {
+    if (!isLocalRequest(c, d))
+      return err(c, 403, 'forbidden', 'Downloading CUDA is only available on the machine running TurboLLM.')
+    if (process.platform !== 'win32')
+      return err(c, 409, 'unsupported_platform', 'Automatic CUDA download is currently Windows x86_64 only.')
+    const busy = engineWorkBusy(d)
+    if (busy) return err(c, 409, 'engine_already_running', busy)
+    const dataDir = d.store.dir()
+    const ac = new AbortController()
+    buildAbort = ac
+    d.build.start('CUDA Toolkit')
+    d.build.phase('provisioning')
+    void (async () => {
+      try {
+        const tk = await provisionCuda(
+          dataDir,
+          (p) => d.build.log(p.pct != null ? `${p.message} ${Math.round(p.pct * 100)}%` : p.message),
+          ac.signal,
+        )
+        // Persist the toolkit bin dir so detection + the build find nvcc + the runtime DLLs.
+        d.store.update((cfg) => {
+          if (!cfg.build.toolchainDirs.includes(tk.binDir)) cfg.build.toolchainDirs.unshift(tk.binDir)
+        })
+        d.build.log(`CUDA ${tk.version} installed and added to your build environment.`)
+        d.build.done()
+      } catch (e) {
+        if ((e as Error)?.name === 'AbortError') {
+          d.build.log('CUDA download cancelled.')
+          d.build.fail('CUDA download cancelled.')
+        } else {
+          d.build.fail(`Could not download CUDA: ${e instanceof Error ? e.message : String(e)}`)
+        }
+      } finally {
+        if (buildAbort === ac) buildAbort = null
+      }
+    })()
+    return c.json({ accepted: true }, 202)
+  })
 
   // Provision the vLLM engine (ADR-044): uv → venv → `uv pip install vllm`, then
   // register as a kind='vllm' engine. 202 + progress via GET /status engineProvision.
@@ -389,7 +590,7 @@ export function registerApi(app: Hono, d: Deps): void {
   // support level so the UI can warn before the user commits to a multi-GB install.
   // ?update=1 upgrades vllm to the latest release (passes -U to uv pip install).
   app.post('/api/v1/engines/vllm', (c) => {
-    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    { const busy = engineWorkBusy(d); if (busy) return err(c, 409, 'engine_already_running', busy) }
     const root = join(d.store.dir(), 'engines')
     const upgrade = c.req.query('update') === '1'
     void (async () => {
@@ -418,7 +619,7 @@ export function registerApi(app: Hono, d: Deps): void {
     if (!entry.platforms.includes(process.platform)) {
       return err(c, 409, 'unsupported_platform', 'TurboQuant has no prebuilt binary for this operating system yet.')
     }
-    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    { const busy = engineWorkBusy(d); if (busy) return err(c, 409, 'engine_already_running', busy) }
     const root = join(d.store.dir(), 'engines')
     const upgrade = c.req.query('update') === '1'
     void (async () => {
@@ -458,7 +659,7 @@ export function registerApi(app: Hono, d: Deps): void {
     if (!entry.platforms.includes(process.platform)) {
       return err(c, 409, 'unsupported_platform', 'KoboldCpp has no prebuilt binary for this operating system yet.')
     }
-    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    { const busy = engineWorkBusy(d); if (busy) return err(c, 409, 'engine_already_running', busy) }
     const root = join(d.store.dir(), 'engines')
     const upgrade = c.req.query('update') === '1'
     const hasNvidia = primaryVendor(getSysInfo()) === 'nvidia'
@@ -494,7 +695,7 @@ export function registerApi(app: Hono, d: Deps): void {
     if (!entry.platforms.includes(process.platform)) {
       return err(c, 409, 'unsupported_platform', 'llamafile is not available for this operating system yet.')
     }
-    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    { const busy = engineWorkBusy(d); if (busy) return err(c, 409, 'engine_already_running', busy) }
     const root = join(d.store.dir(), 'engines')
     const upgrade = c.req.query('update') === '1'
     void (async () => {
@@ -1120,6 +1321,7 @@ export function registerApi(app: Hono, d: Deps): void {
       gateway?: { autoSwap?: boolean; keepN?: number }
       tavilyApiKey?: string
       search?: { provider?: string; tavilyApiKey?: string; kagiApiKey?: string; searxngUrl?: string }
+      build?: { toolchainDirs?: string[] }
     }>(c)
 
     const updates: Record<string, unknown> = {}
@@ -1213,12 +1415,30 @@ export function registerApi(app: Hono, d: Deps): void {
       gwUpdates.keepN = v
     }
 
+    // Build toolchain dirs (ADR-100): absolute folders prepended to PATH for the prereq
+    // probe + 1-click build, so a conda-env / custom-path CUDA Toolkit is found. Validate
+    // here for a clean 400 (config.validate() would otherwise throw a 500 on update()).
+    let toolchainDirs: string[] | undefined
+    if (b.build?.toolchainDirs !== undefined) {
+      if (!Array.isArray(b.build.toolchainDirs)) {
+        return err(c, 400, 'invalid_config_value', 'build.toolchainDirs must be an array of paths.')
+      }
+      const dirs = b.build.toolchainDirs.map((p) => String(p).trim()).filter(Boolean)
+      for (const dir of dirs) {
+        if (!/^([a-zA-Z]:[\\/]|[\\/])/.test(dir)) {
+          return err(c, 400, 'invalid_config_value', `build.toolchainDirs: "${dir}" must be an absolute path.`)
+        }
+      }
+      toolchainDirs = dirs
+    }
+
     const before = d.store.snapshot().daemon
     d.store.update((cfg) => {
       Object.assign(cfg.daemon, updates)
       Object.assign(cfg.modelDefaults, mdUpdates)
       Object.assign(cfg.comfyui, cuUpdates)
       Object.assign(cfg.gateway, gwUpdates)
+      if (toolchainDirs !== undefined) cfg.build.toolchainDirs = toolchainDirs
       if (b.autoLoadOnStart !== undefined) cfg.autoLoadOnStart = !!b.autoLoadOnStart
       if (telemetryLevel !== undefined) cfg.telemetry.level = telemetryLevel
       // HF token (spec 10 §4): write-only. An explicit '' clears it. Never logged.
@@ -1653,6 +1873,9 @@ function settingsPayload(d: Deps) {
       searxngUrl: cfg.tools.search?.searxngUrl ?? '',
     },
     mcp: cfg.mcp,
+    // Build environment (ADR-100): folders prepended to PATH for compile-from-source so a
+    // conda-env / custom-path CUDA Toolkit + compiler are found. Not secret — echoed back.
+    build: { toolchainDirs: cfg.build.toolchainDirs },
   }
 }
 
@@ -1719,6 +1942,15 @@ function localCountFor(d: Deps, repo: string): number {
     if (hay.includes(needle)) n++
   }
   return n
+}
+
+/** A download (engine provision) OR a 1-click build writes under `<dataDir>/engines` and
+ *  ends by mutating the registry + flipping the active engine. They must not run at once
+ *  (ADR-100). Returns a user-facing message when either is in flight, else null. */
+function engineWorkBusy(d: Deps): string | null {
+  if (d.provision.get().active) return 'An engine download is in progress — wait for it to finish.'
+  if (d.build.isActive()) return 'A build is in progress — wait for it to finish.'
+  return null
 }
 
 function hfErr(c: Context, e: unknown) {
@@ -1805,6 +2037,19 @@ function engineInstallDir(eng: Engine, enginesRoot: string): string | null {
   // llamafile single binary (engines/llamafile/)
   if (eng.kind === 'llamafile') {
     const d = llamafileDir(enginesRoot)
+    return inside(d) ? d : null
+  }
+  // Source-built engine (ADR-100): binary lives under engines/build/<slug>/ — purge the
+  // whole build dir (clone + objects + binary), which can be several GB.
+  const srcDir = sourceBuildDirOf(eng.binPath, enginesRoot)
+  if (srcDir) return inside(srcDir) ? srcDir : null
+  // Official llama.cpp build (engines/llama.cpp-<tag>-<backend>/): purge THIS specific
+  // version's dir so a user can delete an individual build (e.g. an old b9744) without
+  // touching others. The generic backend-delete only knows the pinned tag, so without this
+  // a per-version delete would leave the files on disk.
+  const llamaMatch = eng.binPath.replace(/\\/g, '/').match(/\/(llama\.cpp-[^/]+)\//i)
+  if (llamaMatch) {
+    const d = join(enginesRoot, llamaMatch[1])
     return inside(d) ? d : null
   }
   return null

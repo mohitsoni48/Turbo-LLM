@@ -8,6 +8,7 @@ import { Manager, killTrackedEnginesSync, reapStaleEngines, type StartOpts } fro
 import { ComfyGuard } from './engines/comfy-guard'
 import { Registry } from './engines/registry'
 import { ProvisionState } from './engines/provision-state'
+import { BuildState } from './engines/build-state'
 import { UpdateChecker } from './engines/update'
 import { UpdateScheduler } from './engines/update-scheduler'
 import { AppUpdateChecker } from './app-update'
@@ -136,6 +137,8 @@ const registry = new Registry(store)
 const pruned = registry.pruneDeadManagedBuilds()
 if (pruned > 0) console.log(`pruned ${pruned} dangling engine build(s)`)
 const provision = new ProvisionState()
+// In-app compile-from-source status (ADR-100): live phase + log tail while a build runs.
+const build = new BuildState()
 // Honest update checker (ADR-085): per-engine installed/latest/hasUpdate, in-memory cached.
 const updates = new UpdateChecker()
 const enginesDir = join(store.dir(), 'engines')
@@ -174,7 +177,7 @@ const startedAt = Date.now()
 // this cache offline-first; the startup check below warms it so the chip is ready.
 const appUpdates = new AppUpdateChecker(version)
 // `requestRestart` is attached after the server is created (it must close over it).
-const deps: Deps = { store, registry, manager, scanner, hashes, db, provision, updates, appUpdates, hf, downloads, bench, modelRouter, comfy, tools: toolRegistry, version, startedAt }
+const deps: Deps = { store, registry, manager, scanner, hashes, db, provision, build, updates, appUpdates, hf, downloads, bench, modelRouter, comfy, tools: toolRegistry, version, startedAt }
 const app = createApp(deps)
 
 // Warm the app-update cache shortly after boot (ADR-031: "once per daemon start") so the

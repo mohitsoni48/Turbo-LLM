@@ -47,6 +47,16 @@ export type EngineProvision = {
   error: string | null
 }
 
+/** In-app compile-from-source status (ADR-100), from GET /api/v1/status. A build streams
+ *  a phase + a log tail (clone/cmake output) rather than a byte percentage. */
+export type EngineBuild = {
+  active: boolean
+  phase: 'provisioning' | 'preparing' | 'cloning' | 'configuring' | 'compiling' | 'registering' | 'done' | 'error'
+  engine: string
+  log: string[]
+  error: string | null
+}
+
 /** Live running-session stats (B4), from GET /api/v1/status. Null unless the
  *  engine is running; resets each time the engine starts/stops. */
 export type EngineStats = {
@@ -126,6 +136,8 @@ export type Status = {
   bench: BenchState
   downloads: { active: number }
   engineProvision?: EngineProvision
+  /** In-app compile-from-source status (ADR-100). */
+  engineBuild?: EngineBuild
   /** ComfyUI GPU coordination state (null when the feature is off / not wired). */
   comfyui?: ComfyRuntime | null
   telemetryLevel: string
@@ -287,6 +299,15 @@ export type CatalogEngine = {
   installed?: boolean
   /** Whether a registry engine entry exists for this engine (files installed AND registered). */
   enabled?: boolean
+  /** This catalog engine was compiled from source (ADR-100): manage it via Rebuild, not a
+   *  prebuilt Update. True whether currently registered or just on disk (disabled). */
+  sourceBuilt?: boolean
+  /** Registry id of the matched source-built engine (when enabled) — for disable/delete/policy. */
+  sourceEngineId?: string
+  /** Branch the source-built engine was compiled from (for a Rebuild). */
+  sourceBranch?: string
+  /** Path to the built binary (used to Enable a built-but-disabled source engine). */
+  sourceBinPath?: string
 }
 
 export type EngineCatalog = {

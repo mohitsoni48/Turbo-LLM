@@ -1,13 +1,30 @@
-// Guided compile-from-source (Windows + CUDA) — prerequisite checker + build guide
-// (ADR-089). This is a GUIDED flow only: we detect the build toolchain, tell the user
-// what's missing (with install links), and show the exact Windows + CUDA build commands
-// for a repo. We do NOT run the build in-app (that's a parked TODO). Linux/macOS are
-// parked too — `checkBuildPrereqs` reports `supported:false` off Windows.
+// Compile-from-source (Windows + CUDA) — prerequisite checker + build commands
+// (ADR-089). Detects the build toolchain (git/cmake/CUDA/MSVC), tells the user what's
+// missing (with install links), and the in-app 1-click build (ADR-100, build-runner.ts)
+// runs the exact commands here. Linux/macOS are parked — `checkBuildPrereqs` reports
+// `supported:false` off Windows.
+//
+// Toolchain dirs (ADR-100): the daemon inherits the system PATH, so a CUDA Toolkit /
+// compiler installed in a conda env or a custom location isn't found. {@link buildEnv}
+// prepends user-configured dirs to PATH for BOTH the probe below and the real build, so
+// pointing at e.g. a conda env's bin makes `nvcc` resolve.
 import { execFile } from 'node:child_process'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { promisify } from 'node:util'
 
 const execFileP = promisify(execFile)
+
+/** Build a child-process env with `toolchainDirs` prepended to PATH. Empty/blank dirs are
+ *  dropped. PATH is matched case-insensitively (Windows uses `Path`); we write back to the
+ *  same key name the parent used so we never end up with a duplicate `PATH`/`Path` pair. */
+export function buildEnv(toolchainDirs: string[] = []): NodeJS.ProcessEnv {
+  const dirs = toolchainDirs.map((d) => d.trim()).filter(Boolean)
+  if (dirs.length === 0) return { ...process.env }
+  const env = { ...process.env }
+  const key = Object.keys(env).find((k) => k.toLowerCase() === 'path') ?? 'PATH'
+  env[key] = [...dirs, env[key] ?? ''].filter(Boolean).join(delimiter)
+  return env
+}
 
 /** One build-toolchain prerequisite (git / cmake / CUDA / MSVC). */
 export interface BuildPrereqTool {
@@ -34,12 +51,14 @@ const INSTALL_URLS: Record<BuildPrereqTool['id'], string> = {
 
 /** Run a version command with a short timeout; return its trimmed stdout (or stderr —
  *  some tools, e.g. nvcc, print to stdout; vswhere to stdout too). Throws if the tool
- *  is missing or errors, which the caller turns into `found:false`. */
-async function runVersion(cmd: string, args: string[]): Promise<string> {
+ *  is missing or errors, which the caller turns into `found:false`. `env` carries the
+ *  PATH override (ADR-100) so tools in a conda env / custom dir are found. */
+async function runVersion(cmd: string, args: string[], env: NodeJS.ProcessEnv): Promise<string> {
   const { stdout, stderr } = await execFileP(cmd, args, {
     timeout: 8000,
     windowsHide: true,
     maxBuffer: 1024 * 1024,
+    env,
   })
   return (stdout || stderr || '').trim()
 }
@@ -64,11 +83,11 @@ function parseNvccVersion(out: string): string {
   return m ? m[1] : ''
 }
 
-async function checkGit(): Promise<BuildPrereqTool> {
+async function checkGit(env: NodeJS.ProcessEnv): Promise<BuildPrereqTool> {
   let found = false
   let version: string | undefined
   try {
-    version = parseGitVersion(await runVersion('git', ['--version'])) || undefined
+    version = parseGitVersion(await runVersion('git', ['--version'], env)) || undefined
     found = true
   } catch {
     found = false
@@ -76,11 +95,11 @@ async function checkGit(): Promise<BuildPrereqTool> {
   return { id: 'git', name: 'Git', found, version, installUrl: INSTALL_URLS.git }
 }
 
-async function checkCmake(): Promise<BuildPrereqTool> {
+async function checkCmake(env: NodeJS.ProcessEnv): Promise<BuildPrereqTool> {
   let found = false
   let version: string | undefined
   try {
-    version = parseCmakeVersion(await runVersion('cmake', ['--version'])) || undefined
+    version = parseCmakeVersion(await runVersion('cmake', ['--version'], env)) || undefined
     found = true
   } catch {
     found = false
@@ -88,11 +107,11 @@ async function checkCmake(): Promise<BuildPrereqTool> {
   return { id: 'cmake', name: 'CMake', found, version, installUrl: INSTALL_URLS.cmake }
 }
 
-async function checkCuda(): Promise<BuildPrereqTool> {
+async function checkCuda(env: NodeJS.ProcessEnv): Promise<BuildPrereqTool> {
   let found = false
   let version: string | undefined
   try {
-    version = parseNvccVersion(await runVersion('nvcc', ['--version'])) || undefined
+    version = parseNvccVersion(await runVersion('nvcc', ['--version'], env)) || undefined
     found = true
   } catch {
     found = false
@@ -104,7 +123,7 @@ async function checkCuda(): Promise<BuildPrereqTool> {
  *  it for the latest install that has the C++ x64/x86 tools component and return its
  *  installationVersion. A missing component (no version printed) or a missing vswhere →
  *  not found. */
-async function checkMsvc(): Promise<BuildPrereqTool> {
+async function checkMsvc(env: NodeJS.ProcessEnv): Promise<BuildPrereqTool> {
   let found = false
   let version: string | undefined
   try {
@@ -115,7 +134,7 @@ async function checkMsvc(): Promise<BuildPrereqTool> {
       '-products', '*',
       '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
       '-property', 'installationVersion',
-    ])
+    ], env)
     version = out.split(/\r?\n/)[0]?.trim() || undefined
     found = !!version
   } catch {
@@ -131,12 +150,14 @@ async function checkMsvc(): Promise<BuildPrereqTool> {
 }
 
 /** Detect the Windows + CUDA build toolchain. On non-Windows the guided build is parked,
- *  so this returns `{ supported:false, tools:[] }` without probing anything. */
-export async function checkBuildPrereqs(): Promise<BuildPrereqs> {
+ *  so this returns `{ supported:false, tools:[] }` without probing anything. `toolchainDirs`
+ *  (ADR-100) are prepended to PATH so a conda-env / custom-path CUDA Toolkit is detected. */
+export async function checkBuildPrereqs(toolchainDirs: string[] = []): Promise<BuildPrereqs> {
   if (process.platform !== 'win32') {
     return { supported: false, tools: [] }
   }
-  const tools = await Promise.all([checkGit(), checkCmake(), checkCuda(), checkMsvc()])
+  const env = buildEnv(toolchainDirs)
+  const tools = await Promise.all([checkGit(env), checkCmake(env), checkCuda(env), checkMsvc(env)])
   return { supported: true, tools }
 }
 

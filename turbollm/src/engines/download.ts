@@ -116,10 +116,35 @@ export function backendDefAt(id: BackendId, tag: string): BackendDef | null {
   return availableBackends(tag).find((b) => b.id === id) ?? null
 }
 
-/** Path to an already-extracted backend's server binary, or null if not installed. */
-export function installedBackendServer(enginesRoot: string, id: BackendId, tag = LLAMA_BUILD): string | null {
-  const dir = backendDir(enginesRoot, id, tag)
-  return existsSync(dir) ? findServer(dir) : null
+/** An installed official-llama build of a backend, tag-AGNOSTIC: scans the engines root for
+ *  every `llama.cpp-<tag>-<id>` dir and returns the NEWEST (highest `b<N>` build number) that
+ *  has a server binary, or null. Resolving by scan (not by the pinned `LLAMA_BUILD` tag) is what
+ *  keeps a build de-pinned by an update (ADR-085) from falsely reading as "not installed". */
+export function installedBackendBuild(
+  enginesRoot: string,
+  id: BackendId,
+): { dir: string; tag: string; bin: string } | null {
+  let entries: string[]
+  try {
+    entries = readdirSync(enginesRoot)
+  } catch {
+    return null // no engines dir yet
+  }
+  const re = new RegExp(`^llama\\.cpp-(.+)-${id}$`)
+  const buildNum = (tag: string): number => {
+    const m = tag.match(/^b(\d+)$/)
+    return m ? Number(m[1]) : -1
+  }
+  let best: { dir: string; tag: string; bin: string } | null = null
+  for (const name of entries) {
+    const m = re.exec(name)
+    if (!m) continue
+    const dir = join(enginesRoot, name)
+    const bin = findServer(dir)
+    if (!bin) continue
+    if (!best || buildNum(m[1]) > buildNum(best.tag)) best = { dir, tag: m[1], bin }
+  }
+  return best
 }
 
 /** Recursively find a file by exact name under dir (first match), or null.
@@ -236,12 +261,23 @@ export async function provisionBackend(
   return bin
 }
 
-/** Remove an installed backend's extracted files. Returns true if anything existed. */
-export function deleteBackend(enginesRoot: string, id: BackendId, tag = LLAMA_BUILD): boolean {
-  const dir = backendDir(enginesRoot, id, tag)
-  if (!existsSync(dir)) return false
-  rmSync(dir, { recursive: true, force: true })
-  return true
+/** Remove EVERY installed build of a backend, tag-agnostic (`llama.cpp-<tag>-<id>` dirs —
+ *  e.g. both b9744 and b9754 after a de-pinned update). Returns how many dirs were removed. */
+export function deleteAllBackendBuilds(enginesRoot: string, id: BackendId): number {
+  let entries: string[]
+  try {
+    entries = readdirSync(enginesRoot)
+  } catch {
+    return 0
+  }
+  const re = new RegExp(`^llama\\.cpp-(.+)-${id}$`)
+  let removed = 0
+  for (const name of entries) {
+    if (!re.test(name)) continue
+    rmSync(join(enginesRoot, name), { recursive: true, force: true })
+    removed++
+  }
+  return removed
 }
 
 // ─── Generic fork provisioning from a GitHub release (ADR-044) ──────────────

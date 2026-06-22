@@ -27,9 +27,14 @@ const turboquant = eng({ id: 'c', binPath: '/root/.turbollm/engines/turboquant/l
 const mlx = eng({ id: 'd', kind: 'mlx', binPath: '/usr/bin/mlx_lm.server' })
 const userFork = eng({ id: 'e', name: 'My Fork', binPath: '/opt/ik_llama/server', kind: 'llama-server' })
 
-test('engineGroupKey collapses official llama.cpp builds regardless of backend/tag', () => {
-  assert.equal(engineGroupKey(llamaCuda9608), 'official-llama')
-  assert.equal(engineGroupKey(llamaCuda9736), 'official-llama')
+test('engineGroupKey groups official llama.cpp per backend; same backend collapses across tags', () => {
+  // Each backend is its own engine; multiple builds of the SAME backend still collapse.
+  assert.equal(engineGroupKey(llamaCuda9608), 'official-llama-cuda')
+  assert.equal(engineGroupKey(llamaCuda9736), 'official-llama-cuda')
+  // A different backend gets a distinct key (its own dropdown entry).
+  const llamaRocm = eng({ id: 'r', binPath: '/root/.turbollm/engines/llama.cpp-b9736-rocm/llama-server' })
+  assert.equal(engineGroupKey(llamaRocm), 'official-llama-rocm')
+  assert.notEqual(engineGroupKey(llamaCuda9608), engineGroupKey(llamaRocm))
 })
 
 test('engineGroupKey maps pip engines to their kind', () => {
@@ -75,12 +80,12 @@ test('latestMemberId is null when no tags parse', () => {
   assert.equal(latestMemberId([turboquant, mlx]), null)
 })
 
-test('groupEngines collapses two llama builds into one group, others stay separate', () => {
+test('groupEngines collapses two same-backend llama builds into one group, others stay separate', () => {
   const groups = groupEngines([llamaCuda9608, llamaCuda9736, turboquant, mlx])
-  const official = groups.find((g) => g.key === 'official-llama')
+  const official = groups.find((g) => g.key === 'official-llama-cuda')
   assert.ok(official)
   assert.equal(official!.members.length, 2)
-  assert.equal(official!.label, 'llama.cpp')
+  assert.equal(official!.label, 'llama.cpp (CUDA)')
   assert.equal(official!.latestId, 'b')
   assert.equal(groups.length, 3)
 })

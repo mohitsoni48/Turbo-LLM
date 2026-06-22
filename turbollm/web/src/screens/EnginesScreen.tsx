@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Check,
   ChevronDown,
@@ -8,12 +8,13 @@ import {
   Layers,
   Loader2,
   MoreHorizontal,
-  Settings2,
+  RefreshCw,
   Sparkles,
   Wrench,
 } from 'lucide-react'
 import {
   useBackendInstall,
+  useBuild,
   useEngineBackends,
   useEngineCatalog,
   useEngineMutations,
@@ -41,11 +42,6 @@ import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { Skeleton } from '../components/ui/skeleton'
 import { toast } from '../components/ui/sonner'
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from '../components/ui/collapsible'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -160,11 +156,12 @@ export function EnginesScreen() {
             rec={recQ.data}
             isLoading={recQ.isLoading}
             activeCatalogId={activeEngine ? catalogIdFor(activeEngine) : null}
+            provisioning={provisioning}
           />
         )}
 
-        {/* Zone 3 — Advanced */}
-        <AdvancedSection list={list} backends={backendsQ.data} provisioning={provisioning} />
+        {/* Other installed llama.cpp builds — separate, below all engines (newest-first). */}
+        <OtherLlamaBuildsSection />
 
         {/* Live engine log */}
         {activeEngine && <EngineLogPanel open={logPanelOpen} onOpenChange={setLogPanelOpen} />}
@@ -189,11 +186,36 @@ function StatusHero({
   const mut = useEngineMutations()
   const { data: sys } = useSysInfo()
   const { data: updates } = useEngineUpdates()
+  const { data: status } = useStatus()
+  const build = useBuild()
   const [rebuildOpen, setRebuildOpen] = useState(false)
 
-  // Rebuild chip: show when the active engine is source-built and has a newer commit.
+  // Pull the newly-built engine into the lists whenever ANY in-app build settles — even if
+  // the build dialog that started it was closed mid-build (ADR-100) — and surface a global
+  // success/error toast so the user always gets confirmation the engine was added. Watches
+  // the active→settled transition on the status poll's `engineBuild` so it fires exactly once.
+  const wasBuilding = useRef(false)
+  const eb = status?.engineBuild
+  const buildActive = !!eb?.active
+  useEffect(() => {
+    if (wasBuilding.current && !buildActive && eb) {
+      build.refresh()
+      // The CUDA-download step also uses engineBuild; only celebrate an actual engine build.
+      if (eb.phase === 'done' && eb.engine && eb.engine !== 'CUDA Toolkit') {
+        toast.success(`${eb.engine} built and added — it's now your active engine.`)
+      } else if (eb.phase === 'error' && eb.error && eb.engine !== 'CUDA Toolkit') {
+        toast.error(eb.error)
+      }
+    }
+    wasBuilding.current = buildActive
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [buildActive])
+
+  // Rebuild chip: only when the active source-built engine actually has a NEWER commit.
+  // `rebuild` just flags "updates via rebuild" (always true for source engines); the
+  // availability signal is `hasUpdate` (built commit ≠ repo HEAD).
   const upd = activeEngine ? updates?.updates[activeEngine.id] : undefined
-  const showRebuildChip = !!upd?.rebuild && !!activeEngine?.sourceRepo
+  const showRebuildChip = !!upd?.rebuild && !!upd?.hasUpdate && !!activeEngine?.sourceRepo
 
   // Hardware line — prefer the recommendation's hardware, fall back to sysinfo.
   const hw = rec?.hardware
@@ -368,6 +390,7 @@ function StatusHero({
           repoUrl={activeEngine.sourceRepo}
           branch={activeEngine.sourceBranch}
           engineName={activeEngine.name}
+          mode="rebuild"
         />
       )}
     </div>
@@ -380,13 +403,13 @@ function InstallManageCatalog({
   rec,
   isLoading,
   activeCatalogId,
+  provisioning,
 }: {
   rec: EngineRecommendationResult | undefined
   isLoading: boolean
   activeCatalogId: string | null
+  provisioning: boolean
 }) {
-  const { data: status } = useStatus()
-  const provisioning = !!status?.engineProvision?.active
   const catalogQ = useEngineCatalog(provisioning)
   const { data: registry } = useEngines()
   const { data: updates } = useEngineUpdates(provisioning)
@@ -448,6 +471,8 @@ function InstallManageCatalog({
   }
   const registryEngineId = (e: CatalogEngine): string | undefined => {
     const eng = registry?.engines ?? []
+    // Source-built engines (ADR-100): the backend already matched the registry entry by repo.
+    if (e.sourceEngineId) return e.sourceEngineId
     if (e.provision === 'pip') return eng.find((x) => x.kind === e.kind)?.id
     if (e.id === 'turboquant') return eng.find((x) => /[\\/]engines[\\/]turboquant[\\/]/.test(x.binPath))?.id
     if (e.id === 'koboldcpp' || e.id === 'llamafile') return eng.find((x) => x.kind === e.kind)?.id
@@ -461,6 +486,18 @@ function InstallManageCatalog({
     })
   }
   const doEnable = (e: CatalogEngine) => {
+    // Source-built engine that was disabled (registry entry removed, build output still on
+    // disk): re-register the built binary rather than the prebuilt-install path (ADR-100).
+    if (e.sourceBuilt && e.sourceBinPath) {
+      engineMut.add.mutate(
+        { binPath: e.sourceBinPath, name: e.name, sourceRepo: e.homepage, sourceBranch: e.sourceBranch || undefined },
+        {
+          onSuccess: () => toast.success(`${e.name} enabled`),
+          onError: (err) => toast.error(err instanceof ApiError ? err.message : `Could not enable ${e.name}.`),
+        },
+      )
+      return
+    }
     const m = installFor(e)
     if (!m) return
     m.mutate(undefined, {
@@ -523,6 +560,13 @@ function InstallManageCatalog({
           return fit.engine.id === 'vllm' || !c || c.supportedHere !== false
         })
         .map((fit) => {
+        // llama.cpp is the built-in default: its GPU builds are managed inline here (no
+        // separate "Advanced" section), so it gets a dedicated row, not the generic one.
+        if (fit.engine.id === 'llama.cpp') {
+          // llama.cpp = the recommended backend (e.g. CUDA), as its own manage-only row.
+          // The other backends live in the "Other llama.cpp builds" section below all engines.
+          return <LlamaCppBackendRows key={fit.engine.id} filter="recommended" />
+        }
         const regId = registryEngineId(catalogById.get(fit.engine.id) ?? fit.engine as CatalogEngine)
         return (
         <CatalogFitRow
@@ -622,7 +666,9 @@ function CatalogFitRow({
 }) {
   const e = fit.engine
   const [guideOpen, setGuideOpen] = useState(false)
+  const [rebuildOpen, setRebuildOpen] = useState(false)
   const isLlama = e.id === 'llama.cpp'
+  const sourceBuilt = !!catalog?.sourceBuilt
   const incompatible = fit.compatible.length === 0
   // Compatible here, but no prebuilt for this OS (e.g. ik_llama everywhere, TurboQuant
   // on Windows/Linux) → "build from source → Add your own" instead of a dead Install.
@@ -699,6 +745,7 @@ function CatalogFitRow({
           // llama.cpp is the built-in default — its builds are managed in Zone 3.
           <span className="text-[12px] text-faint">built-in</span>
         ) : !catalog ? null : isInstalled ? (
+          <>
           <DropdownMenu>
             <DropdownMenuTrigger
               aria-label={`Actions for ${e.name}`}
@@ -708,9 +755,17 @@ function CatalogFitRow({
               <MoreHorizontal size={16} />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem onSelect={() => onUpdate(catalog)} disabled={provisioning}>
-                <Download size={14} /> {updateStatus?.hasUpdate ? 'Update now' : 'Update'}
-              </DropdownMenuItem>
+              {sourceBuilt ? (
+                // Source-built engines update by RECOMPILING at the latest commit (ADR-088/100),
+                // not by downloading a prebuilt. `rebuild` flags a newer commit on the source repo.
+                <DropdownMenuItem onSelect={() => setRebuildOpen(true)} disabled={anyPending}>
+                  <RefreshCw size={14} /> {updateStatus?.hasUpdate ? 'Rebuild (new commit)' : 'Rebuild'}
+                </DropdownMenuItem>
+              ) : (
+                <DropdownMenuItem onSelect={() => onUpdate(catalog)} disabled={provisioning}>
+                  <Download size={14} /> {updateStatus?.hasUpdate ? 'Update now' : 'Update'}
+                </DropdownMenuItem>
+              )}
               {isEnabled ? (
                 <DropdownMenuItem onSelect={() => onDisable(catalog)}>Disable</DropdownMenuItem>
               ) : (
@@ -742,6 +797,18 @@ function CatalogFitRow({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+          {/* Rebuild: recompile the source-built engine at the latest commit (ADR-088/100). */}
+          {sourceBuilt && catalog && (
+            <BuildGuideDialog
+              open={rebuildOpen}
+              onOpenChange={setRebuildOpen}
+              repoUrl={catalog.homepage}
+              branch={catalog.sourceBranch || undefined}
+              engineName={e.name}
+              mode="rebuild"
+            />
+          )}
+          </>
         ) : buildYourself ? (
           // Build-it-yourself fork — compatible here but no prebuilt for this OS
           // (ik_llama everywhere; TurboQuant on Windows/Linux). Open the guided build
@@ -790,113 +857,44 @@ function CatalogFitRow({
   )
 }
 
-// ─── Zone 3 — Advanced ────────────────────────────────────────────────────────
+// ─── "Other llama.cpp" section — the non-recommended backends, below all engines ──────
 
-function AdvancedSection({
-  list,
-  backends,
-  provisioning,
-}: {
-  list: EnginesList | undefined
-  backends: EngineBackends | undefined
-  provisioning: boolean
-}) {
+/** A section BELOW all engines listing the OTHER official llama.cpp backends (ROCm, CPU,
+ *  Vulkan, SYCL — everything except the GPU-recommended one, which lives in "Install &
+ *  manage"). Manage-only (download / update / delete); switching the active engine is done
+ *  from the top "Running now" dropdown, not here. */
+function OtherLlamaBuildsSection() {
+  // Collapsed by default — these are the non-recommended backends, secondary to the catalog.
   const [open, setOpen] = useState(false)
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="rounded-lg border border-border bg-panel-2">
-      <CollapsibleTrigger className="flex w-full items-center gap-2 px-4 py-3 text-left">
-        <Settings2 size={15} className="shrink-0 text-muted" />
-        <span className="flex-1 text-[13px] font-medium text-ink">
-          Advanced — pick a specific GPU build · manage installed backends
-        </span>
-        <ChevronDown size={15} className={`shrink-0 text-muted transition-transform ${open ? 'rotate-180' : ''}`} />
-      </CollapsibleTrigger>
-      <CollapsibleContent>
-        <div className="flex flex-col gap-3 border-t border-border px-4 py-4">
-          <div>
-            <div className="mb-2 text-[12px] text-muted">
-              The GPU build is the only place you choose llama.cpp&apos;s compiled backend (CUDA, Vulkan, Metal, CPU).
-            </div>
-            <BuildPicker list={list} backends={backends} provisioning={provisioning} />
-          </div>
-          <div className="flex flex-col gap-2">
-            <SectionLabel>Installed llama.cpp builds</SectionLabel>
-            <LlamaCppBackendRows />
-          </div>
+    <section className="flex flex-col gap-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 text-left"
+      >
+        <ChevronDown
+          size={14}
+          className="shrink-0 text-muted transition-transform"
+          style={{ transform: open ? 'rotate(0deg)' : 'rotate(-90deg)' }}
+        />
+        <SectionLabel>Other llama.cpp builds</SectionLabel>
+        <span className="text-[11px] text-faint">ROCm · CPU · Vulkan · SYCL</span>
+      </button>
+      {open && (
+        <div className="flex flex-col gap-2">
+          <p className="text-[12px] text-muted">
+            The other GPU/CPU backends for llama.cpp. Download one, then switch to it from the engine
+            dropdown up top. The recommended backend is in “Install &amp; manage”.
+          </p>
+          <LlamaCppBackendRows filter="others" />
         </div>
-      </CollapsibleContent>
-    </Collapsible>
+      )}
+    </section>
   )
 }
 
-/** GPU build dropdown for official llama.cpp (the Build-dropdown behavior lifted out
- *  of the old EngineSelector). Selecting an installed build activates it; selecting an
- *  uninstalled build downloads (then activates) it. */
-function BuildPicker({
-  list,
-  backends,
-  provisioning,
-}: {
-  list: EnginesList | undefined
-  backends: EngineBackends | undefined
-  provisioning: boolean
-}) {
-  const mut = useEngineMutations()
-  const install = useBackendInstall()
-
-  if (!list || !backends) return null
-
-  const busy = provisioning || mut.activate.isPending || install.backend.isPending
-  const activeBuild = backends.backends.find((b) => b.active)
-
-  const selectBuild = (b: EngineBackends['backends'][number]) => {
-    if (b.active) return
-    if (b.installed && b.engineId) {
-      mut.activate.mutate(b.engineId, {
-        onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not switch build.'),
-      })
-    } else {
-      install.backend.mutate(b.id, {
-        onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not download build.'),
-      })
-    }
-  }
-
-  return (
-    <label className="flex flex-col gap-1">
-      <span className="text-[11px] font-medium uppercase tracking-wide text-faint">Build (GPU backend)</span>
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          disabled={busy}
-          className="flex h-9 min-w-[220px] items-center gap-2 rounded-lg border border-border bg-bg px-3 text-[13px] text-ink transition-colors hover:border-[color:var(--accent)] disabled:opacity-60"
-        >
-          <Layers size={15} className="text-accent" />
-          <span className="flex-1 truncate text-left">{activeBuild?.label ?? 'Choose a build'}</span>
-          <ChevronDown size={14} className="shrink-0 text-muted" />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-[260px]">
-          <div className="px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-faint">
-            Build — which GPU backend
-          </div>
-          {backends.backends.map((b) => (
-            <DropdownMenuItem key={b.id} onSelect={() => selectBuild(b)} className="flex items-center gap-2">
-              <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-                {b.active && <Check size={14} className="text-accent" />}
-              </span>
-              <span className="min-w-0 flex-1 truncate text-ink">{b.label}</span>
-              {b.recommended && (
-                <Sparkles size={11} className="shrink-0 text-accent" aria-label="recommended" />
-              )}
-              <span className="shrink-0 text-[11px] text-muted">
-                {b.active ? 'active' : b.installed ? 'installed' : 'download'}
-              </span>
-            </DropdownMenuItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </label>
-  )
-}
 
 // ─── shared helpers ───────────────────────────────────────────────────────────
 
