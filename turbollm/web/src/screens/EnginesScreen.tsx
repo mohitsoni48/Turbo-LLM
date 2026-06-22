@@ -9,7 +9,6 @@ import {
   Loader2,
   MoreHorizontal,
   RefreshCw,
-  Settings2,
   Sparkles,
   Wrench,
 } from 'lucide-react'
@@ -162,11 +161,11 @@ export function EnginesScreen() {
             rec={recQ.data}
             isLoading={recQ.isLoading}
             activeCatalogId={activeEngine ? catalogIdFor(activeEngine) : null}
+            list={list}
+            backends={backendsQ.data}
+            provisioning={provisioning}
           />
         )}
-
-        {/* Zone 3 — Advanced */}
-        <AdvancedSection list={list} backends={backendsQ.data} provisioning={provisioning} />
 
         {/* Live engine log */}
         {activeEngine && <EngineLogPanel open={logPanelOpen} onOpenChange={setLogPanelOpen} />}
@@ -408,13 +407,17 @@ function InstallManageCatalog({
   rec,
   isLoading,
   activeCatalogId,
+  list,
+  backends,
+  provisioning,
 }: {
   rec: EngineRecommendationResult | undefined
   isLoading: boolean
   activeCatalogId: string | null
+  list: EnginesList | undefined
+  backends: EngineBackends | undefined
+  provisioning: boolean
 }) {
-  const { data: status } = useStatus()
-  const provisioning = !!status?.engineProvision?.active
   const catalogQ = useEngineCatalog(provisioning)
   const { data: registry } = useEngines()
   const { data: updates } = useEngineUpdates(provisioning)
@@ -565,6 +568,21 @@ function InstallManageCatalog({
           return fit.engine.id === 'vllm' || !c || c.supportedHere !== false
         })
         .map((fit) => {
+        // llama.cpp is the built-in default: its GPU builds are managed inline here (no
+        // separate "Advanced" section), so it gets a dedicated row, not the generic one.
+        if (fit.engine.id === 'llama.cpp') {
+          return (
+            <LlamaCppManageRow
+              key={fit.engine.id}
+              fit={fit}
+              catalog={catalogById.get(fit.engine.id)}
+              isActive={activeCatalogId === fit.engine.id}
+              list={list}
+              backends={backends}
+              provisioning={provisioning}
+            />
+          )
+        }
         const regId = registryEngineId(catalogById.get(fit.engine.id) ?? fit.engine as CatalogEngine)
         return (
         <CatalogFitRow
@@ -855,42 +873,79 @@ function CatalogFitRow({
   )
 }
 
-// ─── Zone 3 — Advanced ────────────────────────────────────────────────────────
+// ─── llama.cpp manage row — its GPU builds live inline (no separate "Advanced" zone) ──
 
-function AdvancedSection({
+/** llama.cpp is the built-in default, so instead of a second "Advanced" section we manage
+ *  it right in its "Install & manage" row: the GPU-build (backend) picker inline, and an
+ *  expandable list of installed builds for per-build update/delete. */
+function LlamaCppManageRow({
+  fit,
+  catalog,
+  isActive,
   list,
   backends,
   provisioning,
 }: {
+  fit: EngineFit
+  catalog: CatalogEngine | undefined
+  isActive: boolean
   list: EnginesList | undefined
   backends: EngineBackends | undefined
   provisioning: boolean
 }) {
+  const e = fit.engine
   const [open, setOpen] = useState(false)
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="rounded-lg border border-border bg-panel-2">
-      <CollapsibleTrigger className="flex w-full items-center gap-2 px-4 py-3 text-left">
-        <Settings2 size={15} className="shrink-0 text-muted" />
-        <span className="flex-1 text-[13px] font-medium text-ink">
-          Advanced — pick a specific GPU build · manage installed backends
-        </span>
-        <ChevronDown size={15} className={`shrink-0 text-muted transition-transform ${open ? 'rotate-180' : ''}`} />
-      </CollapsibleTrigger>
-      <CollapsibleContent>
-        <div className="flex flex-col gap-3 border-t border-border px-4 py-4">
-          <div>
-            <div className="mb-2 text-[12px] text-muted">
-              The GPU build is the only place you choose llama.cpp&apos;s compiled backend (CUDA, Vulkan, Metal, CPU).
-            </div>
-            <BuildPicker list={list} backends={backends} provisioning={provisioning} />
+    <div className="flex flex-col gap-3 rounded-[var(--radius)] border border-border bg-panel p-4">
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-sm font-semibold text-ink">{e.name}</span>
+            {fit.recommended ? (
+              <Badge variant="accent">
+                <Sparkles size={10} /> Recommended for you
+              </Badge>
+            ) : isActive ? (
+              <span className="flex items-center gap-1 text-[11px] font-medium" style={{ color: 'var(--ok)' }}>
+                <Check size={11} /> Active
+              </span>
+            ) : (
+              <span className="flex items-center gap-1 text-[11px] font-medium text-muted">
+                <Check size={11} /> Installed
+              </span>
+            )}
+            <Badge variant="mono">built-in</Badge>
+            {catalog && (
+              <a
+                href={catalog.homepage}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-0.5 text-[11px] text-muted hover:text-ink"
+                title={catalog.homepage}
+              >
+                <ExternalLink size={10} /> docs
+              </a>
+            )}
           </div>
-          <div className="flex flex-col gap-2">
-            <SectionLabel>Installed llama.cpp builds</SectionLabel>
+          <div className="mt-0.5 text-[12px] text-muted">{e.description}</div>
+        </div>
+        <div className="shrink-0 pt-0.5">
+          <BuildPicker list={list} backends={backends} provisioning={provisioning} />
+        </div>
+      </div>
+
+      <Collapsible open={open} onOpenChange={setOpen}>
+        <CollapsibleTrigger className="flex items-center gap-1.5 text-[12px] text-muted hover:text-ink">
+          <ChevronDown size={14} className={`shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+          Installed builds
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <div className="mt-2">
             <LlamaCppBackendRows />
           </div>
-        </div>
-      </CollapsibleContent>
-    </Collapsible>
+        </CollapsibleContent>
+      </Collapsible>
+    </div>
   )
 }
 
