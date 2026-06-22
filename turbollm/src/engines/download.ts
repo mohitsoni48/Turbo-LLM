@@ -40,7 +40,12 @@ export function availableBackends(tag = LLAMA_BUILD): BackendDef[] {
   const def = (id: BackendId, label: string, ...assets: string[]): BackendDef => ({ id, label, assets })
 
   if (plat() === 'darwin') {
-    return [def('metal', 'Metal (Apple GPU)', `llama-${tag}-bin-macos-${a}.tar.gz`)]
+    // The macOS binary handles both Metal GPU and CPU-only inference — same asset,
+    // two backend entries so the recommender always has a cpu fallback.
+    return [
+      def('metal', 'Metal (Apple GPU)', `llama-${tag}-bin-macos-${a}.tar.gz`),
+      def('cpu', 'CPU', `llama-${tag}-bin-macos-${a}.tar.gz`),
+    ]
   }
   if (plat() === 'win32') {
     if (a === 'arm64') return [def('cpu', 'CPU', `llama-${tag}-bin-win-cpu-arm64.zip`)]
