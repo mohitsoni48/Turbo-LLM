@@ -40,8 +40,10 @@ export function availableBackends(tag = LLAMA_BUILD): BackendDef[] {
   const def = (id: BackendId, label: string, ...assets: string[]): BackendDef => ({ id, label, assets })
 
   if (plat() === 'darwin') {
-    // The macOS binary handles both Metal GPU and CPU-only inference — same asset,
-    // two backend entries so the recommender always has a cpu fallback.
+    // The macOS Metal binary also runs in CPU-only mode — same asset, two backend
+    // entries so the recommender always has a cpu variant. Note: both entries point
+    // at the identical archive, so if a Metal build is broken the cpu entry won't
+    // rescue it — it will fail identically.
     return [
       def('metal', 'Metal (Apple GPU)', `llama-${tag}-bin-macos-${a}.tar.gz`),
       def('cpu', 'CPU', `llama-${tag}-bin-macos-${a}.tar.gz`),
@@ -350,9 +352,8 @@ export interface GithubRelease {
 }
 
 /** Resolve the latest GitHub release of `repo` (tag + assets) via the public API.
- *  Single source of truth for "what is upstream's latest" — used both by the
- *  provisioning path (provisionForkRelease) and the honest update check (update.ts).
- *  Throws on a non-2xx response (caller maps it to an offline/error state). */
+ *  Used by the honest update check (update.ts) to compare the installed tag against
+ *  upstream. Throws on a non-2xx response (caller maps it to an offline/error state). */
 export async function latestGithubRelease(repo: string, signal?: AbortSignal): Promise<GithubRelease> {
   const apiUrl = `https://api.github.com/repos/${repo}/releases/latest`
   const res = await fetch(apiUrl, {
@@ -414,9 +415,10 @@ export async function findPlatformAsset(
   throw new Error('no_release_asset')
 }
 
-/** Resolve the newest release of `repo` that contains an asset for this OS/arch,
- *  then provision its `llama-server` into `<enginesRoot>/<destName>/`. Returns the
- *  server binary path. Throws `no_release_asset` when no release has a matching asset. */
+/** Re-provision a fork release by re-resolving via the same per-platform resolver
+ *  used by install (`turboquantAssetUrl`). Ensures install and update match by tag
+ *  name and apply the same Windows guard. Throws `no_release_asset` when this
+ *  platform has no prebuilt. */
 export async function provisionForkRelease(
   enginesRoot: string,
   repo: string,
@@ -430,13 +432,15 @@ export async function provisionForkRelease(
     if (found) return found
   }
 
-  const asset = await findPlatformAsset(repo, fetch, process.platform, process.arch, signal)
+  const url = await turboquantAssetUrl(repo, process.platform, process.arch, signal)
+  if (!url) throw new Error('no_release_asset')
 
   mkdirSync(destDir, { recursive: true })
-  const tmp = join(enginesRoot, asset.name)
+  const fname = url.split('/').pop()?.split('?')[0] ?? `${destName}-download.tar.gz`
+  const tmp = join(enginesRoot, fname)
   try {
     onProgress?.({ phase: 'downloading', pct: 0 })
-    await downloadFile(asset.browser_download_url, tmp, onProgress, signal)
+    await downloadFile(url, tmp, onProgress, signal)
     onProgress?.({ phase: 'extracting', pct: -1 })
     await extractArchive(tmp, destDir)
     rmSync(tmp, { force: true })
