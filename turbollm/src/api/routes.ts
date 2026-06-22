@@ -37,7 +37,7 @@ import { ensureKoboldcpp, koboldcppBinPath, koboldcppDir, koboldcppProfileToArgs
 import { ensureLlamafile, llamafileBinPath, llamafileDir } from '../engines/llamafile'
 import { catalogForPlatform, catalogEngine } from '../engines/catalog'
 import { checkBuildPrereqs } from '../engines/build-prereqs'
-import { runBuild } from '../engines/build-runner'
+import { runBuild, buildDirName } from '../engines/build-runner'
 import { detectHardware } from '../engines/hardware'
 import { recommendEngines } from '../engines/recommend'
 import { engineAcceptsFormat } from '../engines/compat'
@@ -178,7 +178,7 @@ export function registerApi(app: Hono, d: Deps): void {
     if (installedBackendServer(root, def.id)) {
       return c.json({ accepted: false, alreadyInstalled: true, build: LLAMA_BUILD })
     }
-    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    { const busy = engineWorkBusy(d); if (busy) return err(c, 409, 'engine_already_running', busy) }
     const ac = new AbortController()
     provisionAbort = ac
     void (async () => {
@@ -225,7 +225,7 @@ export function registerApi(app: Hono, d: Deps): void {
     const root = join(d.store.dir(), 'engines')
     const oldBin = installedBackendServer(root, def.id)
     if (!oldBin) return err(c, 409, 'not_installed', 'Backend is not installed — download it first.')
-    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    { const busy = engineWorkBusy(d); if (busy) return err(c, 409, 'engine_already_running', busy) }
     // Honest upstream check FIRST: resolve the real latest tag. Offline → clear 503.
     let latestTag: string
     try {
@@ -316,7 +316,7 @@ export function registerApi(app: Hono, d: Deps): void {
     if (process.platform !== 'darwin') {
       return err(c, 409, 'unsupported_platform', 'MLX is only available on macOS (Apple Silicon).')
     }
-    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    { const busy = engineWorkBusy(d); if (busy) return err(c, 409, 'engine_already_running', busy) }
     const root = join(d.store.dir(), 'engines')
     const upgrade = c.req.query('update') === '1'
     void (async () => {
@@ -404,37 +404,54 @@ export function registerApi(app: Hono, d: Deps): void {
     const repoUrl = (b.repoUrl ?? '').trim()
     if (!/^https?:\/\//i.test(repoUrl))
       return err(c, 400, 'invalid_config_value', 'A http(s) repo URL is required.')
-    if (d.provision.get().active)
-      return err(c, 409, 'engine_already_running', 'An engine download is in progress — wait for it to finish.')
-    if (d.build.isActive())
-      return err(c, 409, 'engine_already_running', 'A build is already in progress.')
     const branch = (b.branch ?? '').trim() || undefined
+    // A branch beginning with '-' would be parsed by git as an option (it sits before the
+    // positional URL). Reject it — belt-and-suspenders, even though builds are local-only.
+    if (branch && branch.startsWith('-'))
+      return err(c, 400, 'invalid_config_value', 'Branch name cannot start with "-".')
+    const busy = engineWorkBusy(d)
+    if (busy) return err(c, 409, 'engine_already_running', busy)
     const name = (b.name ?? '').trim() || undefined
     const enginesRoot = join(d.store.dir(), 'engines')
     const toolchainDirs = d.store.snapshot().build.toolchainDirs
+    const buildRoot = join(enginesRoot, 'build', buildDirName(repoUrl, branch))
+    // Reserve the build slot SYNCHRONOUSLY (before returning 202) so two near-simultaneous
+    // POSTs can't both pass the busy-check and race on the same buildRoot / clobber buildAbort.
     const ac = new AbortController()
     buildAbort = ac
+    d.build.start(name ?? repoUrl)
     void (async () => {
       try {
-        d.build.start(name ?? repoUrl)
         const out = await runBuild(
           { repoUrl, branch, enginesRoot, toolchainDirs },
           { phase: (p) => d.build.phase(p), log: (line) => d.build.log(line) },
           ac.signal,
         )
-        // Register (probe) the built binary, carrying its source provenance so the
-        // "newer source → rebuild" check (ADR-088) works. A rebuild of the same path
-        // re-probes the existing entry instead of adding a duplicate.
-        let eng = d.registry.list().engines.find((e) => e.binPath === out.binPath)
-        if (!eng) {
-          eng = (await d.registry.add(name ?? '', out.binPath, { sourceRepo: repoUrl, sourceBranch: branch })).engine
-        } else {
-          d.registry.setSource(eng.id, { sourceRepo: repoUrl, sourceBranch: branch })
+        // Register (probe) the built binary, carrying its source provenance for the ADR-088
+        // "newer source → rebuild" check. For a REBUILD, match the existing engine by
+        // binPath OR by source repo+branch (a fresh compile can land at a slightly different
+        // binPath — e.g. an MSVC subdir — which would otherwise make add() throw NameTaken).
+        // Replace it in place (stop it first if it's the running active one) so the rebuild
+        // re-probes fresh capabilities and never duplicates or 'name taken'-fails post-compile.
+        const engines = d.registry.list().engines
+        const prior =
+          engines.find((e) => e.binPath === out.binPath) ??
+          engines.find((e) => e.sourceRepo === repoUrl && (e.sourceBranch ?? '') === (branch ?? ''))
+        if (prior) {
+          if (d.registry.active()?.id === prior.id) await d.manager.stopAndWait()
+          try { d.registry.remove(prior.id) } catch { /* already gone */ }
         }
+        const eng = (await d.registry.add(prior?.name ?? name ?? '', out.binPath, {
+          sourceRepo: repoUrl,
+          sourceBranch: branch,
+        })).engine
         d.registry.activate(eng.id)
         d.build.log(`Registered "${eng.name}" — built from ${out.commit.slice(0, 8)}.`)
         d.build.done()
       } catch (e) {
+        // GC the (partial) build tree on failure/cancel so repeated attempts don't fill the
+        // disk with multi-GB CUDA objects. A successful build keeps it (the binary lives there).
+        try { rmSync(buildRoot, { recursive: true, force: true }) } catch { /* best effort */ }
         if ((e as Error)?.name === 'AbortError') {
           d.build.log('Build cancelled.')
           d.build.fail('Build cancelled.')
@@ -463,7 +480,7 @@ export function registerApi(app: Hono, d: Deps): void {
   // support level so the UI can warn before the user commits to a multi-GB install.
   // ?update=1 upgrades vllm to the latest release (passes -U to uv pip install).
   app.post('/api/v1/engines/vllm', (c) => {
-    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    { const busy = engineWorkBusy(d); if (busy) return err(c, 409, 'engine_already_running', busy) }
     const root = join(d.store.dir(), 'engines')
     const upgrade = c.req.query('update') === '1'
     void (async () => {
@@ -492,7 +509,7 @@ export function registerApi(app: Hono, d: Deps): void {
     if (!entry.platforms.includes(process.platform)) {
       return err(c, 409, 'unsupported_platform', 'TurboQuant has no prebuilt binary for this operating system yet.')
     }
-    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    { const busy = engineWorkBusy(d); if (busy) return err(c, 409, 'engine_already_running', busy) }
     const root = join(d.store.dir(), 'engines')
     const upgrade = c.req.query('update') === '1'
     void (async () => {
@@ -532,7 +549,7 @@ export function registerApi(app: Hono, d: Deps): void {
     if (!entry.platforms.includes(process.platform)) {
       return err(c, 409, 'unsupported_platform', 'KoboldCpp has no prebuilt binary for this operating system yet.')
     }
-    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    { const busy = engineWorkBusy(d); if (busy) return err(c, 409, 'engine_already_running', busy) }
     const root = join(d.store.dir(), 'engines')
     const upgrade = c.req.query('update') === '1'
     const hasNvidia = primaryVendor(getSysInfo()) === 'nvidia'
@@ -568,7 +585,7 @@ export function registerApi(app: Hono, d: Deps): void {
     if (!entry.platforms.includes(process.platform)) {
       return err(c, 409, 'unsupported_platform', 'llamafile is not available for this operating system yet.')
     }
-    if (d.provision.get().active) return err(c, 409, 'engine_already_running', 'Another engine download is already in progress.')
+    { const busy = engineWorkBusy(d); if (busy) return err(c, 409, 'engine_already_running', busy) }
     const root = join(d.store.dir(), 'engines')
     const upgrade = c.req.query('update') === '1'
     void (async () => {
@@ -1815,6 +1832,15 @@ function localCountFor(d: Deps, repo: string): number {
     if (hay.includes(needle)) n++
   }
   return n
+}
+
+/** A download (engine provision) OR a 1-click build writes under `<dataDir>/engines` and
+ *  ends by mutating the registry + flipping the active engine. They must not run at once
+ *  (ADR-100). Returns a user-facing message when either is in flight, else null. */
+function engineWorkBusy(d: Deps): string | null {
+  if (d.provision.get().active) return 'An engine download is in progress — wait for it to finish.'
+  if (d.build.isActive()) return 'A build is in progress — wait for it to finish.'
+  return null
 }
 
 function hfErr(c: Context, e: unknown) {

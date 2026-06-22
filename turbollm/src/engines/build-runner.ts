@@ -99,7 +99,10 @@ function runStep(
 /** Run the full clone → configure → compile → locate flow. Throws on any failure (the
  *  caller surfaces it via BuildState.fail); on success returns the built binary + commit. */
 export async function runBuild(req: BuildRequest, hooks: BuildHooks, signal: AbortSignal): Promise<BuildOutput> {
-  const env = buildEnv(req.toolchainDirs)
+  // Force git to FAIL fast instead of blocking on an interactive credential prompt (a
+  // private/typo'd URL would otherwise hang the build with stdin ignored). GCM_INTERACTIVE
+  // disables the Git Credential Manager GUI on Windows.
+  const env = { ...buildEnv(req.toolchainDirs), GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' }
 
   // Fail fast with actionable guidance if the toolchain isn't usable, rather than a deep
   // cryptic cmake error. CUDA is required because we build with -DGGML_CUDA=ON.

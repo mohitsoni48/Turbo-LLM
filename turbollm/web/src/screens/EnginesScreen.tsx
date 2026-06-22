@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Check,
   ChevronDown,
@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import {
   useBackendInstall,
+  useBuild,
   useEngineBackends,
   useEngineCatalog,
   useEngineMutations,
@@ -189,7 +190,20 @@ function StatusHero({
   const mut = useEngineMutations()
   const { data: sys } = useSysInfo()
   const { data: updates } = useEngineUpdates()
+  const { data: status } = useStatus()
+  const build = useBuild()
   const [rebuildOpen, setRebuildOpen] = useState(false)
+
+  // Pull the newly-built engine into the lists whenever ANY in-app build settles — even if
+  // the build dialog that started it was closed mid-build (ADR-100). Watches the active→
+  // settled transition on the status poll's `engineBuild` so we refresh exactly once.
+  const wasBuilding = useRef(false)
+  const buildActive = !!status?.engineBuild?.active
+  useEffect(() => {
+    if (wasBuilding.current && !buildActive) build.refresh()
+    wasBuilding.current = buildActive
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [buildActive])
 
   // Rebuild chip: show when the active engine is source-built and has a newer commit.
   const upd = activeEngine ? updates?.updates[activeEngine.id] : undefined
