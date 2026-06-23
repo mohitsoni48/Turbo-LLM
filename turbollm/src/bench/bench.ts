@@ -1,9 +1,12 @@
-// Auto-benchmark + auto-tune runner (Differentiator #2, spec 09 §1). Owns the
-// engine exclusively for the duration of a run: binary-searches candidate LoadProfiles,
-// measures real tok/s on the user's hardware, saves the best as the model's
-// profile (tunedBy:'bench'), persists a benchResults row, and — when telemetry is
-// on — queues an anonymized bench_result event. Single active run; additive;
-// fail-safe (a bad candidate is recorded and the sweep continues).
+// Auto-benchmark + auto-tune runner (Differentiator #2, spec 09 §1). Owns the engine exclusively
+// for the duration of a run. Two-phase per quality-preserving KV-cache type (f16 / q8_0 / turbo4):
+// (1) pin the offload param (ngl for dense, nCpuMoe for MoE) with CHEAP VRAM probes — load, read
+// absolute VRAM, stop, no generation — keeping the most on the GPU while leaving a ≤1 GB headroom
+// (so a later VRAM grab can't tip it into sysmem-spill); (2) run ONE real prefill + tok/s bench at
+// that config. Picks the overall winner by best prefill AND generation t/s, saves it as the model's
+// profile (tunedBy:'bench'), persists a benchResults row, and — when telemetry is on — queues an
+// anonymized bench_result event. Single active run; additive; fail-safe (a bad candidate is
+// recorded and the sweep continues).
 import { execFile } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -32,8 +35,15 @@ export interface BenchCandidate {
   params: { ctx: number; ngl: number; nCpuMoe: number; parallel: number; kvTypeK: string; flashAttn: string }
   outcome: 'ok' | 'timeout' | 'crash' | 'oom'
   tps: number | null
+  /** Prefill (prompt-processing) speed, tok/s — from the engine's `prompt_per_second`. Part of
+   *  the speed objective alongside `tps` (best prefill AND generation, not just generation). */
+  prefillTps: number | null
   ttftMs: number | null
+  /** VRAM use attributable to this candidate (after − before), MB — kept for display/telemetry. */
   vramMb: number | null
+  /** ABSOLUTE GPU VRAM in use while this candidate ran, MB. Drives the ≤1 GB-headroom gate, which
+   *  needs the true total (not the delta) to know how much free VRAM is actually left. */
+  vramAbsMb: number | null
 }
 
 /** Live state surfaced on GET /status (spec 02 §7 / 09 §1). `running:false` resets
@@ -51,6 +61,8 @@ export interface BenchState {
   result?: {
     params: BenchCandidate['params']
     tps: number
+    /** Prefill (prompt-processing) t/s for the winning config, when the engine reported it. */
+    prefillTps?: number | null
     ttftMs: number
     vramMb: number | null
     /** The COMPLETE sampling the winning profile will be saved with (card values already
@@ -83,6 +95,32 @@ const OOM_RE = /out of memory|cudaMalloc|failed to allocate|unable to allocate|d
 
 // English text is roughly 4 characters per token — used to size the bench prompt.
 const CHARS_PER_TOKEN = 4
+
+// Auto-tune may also sweep the KV-cache quant — but only ever SELECTS a quality-preserving type:
+// full-precision f16, near-lossless q8_0, and (on TurboQuant forks) turbo4 (≈ q8_0 quality). This
+// lets it exploit a smaller KV cache for speed — fitting more of the model on the GPU — WITHOUT
+// silently degrading output quality. Lower-bit types (q4_0/q5_*/turbo2/turbo3) are never auto-
+// picked; the user's own KV choice is always kept as a candidate so the result can't do worse
+// than what they'd load today.
+const QUALITY_KV = ['f16', 'q8_0', 'turbo4']
+// Leave at least this much VRAM free at the chosen config. Pushing offload to the very spill edge
+// maximizes t/s in isolation, but then a later desktop / ComfyUI VRAM grab tips the model into
+// "shared GPU memory" (sysmem over PCIe), which silently tanks generation. The search treats a
+// candidate that uses more than (total − headroom) as "too much on GPU" and offloads further.
+const VRAM_HEADROOM_MB = 1024
+// Output-t/s tie band for the speed objective: when two configs are within this relative margin
+// on generation speed, the one with faster prefill wins (best prefill AND t/s, not just t/s).
+const OUTPUT_TIE = 0.05
+// If swapping the KV-cache quant from largest (f16) to smallest changes VRAM by less than this, the
+// cache is small enough that the quant barely affects how much of the model fits on the GPU — so
+// the highest-precision, fastest-kernel type (f16) is the right pick and no quant sweep is needed.
+const KV_SPREAD_MIN = 1024
+// Bytes per cached element by KV-cache type — used only to order candidates by size (largest =
+// most VRAM, smallest = least) so calibration probes the two extremes. Mirrors llama.cpp's types.
+const KV_BYTES: Record<string, number> = {
+  f32: 4, f16: 2, bf16: 2, q8_0: 1, q8_1: 1, q5_0: 0.625, q5_1: 0.625,
+  q4_0: 0.5, q4_1: 0.5, iq4_nl: 0.5, turbo4: 0.5, turbo3: 0.375, turbo2: 0.25,
+}
 
 export class BenchError extends Error {
   constructor(
@@ -202,19 +240,54 @@ export class BenchRunner {
     const caps = active?.capabilities ?? { flags: [], kvTypes: [] }
     const saved = this.store.snapshot().modelProfiles[modelKey] as Partial<LoadProfile> | undefined
     const defaults = this.store.snapshot().modelDefaults
-    // Honor the user's CURRENT config (the dialog draft, passed as `base`) as the fixed
-    // basis for every candidate — ctx, KV quant, flash-attn, etc. Auto-tune only sweeps
-    // offload (ngl / nCpuMoe) on top, so the result reflects the settings they'll load
-    // with. `base` overrides the saved profile + global defaults.
-    const baseProfile = resolveProfile(entry, sys, saved, base, defaults)
+    // Honor the user's CURRENT config (the dialog draft, passed as `base`) as the basis for every
+    // candidate — ctx, flash-attn, sampling, etc. `base` overrides the saved profile + global
+    // defaults. Auto-tune then CHOOSES the KV-cache type (by reasoning about VRAM, below) and tunes
+    // the offload (ngl / nCpuMoe) under it, so the result reflects settings they'll load with.
+    // Tune with speculative decoding OFF. Spec (NextN / MTP / draft) runs the model ~twice per
+    // step, so on a partially-offloaded model the extra CPU work craters t/s (measured ~2 t/s vs
+    // ~24 with it off) and a load-time VRAM probe can't see that runtime cost. The offload + KV
+    // choice here is for the base model; spec stays a separate load-time toggle, best left to the
+    // user for when a model fits fully on the GPU.
+    // Also tune TEXT generation only: don't keep a vision projector (mmproj) resident on the GPU.
+    // For a vision model it can be 1–2 GB of VRAM that's idle during text gen but steals room from
+    // model layers — forcing more offload to the CPU and tanking t/s. Vision stays a separate load
+    // toggle; the offload/KV choice here is for the model's weights + KV.
+    const resolved = resolveProfile(entry, sys, saved, base, defaults)
+    const baseProfile: LoadProfile = { ...resolved, speculative: 'off', mtpHeadPath: '', draftModelPath: '', useMmproj: false }
 
     const results: BenchCandidate[] = []
     let best: { cand: BenchCandidate; profile: LoadProfile } | null = null
 
-    if (!entry.moe) {
-      best = await this.denseSearch(entry, sys, baseProfile, caps, results)
-    } else {
-      best = await this.moeSearch(entry, sys, baseProfile, caps, results)
+    // --- Choose which KV-cache type(s) to tune, by reasoning about VRAM (not by sweeping all) ---
+    // The quant only matters in proportion to how big the KV cache actually is. Measure that cheaply:
+    // the VRAM SPREAD between the largest and smallest candidate at one shared offload is exactly
+    // their KV-size difference (weights/overhead cancel) — true for any architecture, hybrid or not.
+    //   • tiny KV (spread ≤ KV_SPREAD_MIN) → the quant barely changes the fit, so the highest-
+    //     precision/fastest-kernel type (f16) wins outright → tune just that.
+    //   • big KV → a smaller quant frees real VRAM for more of the model on the GPU, but its kernel
+    //     can be slower (turbo4), so tune BOTH the smallest (max-fit) and q8_0 (stock fallback) and
+    //     let the measured prefill + t/s decide.
+    const kvCandidates = pickKvQuants(baseProfile.kvTypeK, caps.kvTypes)
+    // Default to the user's own KV type (covers CPU-only — no VRAM pressure, the quant barely
+    // matters — and unprobed/single-candidate engines). Only with a GPU and a real choice do we
+    // size the cache and decide.
+    let kvToTune = kvCandidates.slice(0, 1)
+    if (sys.gpus.length > 0 && kvCandidates.length > 1) {
+      const spread = await this.calibrateKvSpread(entry, sys, baseProfile, caps, kvCandidates, results)
+      kvToTune = decideKvToBench(spread, kvCandidates)
+      const swing = spread < 0 ? 'unknown' : spread >= Number.MAX_SAFE_INTEGER ? 'huge' : `${Math.round(spread)} MB`
+      this.state = { ...this.state, step: `KV cache swing ${swing} → tuning ${kvToTune.join(' + ')}`, candidates: results }
+    }
+
+    for (let i = 0; i < kvToTune.length && !this.cancelled && Date.now() <= this.deadline; i++) {
+      const kv = kvToTune[i]
+      const kvBase: LoadProfile = { ...baseProfile, kvTypeK: kv, kvTypeV: kv }
+      const found = entry.moe
+        ? await this.moeSearch(entry, sys, kvBase, caps, results)
+        : await this.denseSearch(entry, sys, kvBase, caps, results)
+      if (found && (!best || betterBySpeed(found.cand, best.cand))) best = found
+      if (best) this.state = { ...this.state, bestTps: best.cand.tps ?? undefined }
     }
 
     // Engine is always left stopped at the end of a run (AC#3 for cancel; also tidy
@@ -256,6 +329,7 @@ export class BenchRunner {
         result: {
           params: best.cand.params,
           tps: best.cand.tps ?? 0,
+          prefillTps: best.cand.prefillTps,
           ttftMs: best.cand.ttftMs ?? 0,
           vramMb: best.cand.vramMb,
           // The full sampling that Save will persist (winning profile, card values merged in) so
@@ -284,10 +358,11 @@ export class BenchRunner {
     }
   }
 
-  /** Binary search over ngl to find the highest number of GPU layers that does not OOM.
-   *  For dense models, more GPU layers = faster (monotonically), so the optimal is simply
-   *  the maximum ngl that fits in VRAM. O(log blockCount) trials — far more precise than
-   *  the old fixed-set sweep. CPU-only machines skip straight to ngl=0. */
+  /** Dense models: pin `ngl` by VRAM probing (Phase 1), then run the full bench once (Phase 2).
+   *  More GPU layers = faster, monotonically, up to the no-spill edge — so the best ngl is the
+   *  HIGHEST whose absolute VRAM still leaves the ≤1 GB headroom. Whether a config fits/spills is a
+   *  LOAD-time property, so we find that ngl with cheap load-and-read-VRAM probes (no generation),
+   *  and only measure t/s at the winner. CPU-only machines skip straight to ngl=0. */
   private async denseSearch(
     entry: ModelEntry,
     sys: SysInfo,
@@ -295,53 +370,36 @@ export class BenchRunner {
     caps: Engine['capabilities'],
     results: BenchCandidate[],
   ): Promise<{ cand: BenchCandidate; profile: LoadProfile } | null> {
-    const hasGpu = sys.gpus.length > 0
+    let bestNgl: number | null = 0 // CPU-only box → everything on CPU, no probing needed.
 
-    if (!hasGpu) {
-      const label = 'ngl=0 (CPU-only)'
-      const cand = await this.measure(entry, sys, { ...base, ngl: 0 }, caps, label, label)
-      results.push(cand)
-      this.state = { ...this.state, candidates: results }
-      if (cand.outcome === 'ok') return { cand, profile: { ...base, ngl: 0 } }
-      return null
-    }
-
-    // Binary search: find highest ngl ∈ [0, blockCount] with outcome 'ok'.
-    // OOM or crash → search lower; ok → record and search higher.
-    const hi0 = entry.blockCount > 0 ? entry.blockCount : 99
-    let lo = 0, hi = hi0
-    let best: { cand: BenchCandidate; profile: LoadProfile } | null = null
-
-    while (lo <= hi && !this.cancelled && Date.now() <= this.deadline) {
-      const mid = Math.floor((lo + hi) / 2)
-      const label = `ngl=${mid}`
-      const stepPrefix = `Trial ${results.length + 1}: ${label} (range ${lo}–${hi})`
-      this.state = { ...this.state, step: `${stepPrefix}…`, candidates: results }
-      const profile: LoadProfile = { ...base, ngl: mid }
-      const cand = await this.measure(entry, sys, profile, caps, label, stepPrefix)
-      results.push(cand)
-      this.state = { ...this.state, candidates: results }
-      await this.settleGpu()
-
-      if (cand.outcome === 'ok' && cand.tps !== null) {
-        // More GPU layers is faster UP TO the no-spill edge; record and try higher. confirmPeak()
-        // afterward walks back down if the highest "ok" was actually spilling over PCIe.
-        if (!best || cand.tps > (best.cand.tps ?? 0)) best = { cand, profile }
-        this.state = { ...this.state, bestTps: best.cand.tps ?? undefined }
-        lo = mid + 1  // try higher
-      } else if (cand.outcome === 'oom') {
-        hi = mid - 1  // too many layers, try fewer
-      } else {
-        // crash / timeout — treat conservatively
-        hi = mid - 1
+    if (sys.gpus.length > 0) {
+      // Binary search ngl ∈ [0, blockCount] for the HIGHEST that loads with ≤1 GB-headroom VRAM.
+      const hi0 = entry.blockCount > 0 ? entry.blockCount : 99
+      let lo = 0, hi = hi0
+      bestNgl = null
+      while (lo <= hi && !this.cancelled && Date.now() <= this.deadline) {
+        const mid = Math.floor((lo + hi) / 2)
+        this.state = { ...this.state, step: `KV ${base.kvTypeK}: probing ngl=${mid} (range ${lo}–${hi})…`, candidates: results }
+        const probe = await this.probeVram(entry, sys, { ...base, ngl: mid }, caps)
+        this.pushProbe(results, base, 'ngl', mid, probe)
+        await this.settleGpu()
+        if (probe.outcome === 'ok' && !overHeadroom(probe.vramAbsMb, sys)) {
+          bestNgl = mid // fits with headroom → record, try MORE GPU layers
+          lo = mid + 1
+        } else {
+          hi = mid - 1 // oom / over-headroom / crash → fewer GPU layers
+        }
       }
     }
-    return best ? await this.confirmPeak(entry, sys, base, caps, results, best, 'ngl', 0) : null
+
+    if (bestNgl === null) return null
+    return this.benchAt(entry, sys, { ...base, ngl: bestNgl }, caps, results, `ngl=${bestNgl}`)
   }
 
-  /** Binary search over nCpuMoe to find the minimum number of MoE experts kept on CPU
-   *  that still fits in VRAM. Fewer CPU experts = more on GPU = faster; we want the
-   *  minimum that doesn't OOM. O(log blockCount) trials. */
+  /** MoE models: pin `nCpuMoe` by VRAM probing (Phase 1), then run the full bench once (Phase 2).
+   *  Fewer CPU experts = more on GPU = faster, so the best is the LOWEST nCpuMoe whose absolute VRAM
+   *  still leaves the ≤1 GB headroom. Found with cheap load-and-read-VRAM probes (no generation);
+   *  t/s is measured only at the winner. */
   private async moeSearch(
     entry: ModelEntry,
     sys: SysInfo,
@@ -352,68 +410,153 @@ export class BenchRunner {
     const derived = deriveDefault(entry, sys)
     const maxN = entry.blockCount > 0 ? entry.blockCount : (derived.nCpuMoe || 0)
     let lo = 0, hi = maxN
-    let best: { cand: BenchCandidate; profile: LoadProfile } | null = null
+    let bestN: number | null = null
 
     while (lo <= hi && !this.cancelled && Date.now() <= this.deadline) {
       const mid = Math.floor((lo + hi) / 2)
-      const label = `nCpuMoe=${mid}`
-      const stepPrefix = `Trial ${results.length + 1}: ${label} (range ${lo}–${hi})`
-      this.state = { ...this.state, step: `${stepPrefix}…`, candidates: results }
-      const profile: LoadProfile = { ...base, nCpuMoe: mid }
-      const cand = await this.measure(entry, sys, profile, caps, label, stepPrefix)
-      results.push(cand)
-      this.state = { ...this.state, candidates: results }
+      this.state = { ...this.state, step: `KV ${base.kvTypeK}: probing nCpuMoe=${mid} (range ${lo}–${hi})…`, candidates: results }
+      const probe = await this.probeVram(entry, sys, { ...base, nCpuMoe: mid }, caps)
+      this.pushProbe(results, base, 'nCpuMoe', mid, probe)
       await this.settleGpu()
-
-      if (cand.outcome === 'oom' || overVram(cand.vramMb, sys)) {
-        lo = mid + 1  // need more CPU experts to free VRAM
-      } else if (cand.outcome === 'ok' && cand.tps !== null) {
-        // Fewer CPU experts = more GPU = faster; record and try even fewer.
-        if (!best || cand.tps > (best.cand.tps ?? 0)) best = { cand, profile }
-        this.state = { ...this.state, bestTps: best.cand.tps ?? undefined }
+      if (probe.outcome === 'oom' || overHeadroom(probe.vramAbsMb, sys)) {
+        lo = mid + 1 // too much on GPU → more CPU experts to free VRAM / restore the headroom
+      } else if (probe.outcome === 'ok') {
+        bestN = mid // fits with headroom → record, try FEWER CPU experts (more on GPU)
         hi = mid - 1
       } else {
-        lo = mid + 1  // crash / timeout → treat as memory pressure
+        lo = mid + 1 // crash / timeout → treat as memory pressure
       }
     }
-    return best ? await this.confirmPeak(entry, sys, base, caps, results, best, 'nCpuMoe', maxN) : null
+
+    if (bestN === null) return null
+    return this.benchAt(entry, sys, { ...base, nCpuMoe: bestN }, caps, results, `nCpuMoe=${bestN}`)
   }
 
-  /** Spill correction (unimodal throughput). The binary search picks the config that "fits", but a
-   *  config that overflows VRAM into shared memory passes the fit/prefill check yet is PCIe-bottlenecked
-   *  — so t/s actually PEAKS at the no-spill edge and drops once spilling. After the search, step ONE
-   *  toward LESS GPU (moe: +1 expert on CPU; dense: -1 GPU layer) and keep it only while it's faster:
-   *  if the pick was spilling, this follows the curve up to the real peak; if not, it confirms the pick
-   *  in one extra trial. */
-  private async confirmPeak(
+  /** Measure how much the KV-cache QUANT swings VRAM at this context — so we tune only the quant(s)
+   *  that matter instead of sweeping all. Two cheap probes (largest vs smallest candidate) at ONE
+   *  shared offload: their VRAM difference is exactly the KV-size difference (weights + overhead are
+   *  identical at the same offload), valid for any architecture. Returns that swing in MB scaled to
+   *  the full model, `Number.MAX_SAFE_INTEGER` if even the largest quant won't load (cache enormous
+   *  → definitely the big-KV regime), or -1 if it couldn't be sized at all. */
+  private async calibrateKvSpread(
     entry: ModelEntry,
     sys: SysInfo,
     base: LoadProfile,
     caps: Engine['capabilities'],
+    candidates: string[],
     results: BenchCandidate[],
-    best: { cand: BenchCandidate; profile: LoadProfile },
-    knob: 'ngl' | 'nCpuMoe',
-    maxNCpuMoe: number,
-  ): Promise<{ cand: BenchCandidate; profile: LoadProfile }> {
-    for (let guard = 0; guard < 8 && !this.cancelled && Date.now() <= this.deadline; guard++) {
-      const cur = knob === 'nCpuMoe' ? best.cand.params.nCpuMoe : best.cand.params.ngl
-      const next = knob === 'nCpuMoe' ? cur + 1 : cur - 1 // one step toward LESS GPU
-      if (knob === 'nCpuMoe' ? next > maxNCpuMoe : next < 0) break
-      const label = `${knob}=${next}`
-      this.state = { ...this.state, step: `Confirming ${label} (spill check)…`, candidates: results }
-      const profile: LoadProfile = knob === 'nCpuMoe' ? { ...base, nCpuMoe: next } : { ...base, ngl: next }
-      const cand = await this.measure(entry, sys, profile, caps, label, `Confirming ${label}`)
-      results.push(cand)
-      this.state = { ...this.state, candidates: results }
-      await this.settleGpu()
-      if (cand.outcome === 'ok' && cand.tps !== null && cand.tps > (best.cand.tps ?? 0)) {
-        best = { cand, profile } // the previous pick was spilling — this one's faster
-        this.state = { ...this.state, bestTps: best.cand.tps ?? undefined }
-      } else {
-        break // no improvement → the previous pick is the peak
-      }
+  ): Promise<number> {
+    const big = kvLargest(candidates)
+    const small = kvSmallest(candidates)
+    if (big === small) return 0
+
+    // A shared offload where the KV is resident on the GPU (so the swing is measurable) yet the
+    // model loads even with the LARGEST cache: MoE → all experts on CPU (attention + KV stay on
+    // GPU); dense → a small fraction of layers on GPU.
+    const blocks = entry.blockCount > 0 ? entry.blockCount : 32
+    const moeMax = entry.blockCount > 0 ? entry.blockCount : deriveDefault(entry, sys).nCpuMoe || 0
+    const refNgl = Math.max(1, Math.floor(blocks / 4))
+    const refOffload: Partial<LoadProfile> = entry.moe ? { nCpuMoe: moeMax, ngl: 99 } : { ngl: refNgl }
+    const knob: 'ngl' | 'nCpuMoe' = entry.moe ? 'nCpuMoe' : 'ngl'
+    const knobVal = entry.moe ? moeMax : refNgl
+
+    this.state = { ...this.state, step: `Sizing the KV cache (${big} vs ${small})…`, candidates: results }
+    const pBig = await this.probeVram(entry, sys, { ...base, kvTypeK: big, kvTypeV: big, ...refOffload }, caps)
+    this.pushProbe(results, { ...base, kvTypeK: big, ...refOffload }, knob, knobVal, pBig)
+    await this.settleGpu()
+    const pSmall = await this.probeVram(entry, sys, { ...base, kvTypeK: small, kvTypeV: small, ...refOffload }, caps)
+    this.pushProbe(results, { ...base, kvTypeK: small, ...refOffload }, knob, knobVal, pSmall)
+    await this.settleGpu()
+
+    if (pBig.outcome !== 'ok' || pBig.vramAbsMb === null) return Number.MAX_SAFE_INTEGER // huge cache
+    if (pSmall.outcome !== 'ok' || pSmall.vramAbsMb === null) return -1 // couldn't size it
+    let spread = pBig.vramAbsMb - pSmall.vramAbsMb
+    // Dense: only the GPU layers' KV is resident at refNgl, so scale the partial swing up to the
+    // whole model. (MoE keeps every attention layer's KV on GPU already → no scaling.)
+    if (!entry.moe) spread = spread * (blocks / refNgl)
+    return Math.max(0, spread)
+  }
+
+  /** A cheap VRAM probe (Phase 1 of a search): load the candidate, wait for readiness — by which
+   *  point the weights, the full KV cache, AND the compute buffers are all allocated — read the
+   *  absolute GPU VRAM in use, then stop. NO prefill, NO generation. The offload param is decided
+   *  from this alone: whether a config fits-with-headroom or spills is a load-time property, so
+   *  measuring t/s at every search step would be wasted — we bench ONCE, at the chosen config. */
+  private async probeVram(
+    entry: ModelEntry,
+    sys: SysInfo,
+    profile: LoadProfile,
+    caps: Engine['capabilities'],
+  ): Promise<{ outcome: 'ok' | 'timeout' | 'crash' | 'oom'; vramAbsMb: number | null }> {
+    const active = this.registry.active()
+    if (!active) return { outcome: 'crash', vramAbsMb: null }
+    const testDeadline = Math.min(Date.now() + READY_TIMEOUT_MS + 5_000, this.deadline)
+    const opts: StartOpts = {
+      engine: active,
+      model: { key: entry.key, name: entry.name, quant: entry.quant, ctx: profile.ctx, vision: entry.vision },
+      modelPath: entry.path,
+      extraArgs: profileToArgs(profile, entry, caps, sys.cores),
     }
-    return best
+    try {
+      await this.manager.start(opts)
+    } catch {
+      return { outcome: 'crash', vramAbsMb: null }
+    }
+    const outcome = await this.awaitReady(testDeadline)
+    let vramAbsMb: number | null = null
+    if (outcome === 'ok') {
+      await sleep(800) // let the allocator settle so the VRAM reading is final
+      vramAbsMb = await readNvidiaVramMb()
+    }
+    await this.manager.stopAndWait().catch(() => {})
+    return { outcome, vramAbsMb }
+  }
+
+  /** Record a VRAM-probe trial in the candidate list (tps/prefill are null — nothing was generated;
+   *  only the load outcome and absolute VRAM are known). */
+  private pushProbe(
+    results: BenchCandidate[],
+    base: LoadProfile,
+    knob: 'ngl' | 'nCpuMoe',
+    value: number,
+    probe: { outcome: BenchCandidate['outcome']; vramAbsMb: number | null },
+  ): void {
+    results.push({
+      label: `probe ${knob}=${value}`,
+      params: {
+        ctx: base.ctx,
+        ngl: knob === 'ngl' ? value : base.ngl,
+        nCpuMoe: knob === 'nCpuMoe' ? value : base.nCpuMoe,
+        parallel: base.parallel,
+        kvTypeK: base.kvTypeK,
+        flashAttn: base.flashAttn,
+      },
+      outcome: probe.outcome,
+      tps: null,
+      prefillTps: null,
+      ttftMs: null,
+      vramMb: null,
+      vramAbsMb: probe.vramAbsMb,
+    })
+    this.state = { ...this.state, candidates: results }
+  }
+
+  /** Phase 2: the single full prefill + t/s benchmark, at the offload the VRAM probe chose. Pushes
+   *  the candidate and returns it as this KV quant's winner (null if the final measurement faulted). */
+  private async benchAt(
+    entry: ModelEntry,
+    sys: SysInfo,
+    profile: LoadProfile,
+    caps: Engine['capabilities'],
+    results: BenchCandidate[],
+    label: string,
+  ): Promise<{ cand: BenchCandidate; profile: LoadProfile } | null> {
+    this.state = { ...this.state, step: `KV ${profile.kvTypeK}: measuring best (${label})…`, candidates: results }
+    const cand = await this.measure(entry, sys, profile, caps, label, `Measuring ${label}`)
+    results.push(cand)
+    this.state = { ...this.state, candidates: results, bestTps: cand.tps ?? this.state.bestTps }
+    await this.settleGpu()
+    return cand.outcome === 'ok' && cand.tps !== null ? { cand, profile } : null
   }
 
   /** The measurement primitive (spec 09 §1): launch the candidate, detect
@@ -435,7 +578,7 @@ export class BenchRunner {
       kvTypeK: profile.kvTypeK,
       flashAttn: profile.flashAttn,
     }
-    const fail = (outcome: BenchCandidate['outcome']): BenchCandidate => ({ label, params, outcome, tps: null, ttftMs: null, vramMb: null })
+    const fail = (outcome: BenchCandidate['outcome']): BenchCandidate => ({ label, params, outcome, tps: null, prefillTps: null, ttftMs: null, vramMb: null, vramAbsMb: null })
     // Live sub-phase progress so each (possibly multi-minute) trial isn't a silent wait.
     const phase = (p: string) => { this.state = { ...this.state, step: `${stepPrefix} — ${p}` } }
 
@@ -480,7 +623,7 @@ export class BenchRunner {
     }
     const logPath = this.manager.logPath()
 
-    // Bench prompt = 75% of the configured ctx, capped at 50k (see benchPromptTokens).
+    // Bench prompt = 75% of the configured ctx, capped at 8k (see benchPromptTokens).
     const promptContent = makeBenchContent(benchPromptTokens(profile.ctx))
 
     // Prefill gate (doubles as warmup): stream the prompt and fail fast if it's spilling/crawling
@@ -499,7 +642,7 @@ export class BenchRunner {
 
     if ('fault' in measured) return fail(measured.fault)
     const vramMb = vramBefore !== null && vramAfter !== null ? Math.max(0, vramAfter - vramBefore) : vramAfter
-    return { label, params, outcome: 'ok', tps: measured.tps, ttftMs: measured.ttftMs, vramMb }
+    return { label, params, outcome: 'ok', tps: measured.tps, prefillTps: measured.prefillTps, ttftMs: measured.ttftMs, vramMb, vramAbsMb: vramAfter }
   }
 
   /** Poll the manager state until the engine is running, the readiness window
@@ -554,7 +697,7 @@ export class BenchRunner {
     maxTokens: number,
     budgetMs: number,
     logPath: string,
-  ): Promise<{ tps: number; ttftMs: number } | { fault: 'oom' | 'crash' | 'timeout' }> {
+  ): Promise<{ tps: number; prefillTps: number | null; ttftMs: number } | { fault: 'oom' | 'crash' | 'timeout' }> {
     const probe = new AbortController()
     let fault: 'oom' | 'crash' | null = null
     const watch = (async () => {
@@ -572,7 +715,7 @@ export class BenchRunner {
       }
     })()
 
-    let timed: { tps: number; ttftMs: number } | null = null
+    let timed: { tps: number; prefillTps: number | null; ttftMs: number } | null = null
     try {
       timed = await this.chat(target, content, maxTokens, budgetMs, probe.signal)
     } catch {
@@ -671,7 +814,7 @@ export class BenchRunner {
 
   /** One non-streaming /v1/chat/completions request. Returns engine-reported tps + ttftMs, or null.
    *  Aborts on the per-test timeout, the cancel kill-switch, or `extraSignal` (the fault watchdog). */
-  private async chat(target: string, content: string, maxTokens: number, timeoutMs: number, extraSignal?: AbortSignal): Promise<{ tps: number; ttftMs: number } | null> {
+  private async chat(target: string, content: string, maxTokens: number, timeoutMs: number, extraSignal?: AbortSignal): Promise<{ tps: number; prefillTps: number | null; ttftMs: number } | null> {
     const signals: AbortSignal[] = [AbortSignal.timeout(timeoutMs)]
     if (this.abort) signals.push(this.abort.signal)
     if (extraSignal) signals.push(extraSignal)
@@ -685,14 +828,22 @@ export class BenchRunner {
         temperature: 0,
         seed: 42,
         stream: false,
+        // Re-process the prompt instead of reusing the warmup's cached prefill — otherwise the
+        // engine only evaluates the few new template tokens and `prompt_per_second` reflects ~4
+        // tokens, not the real prefill throughput over the whole bench prompt.
+        cache_prompt: false,
       }),
       signal: signals.length > 1 ? AbortSignal.any(signals) : signals[0],
     })
     if (!res.ok) return null
-    const data = (await res.json()) as { timings?: { predicted_per_second?: number; prompt_ms?: number } }
+    const data = (await res.json()) as { timings?: { predicted_per_second?: number; prompt_per_second?: number; prompt_ms?: number } }
     const t = data.timings
     if (!t || typeof t.predicted_per_second !== 'number') return null
-    return { tps: t.predicted_per_second, ttftMs: typeof t.prompt_ms === 'number' ? t.prompt_ms : 0 }
+    return {
+      tps: t.predicted_per_second,
+      prefillTps: typeof t.prompt_per_second === 'number' ? t.prompt_per_second : null,
+      ttftMs: typeof t.prompt_ms === 'number' ? t.prompt_ms : 0,
+    }
   }
 
   // ---- card-derived recommended sampling (ADR-099) ------------------------
@@ -894,20 +1045,83 @@ function makeBenchContent(targetTokens: number): string {
   return BENCH_BASE.repeat(reps).slice(0, targetChars) + '\n\nSummarize the passage above in one sentence.'
 }
 
-/** How many prompt tokens to use for a bench trial: 75% of the configured context, capped at
- *  50k tokens. The 0.75 factor keeps the prompt a realistic fraction of the window (leaving room
- *  for generation); the 50k cap stops very large-ctx models from spending the whole trial
- *  prefilling a huge prompt (which would risk the per-test timeout). KV/VRAM is allocated for the
- *  full ctx at load regardless, so this only sizes the prefill-speed measurement, not VRAM fit. */
+/** How many prompt tokens to use for a bench trial: 75% of the configured context, capped at 8k.
+ *  The cap matters for BOTH speed and accuracy. Speed: a huge model at 200K would otherwise spend
+ *  the whole trial prefilling tens of thousands of tokens. Accuracy: generation t/s falls with how
+ *  deep the context is, and a very deep measurement reflects a worst case, not typical use — an 8k
+ *  context is representative of normal prompts and makes the per-token attention cost (which is
+ *  where a low-bit KV's slower kernel shows up) realistic rather than exaggerated. KV/VRAM is
+ *  allocated for the full ctx at load regardless, so this only sizes the speed measurement. */
 function benchPromptTokens(ctx: number): number {
-  return Math.max(256, Math.min(50_000, Math.floor(ctx * 0.75)))
+  return Math.max(256, Math.min(8_192, Math.floor(ctx * 0.75)))
 }
 
-/** True when a measured VRAM figure exceeds 95% of the primary GPU's VRAM. */
-function overVram(vramMb: number | null, sys: SysInfo): boolean {
-  const total = sys.gpus[0]?.vramMb ?? 0
-  if (!vramMb || total <= 0) return false
-  return vramMb > total * 0.95
+/** Total dedicated VRAM across all GPUs, MB (0 when none / non-NVIDIA). */
+function totalVramMb(sys: SysInfo): number {
+  return sys.gpus.reduce((s, g) => s + (g.vramMb || 0), 0)
+}
+
+/** True when a candidate's ABSOLUTE VRAM use leaves less than VRAM_HEADROOM_MB free — i.e. it's
+ *  too close to the spill edge. The search then offloads more so the chosen config keeps a safety
+ *  margin against a later desktop / ComfyUI VRAM grab. Unknown VRAM (non-NVIDIA) → never blocks. */
+function overHeadroom(vramAbsMb: number | null, sys: SysInfo): boolean {
+  const total = totalVramMb(sys)
+  if (!vramAbsMb || total <= 0) return false
+  return vramAbsMb > total - VRAM_HEADROOM_MB
+}
+
+/** The quality-preserving KV-cache types to try, in search order. The model's current/base type
+ *  comes first (so a budget-truncated run is never worse than today), then the other near-lossless
+ *  options the engine actually supports. An unprobed engine (empty kvTypes) is treated as f16-only,
+ *  so only the base type is offered. See {@link QUALITY_KV}. */
+export function pickKvQuants(baseKv: string, kvTypes: string[]): string[] {
+  const supported = (t: string) => (kvTypes.length === 0 ? t === baseKv : kvTypes.includes(t))
+  const out: string[] = []
+  for (const t of [baseKv, ...QUALITY_KV]) if (supported(t) && !out.includes(t)) out.push(t)
+  return out
+}
+
+/** Speed objective ("best prefill AND t/s"): generation t/s is primary; when two configs are within
+ *  OUTPUT_TIE of each other on generation t/s, the one with faster prefill wins. Returns true when
+ *  `a` beats `b`. */
+export function betterBySpeed(
+  a: { tps: number | null; prefillTps: number | null },
+  b: { tps: number | null; prefillTps: number | null },
+): boolean {
+  const at = a.tps ?? 0
+  const bt = b.tps ?? 0
+  if (bt <= 0) return at > 0
+  const rel = (at - bt) / bt
+  if (rel > OUTPUT_TIE) return true
+  if (rel < -OUTPUT_TIE) return false
+  return (a.prefillTps ?? 0) > (b.prefillTps ?? 0)
+}
+
+/** Bytes per cached element for a KV-cache type (defaults to f16's 2 for unknown types). */
+function kvBytes(t: string): number {
+  return KV_BYTES[t] ?? 2
+}
+/** The largest / smallest KV-cache type in a candidate set (by bytes per element). */
+function kvLargest(c: string[]): string {
+  return c.reduce((a, b) => (kvBytes(b) > kvBytes(a) ? b : a), c[0])
+}
+function kvSmallest(c: string[]): string {
+  return c.reduce((a, b) => (kvBytes(b) < kvBytes(a) ? b : a), c[0])
+}
+
+/** Decide which quality-preserving KV-cache type(s) to actually tune, from the measured VRAM swing
+ *  (see {@link calibrateKvSpread}). Tiny swing → the cache is small, so the quant barely changes
+ *  the fit and the highest-precision/fastest-kernel type (f16) wins → tune only it. Big (or
+ *  un-sizable, spread < 0) swing → the smallest type frees real VRAM for more of the model on the
+ *  GPU, but its kernel can be slower (turbo4), so tune BOTH the smallest and the q8_0 stock fallback
+ *  and let the measured prefill + t/s pick the winner. */
+export function decideKvToBench(spreadMb: number, candidates: string[]): string[] {
+  const has = (t: string) => candidates.includes(t)
+  const largest = kvLargest(candidates)
+  if (spreadMb >= 0 && spreadMb <= KV_SPREAD_MIN) return [largest]
+  const smallest = has('turbo4') ? 'turbo4' : kvSmallest(candidates)
+  const stock = has('q8_0') ? 'q8_0' : largest
+  return [...new Set([smallest, stock])]
 }
 
 /** Best-effort current NVIDIA VRAM use in MB (sum across GPUs). Null on non-NVIDIA
