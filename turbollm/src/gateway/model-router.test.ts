@@ -1,11 +1,8 @@
-// ModelRouter pool-state tests (F-033 loaded-model display + F-032 KV-cache TTL).
-// Contracts under test:
+// ModelRouter pool-state tests (F-033 loaded-model display).
+// Contract under test:
 //   • loadedModelKeys(): the union of model keys loaded (running|starting) across the
 //     primary manager AND every alive extra pool slot — so gateway-loaded models show as
 //     loaded on the Models page (F-033). Dead/stopped slots are excluded.
-//   • selectKvTtlEvictions(): pure past-TTL selection over the keep-N pool (F-032). Excludes
-//     dead slots; ttlMs <= 0 disables. Drives the sweeper without real timers.
-//   • sweepKvTtl(): no-op selection for keepN === 1; reads the configured TTL otherwise.
 //
 // We build only the light fakes the methods touch (Manager.status + ConfigStore.snapshot);
 // registry/scanner/comfy are unused by these paths and cast through. The private extraSlots
@@ -13,7 +10,7 @@
 // shape other tests use — since there's no public seeder that doesn't drive a real load.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { ModelRouter, selectKvTtlEvictions } from './model-router'
+import { ModelRouter } from './model-router'
 import type { Manager, Status } from '../engines/manager'
 import type { ConfigStore } from '../config/config'
 
@@ -27,8 +24,8 @@ function fakeManager(state: Status['state'], modelKey: string | null): Manager {
   } as unknown as Manager
 }
 
-/** A ConfigStore double returning a fixed gateway snapshot (keepN + kvCacheTtlMs). */
-function fakeStore(gateway: { keepN: number; kvCacheTtlMs: number }): ConfigStore {
+/** A ConfigStore double returning a fixed gateway snapshot. */
+function fakeStore(gateway: { keepN: number }): ConfigStore {
   return {
     snapshot: () => ({ gateway: { autoSwap: true, ...gateway } }),
   } as unknown as ConfigStore
@@ -54,7 +51,7 @@ function router(
   return r
 }
 
-const STORE = fakeStore({ keepN: 3, kvCacheTtlMs: 300_000 })
+const STORE = fakeStore({ keepN: 3 })
 
 // ── loadedModelKeys (F-033) ───────────────────────────────────────────────────
 test('loadedModelKeys: empty when nothing is loaded', () => {
@@ -89,62 +86,4 @@ test('loadedModelKeys: pool-only (primary stopped) still reports pool slots', ()
     { manager: fakeManager('running', 'qwen-7b'), modelKey: 'qwen-7b', lastUsedMs: 0 },
   ])
   assert.deepEqual([...r.loadedModelKeys()], ['qwen-7b'])
-})
-
-// ── selectKvTtlEvictions (F-032, pure selection) ──────────────────────────────
-test('selectKvTtlEvictions: picks only alive slots idle past the TTL', () => {
-  const now = 1_000_000
-  const ttl = 300_000
-  const slots = [
-    { modelKey: 'fresh', lastUsedMs: now - 10_000, alive: true }, // recent → keep
-    { modelKey: 'stale', lastUsedMs: now - 400_000, alive: true }, // old → evict
-    { modelKey: 'dead-stale', lastUsedMs: now - 999_999, alive: false }, // old but dead → skip
-  ]
-  assert.deepEqual(selectKvTtlEvictions(slots, ttl, now), ['stale'])
-})
-
-test('selectKvTtlEvictions: exactly-at-TTL is not yet evicted (strictly greater)', () => {
-  const now = 1_000_000
-  const ttl = 300_000
-  const slots = [{ modelKey: 'edge', lastUsedMs: now - ttl, alive: true }]
-  assert.deepEqual(selectKvTtlEvictions(slots, ttl, now), [], 'idle == TTL is not past it')
-  const slotsPast = [{ modelKey: 'edge', lastUsedMs: now - ttl - 1, alive: true }]
-  assert.deepEqual(selectKvTtlEvictions(slotsPast, ttl, now), ['edge'], 'idle > TTL evicts')
-})
-
-test('selectKvTtlEvictions: ttlMs <= 0 disables the sweep', () => {
-  const now = 1_000_000
-  const slots = [{ modelKey: 'whatever', lastUsedMs: 0, alive: true }]
-  assert.deepEqual(selectKvTtlEvictions(slots, 0, now), [])
-  assert.deepEqual(selectKvTtlEvictions(slots, -5, now), [])
-})
-
-// ── sweepKvTtl (F-032, router-driven, injected clock) ─────────────────────────
-test('sweepKvTtl: no-op for keepN === 1 (no pool to evict toward)', () => {
-  const store = fakeStore({ keepN: 1, kvCacheTtlMs: 300_000 })
-  const now = 1_000_000
-  const r = router(fakeManager('running', 'only'), store, [
-    // Even a wildly stale extra slot is ignored when keepN === 1.
-    { manager: fakeManager('running', 'ghost'), modelKey: 'ghost', lastUsedMs: now - 999_999 },
-  ])
-  assert.deepEqual(r.sweepKvTtl(now), [])
-})
-
-test('sweepKvTtl: selects past-TTL pool slots when keepN > 1', () => {
-  const store = fakeStore({ keepN: 3, kvCacheTtlMs: 300_000 })
-  const now = 1_000_000
-  const r = router(fakeManager('running', 'active'), store, [
-    { manager: fakeManager('running', 'fresh'), modelKey: 'fresh', lastUsedMs: now - 1_000 },
-    { manager: fakeManager('running', 'idle'), modelKey: 'idle', lastUsedMs: now - 400_000 },
-  ])
-  assert.deepEqual(r.sweepKvTtl(now), ['idle'])
-})
-
-test('sweepKvTtl: kvCacheTtlMs === 0 disables eviction even with idle pool slots', () => {
-  const store = fakeStore({ keepN: 3, kvCacheTtlMs: 0 })
-  const now = 1_000_000
-  const r = router(fakeManager('running', 'active'), store, [
-    { manager: fakeManager('running', 'idle'), modelKey: 'idle', lastUsedMs: now - 999_999 },
-  ])
-  assert.deepEqual(r.sweepKvTtl(now), [])
 })
