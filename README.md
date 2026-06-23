@@ -323,11 +323,14 @@ Code](https://www.npmjs.com/package/@anthropic-ai/claude-code) can run against w
 you've loaded — no cloud key, fully offline. One command wires it up:
 
 ```bash
-turbollm launch claude          # opens Claude Code on your loaded model
+turbollm launch claude               # auto-loads a model if none is running, then opens Claude Code
+turbollm launch claude --model qwen3-8b   # load a specific model first, then launch
 ```
 
 It sets Claude Code's `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` at TurboLLM and execs `claude`;
-extra args are forwarded. If `claude` isn't installed, it tells you how. The in-app
+extra args are forwarded. If no model is loaded it auto-loads your last-used one (or the first
+in your library); `--model` picks a specific one by key or name. If `claude` isn't installed,
+it tells you how. The in-app
 **Developer** screen also shows copy-paste env snippets for any OpenAI- or Anthropic-compatible
 tool (Open WebUI, Kilo Code, opencode, …).
 
@@ -353,7 +356,9 @@ turbollm                        # start on :6996, open browser
 turbollm --port 9000            # listen on a specific port
 turbollm --no-open              # start without opening a browser
 turbollm --addr 0.0.0.0:6996    # bind all interfaces (LAN sharing)
-turbollm launch claude          # start Claude Code against the loaded model
+turbollm --stop                 # stop a running daemon (any terminal)
+turbollm launch claude          # start Claude Code (auto-loads a model if none is running)
+turbollm launch claude --model qwen3-8b   # load a specific model, then launch
 ```
 
 | Flag | Description |
@@ -362,7 +367,12 @@ turbollm launch claude          # start Claude Code against the loaded model
 | `--addr <host:port>` | Full host:port override, e.g. `0.0.0.0:6996` for LAN sharing |
 | `--no-open` | Start without opening a browser window |
 | `--config <file>` | Path to a custom config file |
+| `--stop` | Stop a running TurboLLM daemon (reads `~/.turbollm/daemon.pid`) and exit |
 | `--help`, `-h` | Show usage and exit |
+
+`turbollm launch claude` also accepts `--model <key|name>` to load a specific model before
+launching; without it, an already-loaded model is used, or the last-used / first model is
+auto-loaded.
 
 ---
 
