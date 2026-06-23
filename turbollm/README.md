@@ -404,21 +404,27 @@ your machine.
 
 ## How TurboLLM compares
 
-Focused on the differences that matter — all four are good tools.
+Focused on the differences that matter — all four are good tools, and the others move fast.
+Marks reflect mid-2026; verify the moving rows against each tool's current docs.
 
 | | **TurboLLM** | LM Studio | Ollama | Open WebUI |
 |---|:---:|:---:|:---:|:---:|
-| Run **any engine / community forks** | ✅ | ❌ one runtime | ❌ hidden | ❌ |
-| **Auto-tune** launch flags to your GPU | ✅ | ❌ | ❌ | ❌ |
-| **Measured** t/s in the model list | ✅ | ◐ | ◐ | ❌ |
-| **Anthropic** API (tool use) → Claude Code | ✅ | ❌ | ❌ | ❌ |
+| Run **any engine / community forks** | ✅ | ❌ llama.cpp/MLX only | ❌ hidden | ❌ frontend |
+| **Benchmark-based auto-tune** of launch flags | ✅ | ◐ basic offload | ◐ basic offload | ❌ |
+| **Measured** t/s in the model list | ✅ | ◐ per-run | ◐ `--verbose` | ❌ |
+| **Anthropic** API (`/v1/messages`) → Claude Code | ✅ | ✅ 0.4.1+ | ✅ v0.14+ | ❌ |
 | OpenAI-compatible API | ✅ | ✅ | ✅ | ◐ proxy |
-| **Auto-load the requested model** (hot-swap pool) | ✅ | ❌ | ◐ | ❌ |
-| Use existing model folders (no re-download) | ✅ | ◐ | ❌ | ❌ |
-| Speculative decoding (NextN / MTP / draft) | ✅ | ◐ draft | ❌ | ❌ |
+| Auto-load the requested model / multi-model pool | ✅ | ✅ JIT | ✅ | ❌ |
+| Use existing model folders (no re-download) | ✅ | ◐ import | ◐ import | ❌ frontend |
+| Speculative decoding (draft / MTP) | ✅ | ✅ | ◐ env flag | ❌ |
 | Web UI from any LAN device | ✅ | ❌ | ❌ | ✅ |
 | **Lightweight** (no Electron / no Python) | ✅ npm | ❌ Electron | ✅ Go | ❌ Python |
-| Offline-first · no telemetry | ✅ | ◐ | ✅ | ✅ |
+| Offline-first · **no telemetry** | ✅ | ◐ analytics on by default | ✅ | ✅ |
+
+LM Studio and Ollama both added Anthropic `/v1/messages` endpoints in 2026, so the API rows are
+now parity — Claude Code works against any of them. TurboLLM's durable edges are **any engine
+including community forks**, **benchmark-based auto-tuning with a VRAM-fit verdict + measured t/s
+before you commit**, and **zero telemetry**.
 
 Prefer Open WebUI's chat breadth? It works great pointed at TurboLLM's OpenAI endpoint.
 
