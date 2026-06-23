@@ -1318,7 +1318,7 @@ export function registerApi(app: Hono, d: Deps): void {
       modelDefaults?: { ctx?: number; ngl?: number; imageMaxTokens?: number; maxTokens?: number }
       hfToken?: string
       comfyui?: { enabled?: boolean; url?: string; reverseGate?: boolean }
-      gateway?: { autoSwap?: boolean; keepN?: number }
+      gateway?: { autoSwap?: boolean; keepN?: number; kvCacheTtlMs?: number }
       tavilyApiKey?: string
       search?: { provider?: string; tavilyApiKey?: string; kagiApiKey?: string; searxngUrl?: string }
       build?: { toolchainDirs?: string[] }
@@ -1407,12 +1407,20 @@ export function registerApi(app: Hono, d: Deps): void {
     }
 
     // Gateway intelligence (v0.6.0): auto-swap toggle + keep-N pool size.
-    const gwUpdates: { autoSwap?: boolean; keepN?: number } = {}
+    const gwUpdates: { autoSwap?: boolean; keepN?: number; kvCacheTtlMs?: number } = {}
     if (b.gateway?.autoSwap !== undefined) gwUpdates.autoSwap = !!b.gateway.autoSwap
     if (b.gateway?.keepN !== undefined) {
       const v = Number(b.gateway.keepN)
       if (!Number.isInteger(v) || v < 1 || v > 4) return err(c, 400, 'invalid_config_value', 'gateway.keepN must be 1–4.')
       gwUpdates.keepN = v
+    }
+    // KV cache TTL (F-032): idle ms before a keep-N pool model's KV cache is eligible for
+    // eviction. 0 disables the sweep. (The eviction itself is an honest no-op today — see
+    // ModelRouter.sweepKvTtl — but the knob is settable so it round-trips for the future.)
+    if (b.gateway?.kvCacheTtlMs !== undefined) {
+      const v = Number(b.gateway.kvCacheTtlMs)
+      if (!Number.isInteger(v) || v < 0) return err(c, 400, 'invalid_config_value', 'gateway.kvCacheTtlMs must be an integer ≥ 0 (ms).')
+      gwUpdates.kvCacheTtlMs = v
     }
 
     // Build toolchain dirs (ADR-100): absolute folders prepended to PATH for the prereq

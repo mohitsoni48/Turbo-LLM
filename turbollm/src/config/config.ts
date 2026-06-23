@@ -129,6 +129,14 @@ export interface Gateway {
    *  swap (unload A, load B). Values 2–4 keep multiple models hot in a pool with
    *  LRU eviction. Capped at 4. */
   keepN: number
+  /** KV cache TTL in ms (F-032): how long a keep-N pool model may sit idle before its
+   *  KV cache would be evicted to reclaim VRAM (weights stay loaded). Default 300_000
+   *  (5 min). NO-OP for keepN === 1 (the single model is always the active one). NOTE:
+   *  the eviction itself is currently a documented no-op — llama-server pre-allocates the
+   *  whole KV buffer at load and cannot free it without unloading the model (which the
+   *  spec rejects); see ModelRouter's TTL sweeper. The knob + plumbing are wired so the
+   *  feature can become real if/when the engine grows a KV-only free. */
+  kvCacheTtlMs: number
 }
 
 /** ComfyUI GPU-coordination (so the LLM engine and ComfyUI don't fight over VRAM).
@@ -314,7 +322,7 @@ export function defaultConfig(): Config {
     modelDefaults: { ctx: 8192, ngl: 99, imageMaxTokens: 0, maxTokens: 0 },
     featuredOverrideUrl: '',
     comfyui: { enabled: false, gatePath: '', url: '', reverseGate: false, cachePersist: false },
-    gateway: { autoSwap: true, keepN: 1 },
+    gateway: { autoSwap: true, keepN: 1, kvCacheTtlMs: 300_000 },
     tools: {},
     mcp: { servers: [] },
     build: { toolchainDirs: [] },
@@ -483,6 +491,12 @@ function normalize(c: Config): void {
   c.gateway = {
     autoSwap: gw.autoSwap !== false,
     keepN: typeof gw.keepN === 'number' && gw.keepN >= 1 ? Math.min(Math.floor(gw.keepN), 4) : 1,
+    // KV cache TTL (F-032): absent/garbage in pre-F-032 configs → 300_000ms default.
+    // A non-positive value disables the TTL sweep (0 = never auto-evict).
+    kvCacheTtlMs:
+      typeof gw.kvCacheTtlMs === 'number' && Number.isFinite(gw.kvCacheTtlMs) && gw.kvCacheTtlMs >= 0
+        ? Math.floor(gw.kvCacheTtlMs)
+        : 300_000,
   }
   // Built-in tools (v0.7.0): absent in pre-v0.7.0 configs → empty defaults.
   const tl = (c.tools ?? {}) as Partial<ToolsConfig>
