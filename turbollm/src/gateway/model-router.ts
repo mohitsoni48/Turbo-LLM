@@ -98,6 +98,23 @@ export class ModelRouter {
     }
   }
 
+  /** Every model key currently loaded (or loading) across the WHOLE pool — the primary
+   *  manager plus every alive extra slot (F-033). "Alive" = running OR starting, matching
+   *  the delete-guard's notion of "loaded" (routes.ts), so a model loaded via gateway
+   *  auto-swap into an extra slot is reported as loaded even though it isn't in the
+   *  primary manager. Used by overlayModel to mark gateway-loaded models loaded on the
+   *  Models page (they were previously invisible — only the primary manager was consulted). */
+  loadedModelKeys(): Set<string> {
+    const isAlive = (s: string) => s === 'running' || s === 'starting'
+    const keys = new Set<string>()
+    const ms = this.manager.status()
+    if (isAlive(ms.state) && ms.model) keys.add(ms.model.key)
+    for (const slot of this.extraSlots.values()) {
+      if (isAlive(slot.manager.status().state)) keys.add(slot.modelKey)
+    }
+    return keys
+  }
+
   // ── internal ──────────────────────────────────────────────────────────────
 
   private async doLoad(entry: ModelEntry): Promise<RouteResult> {
