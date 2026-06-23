@@ -246,19 +246,21 @@ export function ChatScreen() {
       setImportError('Invalid file — could not parse JSON.')
       return
     }
-    // Check model mismatch before importing
-    const exportModel = (payload as Record<string, unknown>)?.model as string | undefined
-    if (exportModel) {
-      const models = modelsQ.data?.models ?? []
-      const found = models.some((m) => m.key === exportModel)
-      if (!found) setImportModelMismatch(exportModel)
+    // Check model mismatch before importing (only applicable to object formats)
+    if (!Array.isArray(payload)) {
+      const exportModel = (payload as Record<string, unknown>)?.model as string | undefined
+      if (exportModel) {
+        const models = modelsQ.data?.models ?? []
+        const found = models.some((m) => m.key === exportModel)
+        if (!found) setImportModelMismatch(exportModel)
+      }
     }
     try {
       const { id } = await importChat(payload)
       void qc.invalidateQueries({ queryKey: ['conversations'] })
       handleSelect(id)
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Import failed. Check the file is a valid .turbollm-chat.json.'
+      const msg = err instanceof ApiError ? err.message : 'Import failed. Check the file is a valid .turbollm-chat.json or OpenAI-format JSON.'
       setImportError(msg)
     }
   }
