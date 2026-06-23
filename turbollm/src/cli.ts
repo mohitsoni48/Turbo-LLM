@@ -27,6 +27,7 @@ import { BenchRunner } from './bench/bench'
 import { ModelRouter } from './gateway/model-router'
 import { ToolRegistry } from './tools/tool-registry'
 import { launchCli } from './cli-launch'
+import { writePidfile, removePidfile, stopDaemon } from './daemon-pid'
 import { createApp } from './server'
 import type { Deps } from './deps'
 
@@ -84,9 +85,14 @@ function argValue(name: string, fallback: string): string {
 if (argv[0] === 'launch') {
   const target = argv[1] ?? ''
   const port = Number(argValue('--port', '')) || 6996
-  // Everything after `launch <cli>` is forwarded to the CLI, minus our own --port.
-  const passthrough = argv.slice(2).filter((a, i, arr) => a !== '--port' && arr[i - 1] !== '--port')
-  const code = await launchCli(target, port, passthrough)
+  const modelKey = argValue('--model', '') || undefined
+  // Everything after `launch <cli>` is forwarded to the CLI, minus our own --port and --model.
+  const passthrough = argv.slice(2).filter(
+    (a, i, arr) =>
+      a !== '--port' && arr[i - 1] !== '--port' &&
+      a !== '--model' && arr[i - 1] !== '--model',
+  )
+  const code = await launchCli(target, port, passthrough, undefined, modelKey)
   process.exit(code)
 }
 
@@ -100,19 +106,23 @@ if (hasFlag('--help', '-h')) {
     `  turbollm launch <cli>            # run a coding CLI on your local model\n\n` +
     `Commands:\n` +
     `  launch claude                    Launch Claude Code wired to TurboLLM\n` +
-    `                                   (daemon must be running with a model loaded)\n\n` +
+    `                                   Auto-loads the last-used model if none is loaded.\n` +
+    `  launch claude --model <key>      Load a specific model by key or name, then launch\n\n` +
     `Options:\n` +
     `  --port <n>     Port to listen on / connect to (default: 6996)\n` +
     `  --addr <h:p>   Full host:port override (e.g. 0.0.0.0:6996)\n` +
     `  --no-open      Do not open a browser window on startup\n` +
     `  --config <f>   Path to a custom config file\n` +
+    `  --stop         Stop a running TurboLLM daemon and exit\n` +
     `  --help, -h     Show this help message\n\n` +
     `Examples:\n` +
     `  npx turbollm                     # start on default port, open browser\n` +
     `  turbollm --port 9000             # listen on port 9000\n` +
     `  turbollm --no-open               # start without opening a browser\n` +
     `  turbollm --addr 0.0.0.0:6996    # bind to all interfaces (LAN sharing)\n` +
-    `  turbollm launch claude           # open Claude Code on your loaded model\n\n`,
+    `  turbollm --stop                  # stop the running daemon\n` +
+    `  turbollm launch claude           # open Claude Code on your loaded model\n` +
+    `  turbollm launch claude --model qwen3-8b   # load qwen3-8b, then launch\n\n`,
   )
   process.exit(0)
 }
@@ -124,6 +134,15 @@ if (!process.argv.includes('--config')) migrateLegacyDataDir()
 const store = ConfigStore.load(argValue('--config', defaultConfigPath()))
 if (store.brokenBackup()) {
   console.warn(`config was reset; previous file backed up at ${store.brokenBackup()}`)
+}
+
+// ── --stop ────────────────────────────────────────────────────────────────────
+// Must come after ConfigStore.load so we have store.dir() for the pidfile path,
+// but before daemon startup so we never spin up two daemons.
+if (hasFlag('--stop')) {
+  const result = await stopDaemon(store.dir())
+  process.stdout.write(result.message + '\n')
+  process.exit(0)
 }
 
 // Reap any engine processes orphaned by a previous daemon that didn't shut down
@@ -282,6 +301,13 @@ function listen(attempt = 0): void {
 
     // Keep the legacy one-liner for log parsers that key on it.
     process.stdout.write(`TurboLLM ${version} listening on http://${displayHost}:${info.port}\n`)
+
+    // Write pidfile so `turbollm --stop` can find and stop this process (F-035).
+    // Only write on the initial bind (not during an in-place rebind) so the pidfile
+    // always reflects the original PID and the current port. Best-effort.
+    if (!rebinding) {
+      try { writePidfile(store.dir(), process.pid, info.port) } catch { /* best-effort */ }
+    }
   })
   ;(s as unknown as { on?: (ev: 'error', cb: (e: NodeJS.ErrnoException) => void) => void }).on?.(
     'error',
@@ -483,6 +509,8 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
     if (shuttingDown) return
     shuttingDown = true
     console.log('shutting down')
+    // Remove pidfile on clean shutdown so `turbollm --stop` doesn't find a stale entry.
+    try { removePidfile(store.dir()) } catch { /* best-effort */ }
     updateScheduler.stop()
     comfy.stop()
     toolRegistry.disconnectAll()
@@ -498,4 +526,8 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
 // startup reap is the backstop for the truly abrupt kills that skip 'exit' too.
 process.on('exit', () => {
   try { killTrackedEnginesSync(store.dir()) } catch { /* best-effort */ }
+  // Best-effort pidfile cleanup — covers exits that bypass the signal handlers
+  // (e.g. process.exit() called elsewhere). Graceful SIGTERM/SIGINT already
+  // removed it above; this is a second-layer safety net.
+  try { removePidfile(store.dir()) } catch { /* best-effort */ }
 })
