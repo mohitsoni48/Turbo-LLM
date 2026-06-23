@@ -38,16 +38,12 @@ LLMs** — built for people who today hand-compile forks and hunt forums for the
 ## Contents
 
 - [Why TurboLLM](#why-turbollm)
+- [Speed: TurboLLM vs LM Studio](#speed-turbollm-vs-lm-studio)
 - [Features](#features)
 - [Quick start](#quick-start)
 - [⭐ Bring any engine — the headline feature](#-bring-any-engine--the-headline-feature)
-- [Models — bring your own, or browse Hugging Face](#models)
-- [Auto-tuning & performance](#auto-tuning--performance)
-- [Chat](#chat)
-- [APIs & integrations](#apis--integrations)
 - [Run Claude Code on your own GPU](#run-claude-code-on-your-own-gpu)
 - [Use it from any device on your network](#use-it-from-any-device-on-your-network)
-- [Share the GPU with ComfyUI](#share-the-gpu-with-comfyui)
 - [Command-line reference](#command-line-reference)
 - [Configuration & data](#configuration--data)
 - [Requirements](#requirements)
@@ -90,46 +86,173 @@ TurboLLM does the opposite:
 
 ---
 
+## Speed: TurboLLM vs LM Studio
+
+Same GPU (RTX 5070 Ti 16 GB), same model, same 200K context — measured generation speed.
+**TurboLLM is faster than LM Studio on the very same official llama.cpp, and faster still when you
+run a community fork LM Studio can't.**
+
+**① On official llama.cpp, TurboLLM is faster.** It auto-provisions a GPU-native engine build (CUDA
+13 for Blackwell here) and tunes expert-offload to the layer, so at the *same* KV-cache quant it
+beats LM Studio's bundled runtime:
+
+| Qwen3.6-35B-A3B · 200K | TurboLLM | LM Studio | Speed-up |
+|---|:---:|:---:|:---:|
+| official llama.cpp — `q4_0` | **74.7 t/s** | 61.0 t/s | **1.2×** |
+| official llama.cpp — `q8_0` | **72.3 t/s** | ~66 t/s\* | **1.1×** |
+
+**② Run a faster engine and pull far ahead.** Because TurboLLM runs *any* engine, you can drop in
+the **TurboQuant** fork — a llama.cpp fork with a low-bit `turbo4` KV cache that LM Studio simply
+can't load — in one click. On a large-KV model it delivers `q8_0`-level quality at **more than
+double the speed**:
+
+| Qwen3.6-27B · 200K · matched quality | TurboLLM&nbsp;+&nbsp;TurboQuant | LM Studio | Speed-up |
+|---|:---:|:---:|:---:|
+| `turbo4` vs `q8_0` | **24.6 t/s** | 11.4 t/s | **2.2×** |
+
+Same run, **1.7× faster prefill** too (1288 vs 757 tok/s).
+
+<sub>\*LM Studio's `q8_0` mildly spilled VRAM at its best offload. A low-bit KV cache helps most
+when the cache is large; TurboLLM's auto-tuner and on-screen measured t/s pick the fastest engine +
+config for each model, so you don't have to.</sub>
+
+---
+
 ## Features
 
-**Engines**
-- Bring any `llama-server`-compatible engine — stock builds or community forks — with real capability probing
-- **Hardware-aware recommendation** — detects your GPU and tells you which engine/build fits; engines that can't run here are greyed with the reason
-- **Curated catalog** — llama.cpp, KoboldCpp, llamafile, MLX, vLLM, plus forks (ik_llama, TurboQuant) — one-click install where a prebuilt exists
-- **End-to-end build from source** (Windows + CUDA) — clone, `cmake` (Ninja + `nvcc`), compile `llama-server`, bundle its CUDA runtime, and auto-register it from inside the app, with a live compiler log and a success screen. **No CUDA Toolkit? Click "Download CUDA"** — it fetches NVIDIA's official build components (~0.5 GB) and assembles a toolkit for you. Or point it at a conda-env / custom CUDA path. (Manual command guide kept for other setups.)
-- **Honest updates** — checks the real upstream release/commit and flags *Update available* / *Rebuild available* (never a fake "you're on the latest"), with per-engine auto-update
-- Auto-provision a GPU-matched `llama-server` build on first run (CUDA / ROCm / Metal / SYCL / Vulkan, CPU fallback)
-- One engine dropdown, grouped — pick the engine; a version dropdown appears when you have more than one build
+The headline — **[running any engine, including community forks](#-bring-any-engine--the-headline-feature)** —
+has its own section below. Everything else is grouped here; each summary is the gist, expand for
+the detail:
 
-**Models**
-- Use your own local GGUF / safetensors, or browse & download from Hugging Face in-app
-- Per-model load profiles (context, GPU offload, KV-cache quant, flash-attn, draft models)
-- **Configurable multi-GPU per model** — tensor split / main-GPU pick (llama.cpp), tensor-parallel (vLLM)
-- Auto-tune on load with a **VRAM-fit verdict before you load**
-- Measured tokens/sec per model — never faked — live while you chat and remembered
+<details>
+<summary><strong>📦 Models — bring your own, or browse Hugging Face</strong></summary>
 
-**Chat**
-- Streaming chat with live t/s, TTFT, context meter, and reasoning/thinking support
-- **Persona picker** (8 styles, including Research) + per-chat system prompt and full sampling controls
-- **Inline Unicode charts** when a comparison or trend genuinely warrants a visual
-- Image and document attachments — including **send an image or file with no text**
+<br/>
 
-**Agentic tools**
-- **Built-in tools** — `web_search` (Tavily, advanced depth), `fetch_url`, and sandboxed `run_code`
-- **MCP server support** — connect any MCP server (stdio or SSE) from the Customize screen; tools appear automatically in every chat
-- **Research persona** — forces multi-step web search before every reply, cites sources inline
-- Agentic tool loop with live tool-call cards (pending → done/error) streamed in the UI
+- **Use the folders you already have.** Point TurboLLM at any directory of GGUFs — your
+  existing LM Studio / Ollama / manual downloads — **no re-downloading.** It parses GGUF
+  metadata (arch, params, quant, context, vision) for every file.
+- **Browse & download from Hugging Face**, in-app: search, see the file tree, pick a quant,
+  and download with **resume + SHA-256 verification**. Gated models (Llama, Gemma) work via
+  your own HF token, which **never leaves your machine**.
+- **Import from any URL** — not just Hugging Face. Paste a direct `.gguf` link (model-author
+  sites, mirrors, private servers); it disk-space-checks and downloads through the same manager.
+- **Quant recommendation per GPU** and a **VRAM-fit verdict** so you pick a quant that
+  actually fits before you commit.
+- **Primary download folder**, real-time **measured t/s per model**, and **delete-from-disk**.
 
-**Integrations**
-- OpenAI- **and** Anthropic-compatible APIs — run Claude Code on your own GPU
-- **Smart gateway** — name a model in any request and it auto-loads; keep up to 4 models hot (LRU)
-- **Embeddings** (`/v1/embeddings`) and **structured output** (GBNF grammar / JSON-constrained)
-- LAN sharing with optional API-key auth
-- **Share the GPU with ComfyUI** — auto-unload the model while ComfyUI renders, reload when it's done
+</details>
 
-**Platform**
-- ~0.3 MB npm package on Node — no Electron, no Chromium, no Python
-- Offline-first, no account, no telemetry
+<details>
+<summary><strong>⚡ Auto-tuning &amp; performance</strong></summary>
+
+<br/>
+
+- **Auto-benchmark on load** derives fast defaults for your exact GPU.
+- **Recommended sampling from the model card** — auto-tune reads the model's Hugging Face card
+  (falling back to the original model behind a requant) and prefills the author's recommended
+  `temperature / top_k / top_p / min_p`. No recommendation → your sampling is left untouched.
+- **Real measured tokens/sec** in the model list — **live** while generating, **last-session**
+  when idle (never a synthetic estimate).
+- **Full load-parameter UI**, a superset of what other tools expose: context length, GPU offload
+  (`-ngl`), **MoE CPU-offload (`--n-cpu-moe`)**, parallel slots, **KV-cache quant type** (incl.
+  low-bit on supporting forks), CPU threads, flash attention, and **speculative decoding (NextN /
+  MTP / draft)**.
+- **Fast by default:** flash attention on, NextN self-speculative decoding on for models that
+  carry a draft head, threads auto — safely gated to what your engine actually accepts.
+- **Multi-GPU, per model** — split a model across cards (layer/row split + main-GPU pick on
+  llama.cpp, tensor-parallel on vLLM). Defaults are no-ops, so single-GPU rigs are untouched.
+- **Saved per-model profiles** — tune once, and it loads that way every time.
+
+</details>
+
+<details>
+<summary><strong>💬 Chat &amp; agentic tools — a genuinely good UI, not an afterthought</strong></summary>
+
+<br/>
+
+- **Streaming** with a **stop** button, **live tokens/sec**, **prompt-processing %** and
+  **prefill t/s**, **time-to-first-token**, **total time**, exact **token counts**, and a
+  **context-usage meter** (filled / max) on every reply.
+- **Thinking control** — toggle reasoning **off** for a direct answer, or leave it **on** with
+  collapsible, timed "thought for N s" blocks.
+- **Markdown + syntax-highlighted code** with one-click copy — plus **inline Unicode charts**
+  the model draws when a comparison, trend, or hierarchy is genuinely worth a visual.
+- **Personas** — pick a style (Concise · Detailed · Blunt · Formal · Tutor · Creative · Default)
+  per conversation, no prompt-wrangling required.
+- **Edit, regenerate, delete, copy** any message; **persistent, searchable conversations**
+  with rename, delete, and **auto-generated titles**.
+- **Per-chat system prompt** and **per-chat sampling** overrides — temperature, top-p/k, min-p,
+  repeat/presence/frequency penalties, and **stop strings**.
+- **Image input** for vision models, and **TurboLLM Expert** — a built-in assistant that knows
+  the app and your hardware for onboarding and troubleshooting without leaving the UI.
+- **Agentic tools** — built-in `web_search` (Tavily), `fetch_url`, and sandboxed `run_code`, plus
+  **MCP server support** (stdio / SSE) so any MCP server's tools appear in every chat. A **Research**
+  persona forces multi-step web search and cites sources inline.
+
+</details>
+
+<details>
+<summary><strong>🔌 APIs &amp; integrations — OpenAI + Anthropic, plus a model-loading gateway</strong></summary>
+
+<br/>
+
+With a model loaded, TurboLLM serves two compatible APIs on the same port:
+
+```bash
+# OpenAI-compatible
+curl http://127.0.0.1:6996/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"local","messages":[{"role":"user","content":"hello"}]}'
+```
+
+- **OpenAI-compatible** `/v1/chat/completions`, `/v1/embeddings`, … — point any OpenAI client
+  or tool at it. Embedding models are auto-detected and pooled separately, so a RAG pipeline and
+  a chat model can stay loaded side by side.
+- **Anthropic-compatible** `/v1/messages` — including **tool use and streaming** — which powers
+  Claude Code below. No other local host offers this.
+- **Structured output** — constrain any response to a **GBNF grammar** (or JSON shape).
+- **API-key auth** you can require when sharing over a LAN (Settings → Network).
+
+**The gateway loads models for you.** Most local hosts make you load a model first, then call it.
+TurboLLM's gateway reads the `model` field of any incoming request, **fuzzy-matches it to your
+library, and loads it on the fly** if it isn't already running — then keeps up to **four models
+hot** in an LRU pool so the next switch is instant. An agent (or Claude Code) that hops between a
+coding model, a vision model, and an embedder just names each one and it works — no pre-wiring.
+
+</details>
+
+<details>
+<summary><strong>🎨 Share the GPU with ComfyUI</strong></summary>
+
+<br/>
+
+If you run **ComfyUI** on the same GPU, an LLM holding VRAM while ComfyUI renders means both
+fight for memory (and one usually OOMs). TurboLLM can hand the GPU over automatically:
+
+- The instant ComfyUI starts a render, TurboLLM **unloads its model and pauses new loads**.
+- When ComfyUI's queue drains, TurboLLM **reloads the exact model it unloaded**.
+
+It's **push-based, not polling** — ComfyUI signals TurboLLM the moment a job starts/ends, so the
+handoff is immediate and deterministic (the model is gone *before* ComfyUI executes).
+
+**One-time setup** (Settings → ComfyUI): turn on **Pause for ComfyUI**, enter your ComfyUI folder
+(the one containing `custom_nodes`), click **Install gate** (it writes a small custom node wired to
+this daemon), then **restart ComfyUI** once. The panel shows a live indicator (rendering / idle /
+connected); **Remove** undoes it.
+
+</details>
+
+<details>
+<summary><strong>🪶 Platform — tiny, offline, private</strong></summary>
+
+<br/>
+
+- A **~0.3 MB npm package** on Node — no Electron, no bundled Chromium, no Python.
+- **Offline-first** — no account, no backend, no internet, no telemetry.
+- **Windows · macOS · Linux**, with a CPU fallback when there's no GPU.
+
+</details>
 
 ---
 
@@ -153,17 +276,6 @@ turbollm
 
 Then open **Models**, download or pick a GGUF, click **Load**, and start chatting. Stop the
 daemon any time with **Ctrl+C**.
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/engines.png" width="860" alt="TurboLLM Engines screen: hardware-aware recommendation, a unified engine catalog (llama.cpp, KoboldCpp, llamafile, vLLM, forks), and build-from-source" />
-</p>
-
-<!--
-  📸 More screenshots — drop PNGs into assets/screenshots/ and add. Suggested shots:
-  - chat.png      : a chat mid-stream showing the live t/s + context meter
-  - models.png    : the Models › Library with measured t/s per model
-  - tuning.png    : the model load-params panel (ctx/ngl/NextN/VRAM verdict)
--->
 
 ---
 
@@ -204,101 +316,6 @@ the UI when something fails to load.
 
 ---
 
-## Models
-
-- **Use the folders you already have.** Point TurboLLM at any directory of GGUFs — your
-  existing LM Studio / Ollama / manual downloads — **no re-downloading.** It parses GGUF
-  metadata (arch, params, quant, context, vision) for every file.
-- **Browse & download from Hugging Face**, in-app: search, see the file tree, pick a quant,
-  and download with **resume + SHA-256 verification**. Gated models (Llama, Gemma) work via
-  your own HF token, which **never leaves your machine**.
-- **Import from any URL** — not just Hugging Face. Paste a direct `.gguf` link (model-author
-  sites, mirrors, private servers); it disk-space-checks and downloads through the same
-  manager.
-- **Quant recommendation per GPU** and a **VRAM-fit verdict** so you pick a quant that
-  actually fits before you commit.
-- **Primary download folder**, real-time **measured t/s per model**, and **delete-from-disk**
-  — full library management.
-
----
-
-## Auto-tuning & performance
-
-- **Auto-benchmark on load** derives fast defaults for your exact GPU.
-- **Recommended sampling from the model card** — auto-tune reads the model's Hugging Face card
-  (falling back to the original model behind a requant) and prefills the author's recommended
-  `temperature / top_k / top_p / min_p`, shown in the results table and applied on Save. No
-  recommendation → your sampling is left untouched.
-- **Real measured tokens/sec** in the model list — **live** while a model is generating,
-  **last-session** when it's idle (never a synthetic estimate).
-- **Full load-parameter UI**, a superset of what other tools expose:
-  context length, GPU offload (`-ngl`), **MoE CPU-offload (`--n-cpu-moe`)**, parallel slots,
-  **KV-cache quant type** (incl. low-bit on supporting forks), CPU threads, flash attention,
-  and **speculative decoding (NextN / MTP / draft)**.
-- **Fast by default:** flash attention on, NextN self-speculative decoding on for models that
-  carry a draft head, threads auto — best speed out of the box, safely gated to what your
-  engine actually accepts.
-- **Multi-GPU, per model** — split a model across cards (layer/row split + main-GPU pick on
-  llama.cpp, tensor-parallel on vLLM). Defaults are no-ops, so single-GPU rigs are untouched and
-  the VRAM verdict budgets across the GPUs the split actually uses.
-- **Saved per-model profiles** — tune once, and it loads that way every time.
-
----
-
-## Chat
-
-A genuinely good chat UI, not an afterthought:
-
-- **Streaming** with a **stop** button, **live tokens/sec**, **prompt-processing %** and
-  **prefill t/s**, **time-to-first-token**, **total time**, exact **token counts**, and a
-  **context-usage meter** (filled / max) on every reply.
-- **Thinking control** — toggle reasoning **off** to get a direct answer (saves time and
-  tokens), or leave it **on** with collapsible, timed "thought for N s" blocks.
-- **Markdown + syntax-highlighted code** with one-click copy — plus **inline Unicode charts**
-  the model draws when a comparison, trend, or hierarchy is genuinely worth a visual.
-- **Personas** — pick a style (Concise · Detailed · Blunt · Formal · Tutor · Creative · Default)
-  per conversation, no prompt-wrangling required.
-- **Edit, regenerate, delete, copy** any message; **persistent, searchable conversations**
-  with rename, delete, and **auto-generated titles**.
-- **Per-chat system prompt** and **per-chat sampling** overrides — the full set: temperature,
-  top-p/k, min-p, repeat/presence/frequency penalties, and **stop strings**.
-- **Image input** for vision models.
-- **TurboLLM Expert** — a built-in assistant that knows the app and your hardware, for
-  onboarding and troubleshooting without leaving the UI.
-
----
-
-## APIs & integrations
-
-With a model loaded, TurboLLM serves two compatible APIs on the same port:
-
-```bash
-# OpenAI-compatible
-curl http://127.0.0.1:6996/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"local","messages":[{"role":"user","content":"hello"}]}'
-```
-
-- **OpenAI-compatible** `/v1/chat/completions`, `/v1/embeddings`, … — point any OpenAI client
-  or tool at it. Embedding models are auto-detected and pooled separately, so a RAG pipeline and
-  a chat model can stay loaded side by side.
-- **Anthropic-compatible** `/v1/messages` — including **tool use and streaming** — which is
-  what powers Claude Code below. No other local host offers this.
-- **Structured output** — constrain any response to a **GBNF grammar** (or JSON shape) for
-  reliable machine-readable results.
-- **API-key auth** you can require when sharing over a LAN (Settings → Network).
-
-### The gateway loads models for you
-
-Most local hosts make you load a model first, then call it. TurboLLM's gateway reads the
-`model` field of any incoming request, **fuzzy-matches it to your library, and loads it on the
-fly** if it isn't already running — then keeps up to **four models hot** in an LRU pool so the
-next switch is instant. An agent (or Claude Code) that hops between a coding model, a vision
-model, and an embedder just names each one and it works — no pre-wiring, no manual swaps. Tune
-it in Settings → Gateway (`autoSwap`, `keepN`).
-
----
-
 ## Run Claude Code on your own GPU
 
 TurboLLM's Anthropic-compatible endpoint means [Claude
@@ -326,29 +343,6 @@ turbollm --addr 0.0.0.0:6996    # bind all interfaces, then open http://<your-ip
 ```
 
 Turn on **Require API key** in Settings → Network when you expose it.
-
----
-
-## Share the GPU with ComfyUI
-
-If you run **ComfyUI** on the same GPU, an LLM holding VRAM while ComfyUI renders means both
-fight for memory (and one usually OOMs). TurboLLM can hand the GPU over automatically:
-
-- The instant ComfyUI starts a render, TurboLLM **unloads its model and pauses new loads**.
-- When ComfyUI's queue drains, TurboLLM **reloads the exact model it unloaded**.
-
-It's **push-based, not polling** — ComfyUI signals TurboLLM the moment a job starts/ends, so
-the handoff is immediate and deterministic (the model is gone *before* ComfyUI executes).
-
-**One-time setup** (Settings → ComfyUI):
-
-1. Turn on **Pause for ComfyUI** and **Save**.
-2. Enter your ComfyUI folder (the one containing `custom_nodes`) and click **Install gate**.
-   TurboLLM writes a small custom node into ComfyUI, wired to this daemon.
-3. **Restart ComfyUI** once so it loads the node.
-
-The Settings panel shows a live indicator (rendering / idle / connected). To undo it, click
-**Remove** in the same panel.
 
 ---
 
@@ -451,43 +445,6 @@ Frontend hot-reload: `cd web && npm run dev` (proxies `/api` and `/v1` to the da
 
 **Stack:** Node ≥22 · TypeScript · Hono · `node:sqlite` · tsup — and a React 19 + Tailwind v4 +
 shadcn/ui frontend. One TypeScript codebase, shipped as an npm package.
-
-```
-turbollm/
-  bin/turbollm.mjs      launcher shim (Node guard) -> dist/cli.js
-  src/
-    cli.ts              entrypoint: wiring + graceful shutdown
-    server.ts           Hono app: CORS, API, gateway, embedded SPA
-    engines/            provisioning, probe, registry, lifecycle state machine
-    api/routes.ts       /api/v1/* handlers
-    gateway/            /v1/* OpenAI + Anthropic gateway
-    models/ · chat/ · hf/ · bench/ · downloads/
-  web/                  React + TS + Tailwind + shadcn frontend (own package.json)
-```
-
----
-
-## Screenshots
-
-The unified engine catalog: a hardware-aware recommendation up top, then every supported engine (llama.cpp, KoboldCpp, llamafile, vLLM, and forks) with build-from-source for the rest.
-
-<p align="center"><img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/engines.png" width="860" alt="TurboLLM Engines screen: hardware-aware recommendation and a unified engine catalog" /></p>
-
-Chat mid-conversation: pinned model selector, a live context meter, streaming reply with running token count and tokens/sec.
-
-<p align="center"><img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/chat.png" width="860" alt="TurboLLM Chat screen: model selector, live context meter, streaming reply with tokens/sec" /></p>
-
-The Models library: GGUF and MLX models discovered in your folders, each with measured tokens/sec and a VRAM-fit verdict, grouped by quant.
-
-<p align="center"><img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/models.png" width="860" alt="TurboLLM Models library: discovered models with measured tokens/sec and quant grouping" /></p>
-
-Per-model tuning: context length, GPU layers, KV-cache type, flash attention, and speculative decoding, all with a live VRAM-fit verdict.
-
-<p align="center"><img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/tuning.png" width="860" alt="TurboLLM model tuning panel: context, GPU layers, KV-cache type, flash attention, VRAM-fit verdict" /></p>
-
-Customize: pick a web-search provider and wire up MCP tool servers the model can call during conversations.
-
-<p align="center"><img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/screenshots/customize.png" width="860" alt="TurboLLM Customize screen: web-search provider and MCP tool servers" /></p>
 
 ---
 
