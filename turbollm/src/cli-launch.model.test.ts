@@ -1,0 +1,255 @@
+// Unit tests for F-034: --model resolution + auto-load in launchCli.
+// Uses the injected _spawn and _fetch hooks (same pattern as cli-launch.timeout.test.ts).
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { EventEmitter } from 'node:events'
+import { launchCli } from './cli-launch.js'
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+interface CapturedSpawn {
+  cmd: string
+  args: string[]
+  env: Record<string, string | undefined>
+}
+
+function makeSpawn(): { calls: CapturedSpawn[]; fn: Parameters<typeof launchCli>[3] } {
+  const calls: CapturedSpawn[] = []
+  const fn: Parameters<typeof launchCli>[3] = (cmd, args, opts) => {
+    calls.push({ cmd, args, env: (opts?.env ?? {}) as Record<string, string | undefined> })
+    const ee = new EventEmitter() as ReturnType<typeof import('node:child_process').spawn>
+    setImmediate(() => ee.emit('exit', 0, null))
+    return ee
+  }
+  return { calls, fn }
+}
+
+/** Silence process stdout/stderr writes during launchCli calls. */
+function silenceOutput(): () => void {
+  const outW = process.stdout.write.bind(process.stdout)
+  const errW = process.stderr.write.bind(process.stderr)
+  const noop = (() => true) as typeof process.stdout.write
+  process.stdout.write = noop
+  process.stderr.write = noop
+  return () => {
+    process.stdout.write = outW
+    process.stderr.write = errW
+  }
+}
+
+const MODELS = [
+  { key: 'qwen3-8b', name: 'Qwen3 8B' },
+  { key: 'llama-3-70b', name: 'Llama 3 70B' },
+]
+
+/**
+ * Build a fake fetch that responds to status, models, and engine/start.
+ *
+ * `initialState`:
+ *   - 'running' → status already has model loaded (key = modelKey)
+ *   - 'idle'    → no model loaded; after a POST to /engine/start the next status
+ *                 poll returns running with the requested model key.
+ */
+function makeFetch(
+  initialState: 'running' | 'idle',
+  loadedKey = MODELS[0].key,
+): typeof fetch {
+  let runningKey: string | null = initialState === 'running' ? loadedKey : null
+  const fn = async (input: string | URL | globalThis.Request, _init?: RequestInit): Promise<Response> => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+
+    if (url.includes('/api/v1/status')) {
+      const body =
+        runningKey !== null
+          ? { engine: { state: 'running' }, model: { key: runningKey, name: runningKey } }
+          : { engine: { state: 'idle' }, model: null }
+      return { ok: true, status: 200, json: async () => body } as Response
+    }
+
+    if (url.includes('/api/v1/models')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ models: MODELS }),
+      } as Response
+    }
+
+    if (url.includes('/api/v1/engine/start')) {
+      const text = await _init?.body?.toString()
+      let key = loadedKey
+      try {
+        const parsed = JSON.parse(text ?? '{}') as { modelKey?: string }
+        if (parsed.modelKey) key = parsed.modelKey
+      } catch { /* ignore */ }
+      // Simulate async load: the very next status poll returns running.
+      runningKey = key
+      return { ok: true, status: 202, json: async () => ({ ok: true }) } as Response
+    }
+
+    return { ok: false, status: 404, json: async () => ({}) } as Response
+  }
+  return fn as unknown as typeof fetch
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+test('launchCli already-loaded model: spawns without calling engine/start', async () => {
+  const { calls, fn } = makeSpawn()
+  const unsilence = silenceOutput()
+  try {
+    const code = await launchCli(
+      'claude', 6996, [], fn,
+      undefined, // no --model flag
+      makeFetch('running', MODELS[0].key),
+    )
+    assert.equal(code, 0)
+    assert.equal(calls.length, 1, 'spawn should be called once')
+  } finally {
+    unsilence()
+  }
+})
+
+test('launchCli --model exact key: loads matching model and launches', async () => {
+  const { calls, fn } = makeSpawn()
+  const unsilence = silenceOutput()
+  try {
+    const code = await launchCli(
+      'claude', 6996, [], fn,
+      'llama-3-70b', // exact key of second model
+      makeFetch('idle'),
+    )
+    assert.equal(code, 0)
+    assert.equal(calls.length, 1)
+    // The model name passed as ANTHROPIC_MODEL should correspond to the loaded key.
+    assert.equal(calls[0].env['ANTHROPIC_MODEL'], 'llama-3-70b')
+  } finally {
+    unsilence()
+  }
+})
+
+test('launchCli --model exact name: resolves by name and launches', async () => {
+  const { calls, fn } = makeSpawn()
+  const unsilence = silenceOutput()
+  try {
+    const code = await launchCli(
+      'claude', 6996, [], fn,
+      'Llama 3 70B', // exact name of second model
+      makeFetch('idle'),
+    )
+    assert.equal(code, 0)
+    assert.equal(calls.length, 1)
+  } finally {
+    unsilence()
+  }
+})
+
+test('launchCli --model partial case-insensitive name: resolves and launches', async () => {
+  const { calls, fn } = makeSpawn()
+  const unsilence = silenceOutput()
+  try {
+    const code = await launchCli(
+      'claude', 6996, [], fn,
+      'qwen3', // partial, case-insensitive match of "Qwen3 8B"
+      makeFetch('idle'),
+    )
+    assert.equal(code, 0)
+    assert.equal(calls.length, 1)
+  } finally {
+    unsilence()
+  }
+})
+
+test('launchCli --model not found: prints error listing models, returns 1', async () => {
+  const { fn } = makeSpawn()
+  let stderrOutput = ''
+  const origWrite = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((s: string) => { stderrOutput += s; return true }) as typeof process.stderr.write
+  const origOut = process.stdout.write.bind(process.stdout)
+  process.stdout.write = (() => true) as typeof process.stdout.write
+  try {
+    const code = await launchCli(
+      'claude', 6996, [], fn,
+      'nonexistent-model-xyz',
+      makeFetch('idle'),
+    )
+    assert.equal(code, 1)
+    assert.match(stderrOutput, /not found/i)
+    assert.match(stderrOutput, /qwen3-8b/)
+  } finally {
+    process.stderr.write = origWrite
+    process.stdout.write = origOut
+  }
+})
+
+test('launchCli auto-load when no model loaded: loads first model and launches', async () => {
+  const { calls, fn } = makeSpawn()
+  const unsilence = silenceOutput()
+  try {
+    const code = await launchCli(
+      'claude', 6996, [], fn,
+      undefined, // no --model
+      makeFetch('idle'),
+    )
+    assert.equal(code, 0)
+    assert.equal(calls.length, 1, 'spawn should be called once after auto-load')
+  } finally {
+    unsilence()
+  }
+})
+
+test('launchCli auto-load with empty library: returns 1 with friendly message', async () => {
+  const { fn } = makeSpawn()
+  let stderrOutput = ''
+  const origWrite = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((s: string) => { stderrOutput += s; return true }) as typeof process.stderr.write
+  const origOut = process.stdout.write.bind(process.stdout)
+  process.stdout.write = (() => true) as typeof process.stdout.write
+
+  const emptyFetch: typeof fetch = (async (input: string | URL | globalThis.Request) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as globalThis.Request).url
+    if (url.includes('/api/v1/status')) {
+      return { ok: true, status: 200, json: async () => ({ engine: { state: 'idle' }, model: null }) } as Response
+    }
+    if (url.includes('/api/v1/models')) {
+      return { ok: true, status: 200, json: async () => ({ models: [] }) } as Response
+    }
+    return { ok: false, status: 404, json: async () => ({}) } as Response
+  }) as unknown as typeof fetch
+
+  try {
+    const code = await launchCli('claude', 6996, [], fn, undefined, emptyFetch)
+    assert.equal(code, 1)
+    assert.match(stderrOutput, /no model is loaded and no models are in the library/i)
+  } finally {
+    process.stderr.write = origWrite
+    process.stdout.write = origOut
+  }
+})
+
+test('launchCli --model already loaded with same key: skips load and launches', async () => {
+  const { calls, fn } = makeSpawn()
+  const unsilence = silenceOutput()
+
+  // Track engine/start calls
+  let startCalls = 0
+  const trackingFetch: typeof fetch = (async (input: string | URL | globalThis.Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as globalThis.Request).url
+    if (url.includes('/api/v1/engine/start')) {
+      startCalls++
+    }
+    return makeFetch('running', MODELS[0].key)(input, init)
+  }) as unknown as typeof fetch
+
+  try {
+    const code = await launchCli(
+      'claude', 6996, [], fn,
+      MODELS[0].key, // --model same as currently loaded
+      trackingFetch,
+    )
+    assert.equal(code, 0)
+    assert.equal(startCalls, 0, 'engine/start should NOT be called when model already loaded')
+    assert.equal(calls.length, 1)
+  } finally {
+    unsilence()
+  }
+})
