@@ -864,6 +864,8 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
     ttftMs,
     totalMs,
     thinkMs,
+    // Full context occupancy: cache-reused prompt tokens still sit in the KV cache / context
+    // window (they're skipped only for recomputation), so they must stay counted here.
     ctxUsed: (finalUsage.prompt_tokens ?? 0) + (finalUsage.completion_tokens ?? 0),
     ctxMax,
     model: ms.model?.name ?? '',
