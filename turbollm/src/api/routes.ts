@@ -89,6 +89,9 @@ export function registerApi(app: Hono, d: Deps): void {
       version: d.version,
       engine,
       model,
+      // Last model the user loaded (config-tracked) — lets `turbollm launch` auto-load the
+      // true last-used model instead of guessing the first library entry (F-034).
+      lastLoaded: d.store.snapshot().lastLoaded,
       engineStats,
       liveGeneration,
       // Auto-tune runner state (spec 09 §1): real progress while a sweep runs, then
@@ -1791,7 +1794,13 @@ function overlayModel(e: ModelEntry, d: Deps, lastTpsMap?: Map<string, number>) 
   const loadedKey = ms.state === 'running' ? ms.model?.key : undefined
   const snap = d.store.snapshot()
   const profiles = snap.modelProfiles
-  const loaded = loadedKey === e.path || loadedKey === e.key
+  const loadedInPrimary = loadedKey === e.path || loadedKey === e.key
+  // F-033: a model loaded via gateway auto-swap (keepN > 1) lives in a separate Manager
+  // in the keep-N pool, invisible to the primary manager's status() above. Consult the
+  // router's pool-wide loaded set too — matching by both key and path (mirroring the
+  // router's keysMatch) — so gateway-loaded models show as loaded on the Models page.
+  const poolKeys = d.modelRouter.loadedModelKeys()
+  const loaded = loadedInPrimary || poolKeys.has(e.key) || poolKeys.has(e.path)
   const lastTps = (lastTpsMap ?? d.db.lastGenTpsByModel()).get(e.key) ?? null
   // Best-effort live: only when this model is loaded AND a recent gen t/s exists.
   const liveTps = loaded && lastTps !== null ? lastTps : null

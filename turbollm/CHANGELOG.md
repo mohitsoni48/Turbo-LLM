@@ -25,6 +25,28 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
+## [1.4.0] - 2026-06-23
+
+**Hygiene release — the small gaps that made the tool feel unfinished: stop the daemon from the CLI, launch Claude Code without pre-loading a model, see gateway-loaded models as loaded, and import chats from ChatGPT/Claude JSON.**
+
+### Added
+- **`turbollm --stop`.** Gracefully stop a running daemon from any terminal (reads a pidfile
+  at `~/.turbollm/daemon.pid`). Unix sends SIGTERM then escalates to SIGKILL; Windows uses
+  `taskkill /T /F`. Before killing it confirms a TurboLLM daemon is actually answering on the
+  recorded port, so a stale pidfile whose PID the OS reused is never mistaken for the daemon.
+- **`turbollm launch claude --model <key|name>`.** Load a specific model, then launch Claude
+  Code against it. Resolves by exact key, exact name, or partial/case-insensitive name.
+- **`turbollm launch claude` auto-loads a model** when none is running — the last-used model
+  if known, otherwise the first in your library — so you no longer have to load one first.
+- **Import chats from OpenAI-format JSON.** The chat importer now also accepts a standard
+  `[{role, content}]` array (or `{messages: [...]}`) exported from ChatGPT, Claude, LM Studio,
+  etc., auto-detecting it alongside the existing `.turbollm-chat.json` format.
+
+### Fixed
+- **Models loaded by the gateway now show as loaded** on the Models page. With keep-N > 1 a
+  model auto-swapped in by a client lived in a separate pool slot that the Models page didn't
+  consult, so it appeared unloaded; the page now reflects the whole keep-N pool.
+
 ## [1.3.2] - 2026-06-22
 
 **TurboQuant now installs on macOS end-to-end — the Gatekeeper quarantine block, the per-platform release scan, and the Metal first-run timeout are all fixed — plus a Linux build.**
