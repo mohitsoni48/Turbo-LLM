@@ -565,14 +565,21 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
         reqBody.reasoning_budget = 0
         reqBody.chat_template_kwargs = { enable_thinking: false }
       }
-      // Attach tools only when the engine kind supports them (llama.cpp + TurboQuant).
-      // MLX/vLLM passthrough is fine too — they ignore unknown fields gracefully.
-      if (toolDefs.length > 0) reqBody.tools = toolDefs
+      // Attach tools only to engines whose OpenAI server accepts a `tools` array as
+      // passthrough. vLLM is strict: a `tools` array (which defaults tool_choice to
+      // "auto") is REJECTED with HTTP 400 — "auto tool choice requires
+      // --enable-auto-tool-choice and --tool-call-parser to be set" — unless the
+      // server was launched with those flags (which we don't, and no built-in parser
+      // matches Gemma's tool format). Sending tools there breaks ALL vLLM chat, so we
+      // skip them. llama.cpp/forks accept them; mlx-lm ignores them harmlessly.
+      const toolsSupported = (d.registry.active()?.kind ?? '') !== 'vllm' && toolDefs.length > 0
+      if (toolsSupported) reqBody.tools = toolDefs
       // Force web_search on the first two iterations when the conversation has a
       // force_web_search policy (e.g. Research persona). This guarantees at least
       // two distinct searches before the model composes its answer. Iteration 3+
       // use "auto" so the model can continue searching or finish as it sees fit.
       if (
+        toolsSupported &&
         conv.toolPolicy === 'force_web_search' &&
         toolIter <= 2 &&
         toolDefs.some((t) => t.function.name === 'web_search')

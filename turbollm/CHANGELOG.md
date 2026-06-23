@@ -25,6 +25,25 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
+## [1.4.2] - 2026-06-23
+
+**Bugfix — vLLM (safetensors) models now load and chat correctly.** Three issues kept vLLM
+models from working: chat failed outright, the model card mislabeled them as MLX, and the
+context-length control was locked.
+
+### Fixed
+- **Chat on vLLM no longer fails with "Engine returned 400".** The chat path attached tool
+  definitions (web search, run code, …) to every engine, but vLLM rejects a `tools` array
+  unless it was launched with `--enable-auto-tool-choice` and a `--tool-call-parser`, so every
+  vLLM chat turn 400'd. Tools are now sent only to engines that accept them (the llama.cpp
+  family); vLLM chat works. Tool-calling on vLLM remains unsupported for now.
+- **vLLM/safetensors models are classified correctly.** Compressed-tensors checkpoints were
+  mislabeled as MLX `fp16`; the quantization is now read from `quantization_config` (e.g.
+  `w4a16`), so the model card shows the real quant instead of "MLX".
+- **The vLLM "Max model length" control is settable again.** Multimodal configs nest
+  `max_position_embeddings` under `text_config`; the scanner now reads it, so a model's native
+  context length is no longer reported as `0` (which had clamped the max-model-len input to 0).
+
 ## [1.4.1] - 2026-06-23
 
 **Maintenance — brand-name consistency.** The GitHub repository was renamed `Turbo-LLM` →
