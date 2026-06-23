@@ -1,17 +1,17 @@
 {
   "name": "turbollm",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "TurboLLM — local LLM platform: run any inference engine auto-tuned to your GPU, with a web UI and OpenAI/Anthropic-compatible API. Point Claude Code at your own machine in one command.",
   "license": "FSL-1.1-ALv2",
   "author": "Mohit Soni",
-  "homepage": "https://github.com/mohitsoni48/Turbo-LLM#readme",
+  "homepage": "https://github.com/mohitsoni48/TurboLLM#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mohitsoni48/Turbo-LLM.git",
+    "url": "git+https://github.com/mohitsoni48/TurboLLM.git",
     "directory": "turbollm"
   },
   "bugs": {
-    "url": "https://github.com/mohitsoni48/Turbo-LLM/issues"
+    "url": "https://github.com/mohitsoni48/TurboLLM/issues"
   },
   "keywords": [
     "llm",

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/turbollm/web/public/brand/turbollm-icon-512.jpeg?v=2" width="92" height="92" alt="TurboLLM" />
+  <img src="https://raw.githubusercontent.com/mohitsoni48/TurboLLM/main/turbollm/web/public/brand/turbollm-icon-512.jpeg?v=2" width="92" height="92" alt="TurboLLM" />
 </p>
 
 <h1 align="center">TurboLLM</h1>
@@ -30,7 +30,7 @@ API any tool can talk to. TurboLLM is the **performance & bleeding-edge layer fo
 LLMs** — built for people who today hand-compile forks and hunt forums for the right flags.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/mohitsoni48/Turbo-LLM/main/assets/how-it-works.svg?v=2" width="860" alt="How TurboLLM works: clients -> one lightweight daemon -> any engine on your GPU" />
+  <img src="https://raw.githubusercontent.com/mohitsoni48/TurboLLM/main/assets/how-it-works.svg?v=2" width="860" alt="How TurboLLM works: clients -> one lightweight daemon -> any engine on your GPU" />
 </p>
 
 ---
@@ -469,6 +469,6 @@ shadcn/ui frontend. One TypeScript codebase, shipped as an npm package.
 Source-available under the **Functional Source License 1.1 (Apache-2.0 future grant)** — SPDX
 **`FSL-1.1-ALv2`**. Free for personal use, internal business use, education, and research; the
 only restriction is shipping a competing product. Each release converts to Apache-2.0 two
-years after it's published. Full text: [LICENSE.md](https://github.com/mohitsoni48/Turbo-LLM/blob/main/turbollm/LICENSE.md).
+years after it's published. Full text: [LICENSE.md](https://github.com/mohitsoni48/TurboLLM/blob/main/turbollm/LICENSE.md).
 
 <p align="center"><sub>Built for people who refuse to wait for the mainstream to bless the fast path. ⚡</sub></p>
