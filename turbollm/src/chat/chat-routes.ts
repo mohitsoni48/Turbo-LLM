@@ -8,7 +8,7 @@ import { engineModelAlias } from '../engines/compat'
 import { feedChunk, flushState, initParseState } from './parser'
 import { needsExtraPass } from './think-utils'
 import { getSysInfo } from '../sysinfo/sysinfo'
-import type { ClaimVerdict, MessageStats, ResearchMeta, ResearchSource, ToolCallRecord } from './db'
+import type { ClaimVerdict, ConversationStore, MessageStats, ResearchMeta, ResearchSource, ToolCallRecord } from './db'
 import { checkReply } from '../tools/research-referee.js'
 import { buildSnapshot } from './chat-export'
 import type { ExportFormat } from './chat-export'
@@ -302,60 +302,140 @@ export function registerChatRoutes(app: Hono, d: Deps): void {
     return c.json({ url, onlyLocal })
   })
 
-  // ── F-024: import chat ────────────────────────────────────────────────────
+  // ── F-024 / F-036: import chat ────────────────────────────────────────────
   // POST /api/v1/conversations/import   (application/json)
-  // Accepts a .turbollm-chat.json payload, creates a new conversation with the
-  // imported messages pre-seeded as history, and returns { id }.
+  // Auto-detects the payload shape and routes to the correct import path:
+  //   • Array                          → OpenAI bare-array format   (F-036)
+  //   • Object with format=debug|export → proprietary .turbollm-chat.json (F-024)
+  //   • Object with messages but no format → OpenAI object format   (F-036)
+  // Returns { id } with 201 on success.
   app.post('/api/v1/conversations/import', async (c) => {
-    let payload: Record<string, unknown>
+    let raw: unknown
     try {
-      payload = await c.req.json() as Record<string, unknown>
+      raw = await c.req.json()
     } catch {
       return err(c, 400, 'invalid_file', 'Body must be valid JSON.')
     }
 
-    // Validate required fields
-    if (!payload.format || (payload.format !== 'debug' && payload.format !== 'export')) {
-      return err(c, 400, 'invalid_file', 'Missing or invalid "format" field. Expected a .turbollm-chat.json file.')
-    }
-    if (!payload.messages || !Array.isArray(payload.messages)) {
-      return err(c, 400, 'invalid_file', 'Missing "messages" array.')
-    }
-    if (typeof payload.chat_id !== 'string') {
-      return err(c, 400, 'invalid_file', 'Missing "chat_id" field.')
-    }
-    if (typeof payload.title !== 'string') {
-      return err(c, 400, 'invalid_file', 'Missing "title" field.')
+    // ── Route: OpenAI bare-array format ──────────────────────────────────────
+    if (Array.isArray(raw)) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return importOpenAiMessages(c, db, raw as Array<Record<string, unknown>>, undefined, undefined) as any
     }
 
-    const title = (payload.title as string) || 'Imported chat'
-    const modelKey = typeof payload.model === 'string' ? payload.model : ''
-    const personaId = typeof payload.persona === 'string' ? payload.persona : 'default'
-    const toolPolicy = personaId === 'research' ? 'force_web_search' : undefined
-
-    // Create the new conversation
-    const newConv = db.createConversation({ title, modelKey, toolPolicy })
-
-    // Insert messages verbatim, preserving original ts
-    const messages = payload.messages as Array<Record<string, unknown>>
-    for (const m of messages) {
-      const role = m.role as string
-      if (role !== 'user' && role !== 'assistant') continue // skip unknown roles
-      const content = typeof m.content === 'string' ? m.content : ''
-      const toolCalls = Array.isArray(m.tool_calls) ? m.tool_calls as ToolCallRecord[] : undefined
-      // Preserve the original timestamp by using a custom createdAt override.
-      // addMessage does not accept createdAt directly; we use the returned ID to
-      // back-patch it via a raw approach — but since db.addMessage sets created_at
-      // to now(), we accept that imported messages get the current time for new rows.
-      // The original ts is preserved in the snapshot but not round-tripped into the DB
-      // (the spec says "preserve original ts" for the export output, not the DB row).
-      db.addMessage(newConv.id, role as 'user' | 'assistant', content, {
-        toolCalls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
-      })
+    if (typeof raw !== 'object' || raw === null) {
+      return err(c, 400, 'invalid_file', 'Body must be a JSON array or object.')
     }
 
-    return c.json({ id: newConv.id }, 201)
+    const payload = raw as Record<string, unknown>
+
+    // ── Route: proprietary .turbollm-chat.json (F-024) ──────────────────────
+    if (payload.format === 'debug' || payload.format === 'export') {
+      if (!Array.isArray(payload.messages)) {
+        return err(c, 400, 'invalid_file', 'Missing "messages" array.')
+      }
+      if (typeof payload.chat_id !== 'string') {
+        return err(c, 400, 'invalid_file', 'Missing "chat_id" field.')
+      }
+      if (typeof payload.title !== 'string') {
+        return err(c, 400, 'invalid_file', 'Missing "title" field.')
+      }
+
+      const title = (payload.title as string) || 'Imported chat'
+      const modelKey = typeof payload.model === 'string' ? payload.model : ''
+      const personaId = typeof payload.persona === 'string' ? payload.persona : 'default'
+      const toolPolicy = personaId === 'research' ? 'force_web_search' : undefined
+
+      const newConv = db.createConversation({ title, modelKey, toolPolicy })
+
+      const messages = payload.messages as Array<Record<string, unknown>>
+      for (const m of messages) {
+        const role = m.role as string
+        if (role !== 'user' && role !== 'assistant') continue
+        const content = typeof m.content === 'string' ? m.content : ''
+        const toolCalls = Array.isArray(m.tool_calls) ? m.tool_calls as ToolCallRecord[] : undefined
+        db.addMessage(newConv.id, role as 'user' | 'assistant', content, {
+          toolCalls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
+        })
+      }
+
+      return c.json({ id: newConv.id }, 201)
+    }
+
+    // ── Route: OpenAI object format (has messages, no format field) (F-036) ──
+    if (Array.isArray(payload.messages)) {
+      const titleField = typeof payload.title === 'string' ? payload.title : undefined
+      const modelField = typeof payload.model === 'string' ? payload.model : undefined
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return importOpenAiMessages(c, db, payload.messages as Array<Record<string, unknown>>, titleField, modelField) as any
+    }
+
+    return err(c, 400, 'invalid_file', 'Unrecognised format. Expected a .turbollm-chat.json file or an OpenAI-format JSON (array or object with "messages" array).')
   })
+}
+
+// ── F-036: OpenAI-format import helper ───────────────────────────────────────
+// Shared by both the bare-array and object-with-messages paths.
+// system messages are skipped (TurboLLM has no system-role message rows).
+// Array content (OpenAI vision format) is coerced to a plain string by joining text parts.
+
+function coerceContent(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    // OpenAI vision format: [{ type: 'text', text: '...' }, { type: 'image_url', ... }]
+    return content
+      .filter((p): p is Record<string, unknown> => typeof p === 'object' && p !== null)
+      .map((p) => (typeof p.text === 'string' ? p.text : ''))
+      .filter(Boolean)
+      .join('\n')
+  }
+  return String(content ?? '')
+}
+
+function deriveTitle(
+  titleField: string | undefined,
+  messages: Array<Record<string, unknown>>,
+): string {
+  if (titleField?.trim()) return titleField.trim().slice(0, 60)
+  // Derive from first user (or any meaningful) message
+  for (const m of messages) {
+    const role = m.role as string
+    if (role !== 'user' && role !== 'assistant') continue
+    const text = coerceContent(m.content).trim()
+    if (text) {
+      const truncated = text.replace(/\s+/g, ' ').slice(0, 60)
+      return truncated
+    }
+  }
+  return 'Imported chat'
+}
+
+function importOpenAiMessages(
+  c: Context,
+  db: ConversationStore,
+  messages: Array<Record<string, unknown>>,
+  titleField: string | undefined,
+  modelField: string | undefined,
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+): any {
+  // Filter to only user/assistant rows (skip system and unknown)
+  const usable = messages.filter((m) => m.role === 'user' || m.role === 'assistant')
+  if (usable.length === 0) {
+    return err(c, 400, 'invalid_file', 'No usable messages found (must have at least one user or assistant message).')
+  }
+
+  const title = deriveTitle(titleField, messages)
+  const modelKey = modelField ?? ''
+
+  const newConv = db.createConversation({ title, modelKey })
+
+  for (const m of usable) {
+    const role = m.role as 'user' | 'assistant'
+    const content = coerceContent(m.content)
+    db.addMessage(newConv.id, role, content)
+  }
+
+  return c.json({ id: newConv.id }, 201)
 }
 
 // ── LAN IP helper (F-023) ──────────────────────────────────────────────────────

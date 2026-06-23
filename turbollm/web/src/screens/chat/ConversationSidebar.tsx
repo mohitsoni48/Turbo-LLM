@@ -69,7 +69,7 @@ export function ConversationSidebar({
           <MessageSquarePlus size={15} />
         </Button>
         {onImport && (
-          <Button size="icon" variant="ghost" onClick={onImport} title="Import chat" className="h-7 w-7">
+          <Button size="icon" variant="ghost" onClick={onImport} title="Import chat (.turbollm-chat.json or OpenAI JSON)" className="h-7 w-7">
             <Download size={15} />
           </Button>
         )}
@@ -99,7 +99,7 @@ export function ConversationSidebar({
           <MessageSquarePlus size={15} />
         </Button>
         {onImport && (
-          <Button size="icon" variant="ghost" onClick={onImport} title="Import chat" className="h-7 w-7 shrink-0">
+          <Button size="icon" variant="ghost" onClick={onImport} title="Import chat (.turbollm-chat.json or OpenAI JSON)" className="h-7 w-7 shrink-0">
             <Download size={15} />
           </Button>
         )}

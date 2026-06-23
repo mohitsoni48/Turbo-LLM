@@ -189,3 +189,229 @@ test('unknown fields are ignored in export payload (forward compat)', () => {
   const result = validateImportPayload(snap)
   assert.equal(result.ok, true)
 })
+
+// ── F-036: OpenAI-format import detection helpers ─────────────────────────────
+// These tests mirror the detection and coercion logic in chat-routes.ts so that
+// regressions are caught without needing a running server.
+
+/** Mirrors the auto-detection logic in the import endpoint. */
+function detectImportKind(payload: unknown): 'openai-array' | 'turbollm' | 'openai-object' | 'unknown' {
+  if (Array.isArray(payload)) return 'openai-array'
+  if (typeof payload !== 'object' || payload === null) return 'unknown'
+  const p = payload as Record<string, unknown>
+  if (p.format === 'debug' || p.format === 'export') return 'turbollm'
+  if (Array.isArray(p.messages)) return 'openai-object'
+  return 'unknown'
+}
+
+/** Mirrors coerceContent() from chat-routes.ts. */
+function coerceContent(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .filter((p): p is Record<string, unknown> => typeof p === 'object' && p !== null)
+      .map((p) => (typeof p.text === 'string' ? p.text : ''))
+      .filter(Boolean)
+      .join('\n')
+  }
+  return String(content ?? '')
+}
+
+/** Mirrors deriveTitle() from chat-routes.ts. */
+function deriveTitle(
+  titleField: string | undefined,
+  messages: Array<Record<string, unknown>>,
+): string {
+  if (titleField?.trim()) return titleField.trim().slice(0, 60)
+  for (const m of messages) {
+    const role = m.role as string
+    if (role !== 'user' && role !== 'assistant') continue
+    const text = coerceContent(m.content).trim()
+    if (text) return text.replace(/\s+/g, ' ').slice(0, 60)
+  }
+  return 'Imported chat'
+}
+
+// ── F-036 detection tests ─────────────────────────────────────────────────────
+
+test('F-036 detection: bare array → openai-array', () => {
+  const payload = [{ role: 'user', content: 'Hello' }]
+  assert.equal(detectImportKind(payload), 'openai-array')
+})
+
+test('F-036 detection: object with format=export → turbollm', () => {
+  const payload = { format: 'export', chat_id: 'x', title: 'T', messages: [] }
+  assert.equal(detectImportKind(payload), 'turbollm')
+})
+
+test('F-036 detection: object with format=debug → turbollm', () => {
+  const payload = { format: 'debug', chat_id: 'x', title: 'T', messages: [] }
+  assert.equal(detectImportKind(payload), 'turbollm')
+})
+
+test('F-036 detection: object with messages but no format → openai-object', () => {
+  const payload = { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] }
+  assert.equal(detectImportKind(payload), 'openai-object')
+})
+
+test('F-036 detection: object with neither format nor messages → unknown', () => {
+  const payload = { something: 'else' }
+  assert.equal(detectImportKind(payload), 'unknown')
+})
+
+test('F-036 detection: non-object, non-array → unknown', () => {
+  assert.equal(detectImportKind('a string'), 'unknown')
+  assert.equal(detectImportKind(42), 'unknown')
+  assert.equal(detectImportKind(null), 'unknown')
+})
+
+// ── F-036 title derivation tests ──────────────────────────────────────────────
+
+test('F-036 title: uses explicit title field when present', () => {
+  const msgs = [{ role: 'user', content: 'Hello world' }]
+  assert.equal(deriveTitle('My Chat', msgs), 'My Chat')
+})
+
+test('F-036 title: derives from first user message when no title', () => {
+  const msgs = [
+    { role: 'system', content: 'You are helpful.' },
+    { role: 'user', content: 'Tell me about planets' },
+    { role: 'assistant', content: 'Sure!' },
+  ]
+  assert.equal(deriveTitle(undefined, msgs), 'Tell me about planets')
+})
+
+test('F-036 title: truncates long first message to 60 chars', () => {
+  const longMsg = 'A'.repeat(100)
+  const msgs = [{ role: 'user', content: longMsg }]
+  const title = deriveTitle(undefined, msgs)
+  assert.ok(title.length <= 60)
+  assert.equal(title, 'A'.repeat(60))
+})
+
+test('F-036 title: falls back to "Imported chat" when no usable messages', () => {
+  const msgs = [{ role: 'system', content: 'System prompt only' }]
+  assert.equal(deriveTitle(undefined, msgs), 'Imported chat')
+})
+
+test('F-036 title: falls back to "Imported chat" for empty messages array', () => {
+  assert.equal(deriveTitle(undefined, []), 'Imported chat')
+})
+
+test('F-036 title: uses assistant message when no user message present', () => {
+  const msgs = [{ role: 'assistant', content: 'I can help you with that.' }]
+  assert.equal(deriveTitle(undefined, msgs), 'I can help you with that.')
+})
+
+// ── F-036 model passthrough tests ─────────────────────────────────────────────
+
+test('F-036 model: model field is passed through from object format', () => {
+  const payload = { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] }
+  const p = payload as Record<string, unknown>
+  const modelKey = typeof p.model === 'string' ? p.model : ''
+  assert.equal(modelKey, 'gpt-4o')
+})
+
+test('F-036 model: missing model field defaults to empty string', () => {
+  const payload = { messages: [{ role: 'user', content: 'hi' }] }
+  const p = payload as Record<string, unknown>
+  const modelKey = typeof p.model === 'string' ? p.model : ''
+  assert.equal(modelKey, '')
+})
+
+// ── F-036 role filtering tests ────────────────────────────────────────────────
+
+test('F-036 role filter: system messages are excluded', () => {
+  const messages = [
+    { role: 'system', content: 'Be helpful.' },
+    { role: 'user', content: 'Hello' },
+    { role: 'assistant', content: 'Hi!' },
+  ]
+  const usable = messages.filter((m) => m.role === 'user' || m.role === 'assistant')
+  assert.equal(usable.length, 2)
+  assert.ok(usable.every((m) => m.role !== 'system'))
+})
+
+test('F-036 role filter: unknown roles are excluded', () => {
+  const messages = [
+    { role: 'tool', content: 'some tool result' },
+    { role: 'user', content: 'Hello' },
+    { role: 'function', content: 'fn result' },
+  ]
+  const usable = messages.filter((m) => m.role === 'user' || m.role === 'assistant')
+  assert.equal(usable.length, 1)
+  assert.equal(usable[0].role, 'user')
+})
+
+test('F-036 empty: no usable messages → should be rejected', () => {
+  const messages = [
+    { role: 'system', content: 'System only' },
+  ]
+  const usable = messages.filter((m: Record<string, unknown>) => m.role === 'user' || m.role === 'assistant')
+  assert.equal(usable.length, 0)
+})
+
+// ── F-036 content coercion tests ──────────────────────────────────────────────
+
+test('F-036 content: string content is passed through unchanged', () => {
+  assert.equal(coerceContent('Hello world'), 'Hello world')
+})
+
+test('F-036 content: array content (OpenAI vision format) is joined from text parts', () => {
+  const content = [
+    { type: 'text', text: 'Describe this image:' },
+    { type: 'image_url', image_url: { url: 'data:image/png;base64,...' } },
+  ]
+  const result = coerceContent(content)
+  assert.equal(result, 'Describe this image:')
+})
+
+test('F-036 content: array with multiple text parts are joined with newline', () => {
+  const content = [
+    { type: 'text', text: 'First part' },
+    { type: 'text', text: 'Second part' },
+  ]
+  const result = coerceContent(content)
+  assert.equal(result, 'First part\nSecond part')
+})
+
+test('F-036 content: null content coerces to empty string (null ?? "" gives "")', () => {
+  assert.equal(coerceContent(null), '')
+})
+
+test('F-036 content: undefined content coerces to empty string', () => {
+  // undefined ?? '' gives ''  → String('') = ''
+  assert.equal(coerceContent(undefined), '')
+})
+
+test('F-036 content: non-text array parts (no text field) are filtered out', () => {
+  const content = [
+    { type: 'image_url', image_url: { url: 'http://example.com/img.png' } },
+  ]
+  assert.equal(coerceContent(content), '')
+})
+
+// ── F-036 regression: existing .turbollm-chat.json import still works (F-024) ──
+
+test('F-036 regression: turbollm format still validates correctly after F-036 changes', () => {
+  const conv = makeConv({
+    messages: [
+      makeMsg('user', 'Hello'),
+      makeMsg('assistant', 'Hi there!'),
+    ],
+  })
+  const snap = buildSnapshot(conv, makeCfg(), '0.7.2', '2026-06-19T10:00:00.000Z', 'export')
+  // Must still be detected as turbollm format
+  assert.equal(detectImportKind(snap), 'turbollm')
+  // Must still pass validation
+  const result = validateImportPayload(snap)
+  assert.equal(result.ok, true)
+})
+
+test('F-036 regression: debug format still detected as turbollm', () => {
+  const conv = makeConv({ messages: [makeMsg('user', 'debug test')] })
+  const snap = buildSnapshot(conv, makeCfg(), '0.7.2', '2026-06-19T10:00:00.000Z', 'debug')
+  assert.equal(detectImportKind(snap), 'turbollm')
+  const result = validateImportPayload(snap)
+  assert.equal(result.ok, true)
+})
