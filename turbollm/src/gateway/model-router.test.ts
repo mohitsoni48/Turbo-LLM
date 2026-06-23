@@ -44,7 +44,10 @@ function router(
   store: ConfigStore,
   slots: PoolSlotShape[] = [],
 ): ModelRouter {
-  const r = new ModelRouter(store, {} as never, primary, {} as never, undefined)
+  // Scanner stub: loadedModelKeys() calls scanner.get(key)?.path to also index by path;
+  // returning undefined means "no path" so the set holds keys only (sufficient here).
+  const scanner = { get: () => undefined } as never
+  const r = new ModelRouter(store, {} as never, primary, scanner, undefined)
   const map = new Map<string, PoolSlotShape>()
   for (const s of slots) map.set(s.modelKey, s)
   ;(r as unknown as { extraSlots: Map<string, PoolSlotShape> }).extraSlots = map

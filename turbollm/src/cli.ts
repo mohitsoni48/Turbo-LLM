@@ -302,12 +302,12 @@ function listen(attempt = 0): void {
     // Keep the legacy one-liner for log parsers that key on it.
     process.stdout.write(`TurboLLM ${version} listening on http://${displayHost}:${info.port}\n`)
 
-    // Write pidfile so `turbollm --stop` can find and stop this process (F-035).
-    // Only write on the initial bind (not during an in-place rebind) so the pidfile
-    // always reflects the original PID and the current port. Best-effort.
-    if (!rebinding) {
-      try { writePidfile(store.dir(), process.pid, info.port) } catch { /* best-effort */ }
-    }
+    // Write pidfile so `turbollm --stop` can find and stop this process (F-035). Written
+    // on every successful bind: the PID is constant, but an in-place rebind changes the
+    // port, so refreshing it keeps the stored port accurate (used by --stop's identity
+    // probe + the "stopped (port N)" message). `rebinding` is already reset to false above,
+    // so this runs for both the initial bind and a rebind. Best-effort.
+    try { writePidfile(store.dir(), process.pid, info.port) } catch { /* best-effort */ }
   })
   ;(s as unknown as { on?: (ev: 'error', cb: (e: NodeJS.ErrnoException) => void) => void }).on?.(
     'error',

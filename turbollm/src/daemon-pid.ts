@@ -54,6 +54,11 @@ export interface StopHooks {
   kill: (pid: number, signal: NodeJS.Signals) => void
   /** Run taskkill on Windows. */
   taskkill: (pid: number) => void
+  /** Confirm a TurboLLM daemon is actually answering on `port` — the identity check
+   *  that guards against killing a recycled PID (stale pidfile whose PID the OS reused). */
+  confirmTurbollm: (port: number) => Promise<boolean>
+  /** Platform — injectable so the Windows vs Unix branch is testable on any OS. */
+  platform: NodeJS.Platform
 }
 
 /** Default production hooks. */
@@ -75,6 +80,20 @@ const defaultHooks: StopHooks = {
     // engine subprocess will be freed by the startup orphan-reaper on the next launch.
     execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
   },
+  async confirmTurbollm(port) {
+    // Probe the recorded port; a TurboLLM daemon answers /api/v1/status with a JSON
+    // body carrying `version` + `engine`. Anything else (refused, non-JSON, foreign
+    // app) → not ours. Loopback only; short timeout; never throws.
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/v1/status`, { signal: AbortSignal.timeout(2000) })
+      if (!res.ok) return false
+      const body = (await res.json()) as unknown
+      return typeof body === 'object' && body !== null && 'version' in body && 'engine' in body
+    } catch {
+      return false
+    }
+  },
+  platform: process.platform,
 }
 
 /** Poll until `processExists(pid)` returns false or `timeoutMs` elapses (~100 ms steps). */
@@ -125,8 +144,25 @@ export async function stopDaemon(dir: string, hooks: StopHooks = defaultHooks): 
     return { stopped: false, message: 'No running TurboLLM daemon found.' }
   }
 
+  // Identity check (guards against a recycled PID): the pidfile is removed on every
+  // clean-exit path, so a stale pidfile only survives a hard kill — and if the OS then
+  // reassigns that PID to an unrelated process, blindly killing it would be a footgun
+  // (worse on Windows, where taskkill /T also kills the child tree). Confirm a TurboLLM
+  // daemon is actually answering on the recorded port before we kill the PID. If it
+  // isn't, refuse and hand the user the manual command rather than risk the wrong process.
+  if (!(await hooks.confirmTurbollm(port))) {
+    const manual = hooks.platform === 'win32' ? `taskkill /PID ${pid} /T /F` : `kill -9 ${pid}`
+    return {
+      stopped: false,
+      message:
+        `Found a pidfile (pid ${pid}, port ${port}), but no TurboLLM daemon is responding there — ` +
+        `it may be stale or the PID was reused by another process. Not killing it automatically.\n` +
+        `If you're sure it's TurboLLM, stop it manually: ${manual}`,
+    }
+  }
+
   try {
-    if (process.platform === 'win32') {
+    if (hooks.platform === 'win32') {
       hooks.taskkill(pid)
       // taskkill is synchronous and force-kills, so by the time it returns the
       // process should be gone. Give it a short grace window just in case.

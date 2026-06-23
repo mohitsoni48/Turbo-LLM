@@ -107,10 +107,17 @@ export class ModelRouter {
   loadedModelKeys(): Set<string> {
     const isAlive = (s: string) => s === 'running' || s === 'starting'
     const keys = new Set<string>()
+    const add = (key: string) => {
+      keys.add(key)
+      // Also index by on-disk path so overlayModel can match a model by either its key
+      // or its path (mirrors keysMatch, which the delete-guard / route paths use).
+      const path = this.scanner.get(key)?.path
+      if (path) keys.add(path)
+    }
     const ms = this.manager.status()
-    if (isAlive(ms.state) && ms.model) keys.add(ms.model.key)
+    if (isAlive(ms.state) && ms.model) add(ms.model.key)
     for (const slot of this.extraSlots.values()) {
-      if (isAlive(slot.manager.status().state)) keys.add(slot.modelKey)
+      if (isAlive(slot.manager.status().state)) add(slot.modelKey)
     }
     return keys
   }

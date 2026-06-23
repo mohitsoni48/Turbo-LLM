@@ -22,12 +22,19 @@ function makeTmpDir(): { dir: string; cleanup: () => void } {
 
 /** Fake StopHooks where the target process starts alive and we can flip it.
  *  Returns the same object for both reading state (`hooks.alive`, `hooks.taskkillCalled`)
- *  and satisfying the StopHooks interface, so mutations are visible on the returned ref. */
-function makeHooks(alive = true): StopHooks & { alive: boolean; signals: string[]; taskkillCalled: boolean } {
+ *  and satisfying the StopHooks interface, so mutations are visible on the returned ref.
+ *  `opts.confirm` controls the identity probe (default true = "it's TurboLLM"); `opts.platform`
+ *  selects the branch so the Windows path is exercisable on any OS. */
+function makeHooks(
+  alive = true,
+  opts: { confirm?: boolean; platform?: NodeJS.Platform } = {},
+): StopHooks & { alive: boolean; signals: string[]; taskkillCalled: boolean; confirmCalled: boolean } {
   const hooks = {
     alive,
     signals: [] as string[],
     taskkillCalled: false,
+    confirmCalled: false,
+    platform: opts.platform ?? process.platform,
     processExists(_pid: number) { return hooks.alive },
     kill(_pid: number, signal: NodeJS.Signals) {
       hooks.signals.push(signal)
@@ -37,6 +44,10 @@ function makeHooks(alive = true): StopHooks & { alive: boolean; signals: string[
     taskkill(_pid: number) {
       hooks.taskkillCalled = true
       hooks.alive = false
+    },
+    async confirmTurbollm(_port: number) {
+      hooks.confirmCalled = true
+      return opts.confirm ?? true
     },
   }
   return hooks
@@ -124,19 +135,17 @@ test('stopDaemon returns friendly message when pidfile exists but process is gon
   }
 })
 
-test('stopDaemon on Unix sends SIGTERM and reports success', async () => {
-  // Only run on non-Windows to test the Unix path directly.
-  if (process.platform === 'win32') return
-
+test('stopDaemon Unix branch sends SIGTERM and reports success (platform injected)', async () => {
   const { dir, cleanup } = makeTmpDir()
   try {
     writePidfile(dir, 42, 7000)
-    const hooks = makeHooks(true)
+    const hooks = makeHooks(true, { platform: 'linux' })
     const result = await stopDaemon(dir, hooks)
     assert.equal(result.stopped, true)
     assert.equal(result.port, 7000)
     assert.match(result.message, /TurboLLM daemon stopped/)
     assert.ok(hooks.signals.includes('SIGTERM'), 'SIGTERM should have been sent')
+    assert.equal(hooks.taskkillCalled, false, 'taskkill must not run on the Unix branch')
     // Pidfile should be removed
     assert.equal(readPidfile(dir), null)
   } finally {
@@ -144,35 +153,38 @@ test('stopDaemon on Unix sends SIGTERM and reports success', async () => {
   }
 })
 
-test('stopDaemon on Windows calls taskkill and reports success', async () => {
-  // Simulate the Windows code path regardless of actual platform by stubbing
-  // process.platform. We do this via a hook-level assertion — the Windows
-  // branch is selected by process.platform inside stopDaemon; so we patch it.
-  // Instead, we test the Windows branch by calling with a hook that asserts
-  // taskkill is invoked when the daemon is alive. We can only truly exercise
-  // the Windows branch on Windows, so guard the platform check.
-  if (process.platform !== 'win32') {
-    // On non-Windows, verify that the hooks.taskkill is NOT called (Unix path used).
-    const { dir, cleanup } = makeTmpDir()
-    try {
-      writePidfile(dir, 42, 7000)
-      const hooks = makeHooks(true)
-      await stopDaemon(dir, hooks)
-      assert.equal(hooks.taskkillCalled, false, 'taskkill should not be called on Unix')
-    } finally {
-      cleanup()
-    }
-    return
-  }
-
+test('stopDaemon Windows branch calls taskkill and reports success (platform injected)', async () => {
+  // platform:'win32' selects the Windows branch regardless of the host OS, so this
+  // covers the taskkill path even on a Linux CI runner.
   const { dir, cleanup } = makeTmpDir()
   try {
     writePidfile(dir, 42, 7000)
-    const hooks = makeHooks(true)
+    const hooks = makeHooks(true, { platform: 'win32' })
     const result = await stopDaemon(dir, hooks)
     assert.equal(result.stopped, true)
-    assert.equal(hooks.taskkillCalled, true, 'taskkill should be called on Windows')
+    assert.equal(hooks.taskkillCalled, true, 'taskkill should be called on the Windows branch')
+    assert.equal(hooks.signals.length, 0, 'no Unix signals on the Windows branch')
     assert.equal(readPidfile(dir), null)
+  } finally {
+    cleanup()
+  }
+})
+
+test('stopDaemon refuses to kill when the PID is alive but not a TurboLLM daemon (recycled PID)', async () => {
+  const { dir, cleanup } = makeTmpDir()
+  try {
+    writePidfile(dir, 42, 7000)
+    // Process exists, but the identity probe says it's NOT TurboLLM → must not kill.
+    const hooks = makeHooks(true, { confirm: false, platform: 'linux' })
+    const result = await stopDaemon(dir, hooks)
+    assert.equal(result.stopped, false)
+    assert.ok(hooks.confirmCalled, 'identity probe should have run')
+    assert.equal(hooks.signals.length, 0, 'must not send any kill signal')
+    assert.equal(hooks.taskkillCalled, false, 'must not taskkill')
+    assert.match(result.message, /not killing it automatically/i)
+    assert.match(result.message, /kill -9 42/, 'should hand the user the manual command')
+    // Pidfile is left intact — we did not confirm ownership, so we do not touch it.
+    assert.deepEqual(readPidfile(dir), { pid: 42, port: 7000 })
   } finally {
     cleanup()
   }
