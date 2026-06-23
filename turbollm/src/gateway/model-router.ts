@@ -21,6 +21,26 @@ interface PoolSlot {
   lastUsedMs: number
 }
 
+/** How often the KV-cache-TTL sweeper wakes up (F-032). The TTL itself is the config
+ *  value; this is just the polling granularity. unref()'d so it never holds the process
+ *  open. */
+const KV_TTL_SWEEP_INTERVAL_MS = 30_000
+
+/** Pure selection step for the KV-cache-TTL sweep (F-032), split out so it can be unit
+ *  tested with an injected clock and fake slots (no real timers / llama-server). Given the
+ *  alive extra pool slots and their last-used timestamps, returns the modelKeys whose idle
+ *  time has exceeded the TTL. The PRIMARY slot is intentionally excluded — the spec scopes
+ *  eviction to the keep-N pool and exempts the active model. A ttlMs <= 0 disables the sweep
+ *  (returns nothing). */
+export function selectKvTtlEvictions(
+  slots: { modelKey: string; lastUsedMs: number; alive: boolean }[],
+  ttlMs: number,
+  now: number,
+): string[] {
+  if (ttlMs <= 0) return []
+  return slots.filter((s) => s.alive && now - s.lastUsedMs > ttlMs).map((s) => s.modelKey)
+}
+
 /** Auto-swap gateway: resolves the `model` field in API requests and loads the
  *  requested model when it isn't already running. Supports a keep-N pool so
  *  frequently-used models can stay loaded simultaneously (VRAM permitting). */
@@ -39,7 +59,45 @@ export class ModelRouter {
     private manager: Manager,
     private scanner: Scanner,
     private comfy: ComfyGuard | undefined,
-  ) {}
+  ) {
+    // KV-cache-TTL sweeper (F-032). unref()'d so it never keeps the process alive; reads
+    // the TTL fresh each tick so a settings change takes effect without a restart. No-op
+    // for keepN === 1 (no pool to sweep) — handled inside sweepKvTtl.
+    setInterval(() => this.sweepKvTtl(Date.now()), KV_TTL_SWEEP_INTERVAL_MS).unref()
+  }
+
+  /** One KV-cache-TTL sweep tick (F-032). Selects (and returns) the keep-N pool slot keys
+   *  idle longer than `gateway.kvCacheTtlMs` — the slots whose KV cache would be evicted to
+   *  reclaim VRAM while keeping weights loaded. Returned (not just void) so a unit test can
+   *  drive it with an injected `now` and assert the selection without real timers.
+   *
+   *  ⚠️ HONEST SCOPE — the eviction itself is currently a NO-OP. Our architecture runs one
+   *  llama-server process per pool slot, with weights + KV in the SAME process. llama-server
+   *  pre-allocates the entire KV buffer at context creation (sized by --ctx-size × --parallel)
+   *  and never frees it for the life of the process: `POST /slots/{id}?action=erase` only
+   *  clears the KV *logically* (resets cell metadata so the slot can reuse them) and frees
+   *  ZERO VRAM — the llama.cpp source comments confirm "clearing a slot frees no reusable
+   *  room … their KV stays in VRAM". The only way to reclaim the KV VRAM is to destroy the
+   *  context, i.e. unload the weights — which the spec explicitly rejects (it would cost a
+   *  full reload, the very thing this feature exists to avoid). So we deliberately do NOT
+   *  call erase here (it would drop the warm prefix — forcing a re-prefill — for zero VRAM
+   *  gain). The selection + plumbing are wired so this becomes real the moment llama-server
+   *  grows a KV-only free; until then we just identify the idle slots and leave them as-is. */
+  sweepKvTtl(now: number): string[] {
+    const cfg = this.store.snapshot()
+    // Pure swap (keepN === 1) has no pool to evict toward — the single model is always
+    // the active one. Nothing to do.
+    if (Math.max(1, cfg.gateway.keepN) <= 1) return []
+    const slots = [...this.extraSlots.values()].map((s) => ({
+      modelKey: s.modelKey,
+      lastUsedMs: s.lastUsedMs,
+      alive: s.manager.status().state === 'running' || s.manager.status().state === 'starting',
+    }))
+    // Documented no-op for the actual reclaim (see above): we compute which idle pool slots
+    // WOULD be evicted but cannot free their KV VRAM without unloading weights, so we leave
+    // them loaded. When a real KV-only free exists, evict these keys here + refresh lastUsedMs.
+    return selectKvTtlEvictions(slots, cfg.gateway.kvCacheTtlMs, now)
+  }
 
   /** Route a request to the correct model target URL.
    *  - If autoSwap is off: returns whatever the primary manager has loaded.
@@ -96,6 +154,23 @@ export class ModelRouter {
     } finally {
       unlock()
     }
+  }
+
+  /** Every model key currently loaded (or loading) across the WHOLE pool — the primary
+   *  manager plus every alive extra slot (F-033). "Alive" = running OR starting, matching
+   *  the delete-guard's notion of "loaded" (routes.ts), so a model loaded via gateway
+   *  auto-swap into an extra slot is reported as loaded even though it isn't in the
+   *  primary manager. Used by overlayModel to mark gateway-loaded models loaded on the
+   *  Models page (they were previously invisible — only the primary manager was consulted). */
+  loadedModelKeys(): Set<string> {
+    const isAlive = (s: string) => s === 'running' || s === 'starting'
+    const keys = new Set<string>()
+    const ms = this.manager.status()
+    if (isAlive(ms.state) && ms.model) keys.add(ms.model.key)
+    for (const slot of this.extraSlots.values()) {
+      if (isAlive(slot.manager.status().state)) keys.add(slot.modelKey)
+    }
+    return keys
   }
 
   // ── internal ──────────────────────────────────────────────────────────────
