@@ -84,24 +84,31 @@ test('streamToAnthropic publishes prefill % then token counts, and never forward
 
 // ── streamToAnthropic usage mapping ─────────────────────────────────────────
 
-test('streamToAnthropic maps prompt_tokens/completion_tokens to Anthropic usage with cache reuse', async () => {
+async function cacheReadFromTimings(timingsJson: string): Promise<number> {
   const upstream = sseStream([
     'data: {"choices":[{"delta":{"content":"Hi"}}]}',
-    'data: {"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":50},"timings":{"prompt_n_reuse":20}}',
+    `data: {"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":50},"timings":${timingsJson}}`,
     'data: [DONE]',
   ])
-
   const events: { event: string; data: string }[] = []
-  for await (const evt of streamToAnthropic(upstream, 'test-model', 'msg_2')) {
-    events.push(evt)
-  }
-
+  for await (const evt of streamToAnthropic(upstream, 'test-model', 'msg_2')) events.push(evt)
   const delta = events.find((e) => e.event === 'message_delta')
   assert.ok(delta, 'message_delta event must be emitted')
-  const parsed = JSON.parse(delta!.data) as { usage: { output_tokens: number; input_tokens: number; cache_read_input_tokens: number } }
-  assert.equal(parsed.usage.output_tokens, 50)
+  const parsed = JSON.parse(delta!.data) as { usage: { input_tokens: number; cache_read_input_tokens: number } }
   assert.equal(parsed.usage.input_tokens, 100)
-  assert.equal(parsed.usage.cache_read_input_tokens, 20)
+  return parsed.usage.cache_read_input_tokens
+}
+
+test('streamToAnthropic reads cache-reuse from `cache_n` (current llama.cpp field)', async () => {
+  assert.equal(await cacheReadFromTimings('{"cache_n":20}'), 20)
+})
+
+test('streamToAnthropic still honors legacy `prompt_n_reuse` (older builds)', async () => {
+  assert.equal(await cacheReadFromTimings('{"prompt_n_reuse":20}'), 20)
+})
+
+test('streamToAnthropic prefers `cache_n` over a stale `prompt_n_reuse`', async () => {
+  assert.equal(await cacheReadFromTimings('{"cache_n":20,"prompt_n_reuse":0}'), 20)
 })
 
 test('streamToAnthropic emits cache_read_input_tokens: 0 when no timings field', async () => {

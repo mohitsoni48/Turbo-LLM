@@ -285,8 +285,11 @@ export async function* streamToAnthropic(
         const usage = chunk.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined
         if (usage?.completion_tokens) outputTokens = usage.completion_tokens
         if (usage?.prompt_tokens) inputTokens = usage.prompt_tokens
-        const timings = chunk.timings as { prompt_n_reuse?: number } | undefined
-        if (timings?.prompt_n_reuse != null) cacheReadTokens = timings.prompt_n_reuse
+        // Cache-reused prompt tokens: current llama.cpp reports `cache_n`; older builds used
+        // `prompt_n_reuse`. Accept either so cache_read_input_tokens isn't silently stuck at 0.
+        const timings = chunk.timings as { cache_n?: number; prompt_n_reuse?: number } | undefined
+        const cacheN = timings?.cache_n ?? timings?.prompt_n_reuse
+        if (cacheN != null) cacheReadTokens = cacheN
 
         const choices = chunk.choices as Array<{ delta?: OAIDelta; finish_reason?: string | null }> | undefined
         if (!choices?.length) continue
