@@ -344,7 +344,40 @@ interface MlxConfig {
   num_key_value_heads?: number
   num_local_experts?: number
   num_experts?: number
+  /** MLX-style on-disk quantization (mlx-lm convert). */
   quantization?: { bits?: number; group_size?: number }
+  /** HF/vLLM post-training quantization (compressed-tensors, awq, gptq, fp8…). */
+  quantization_config?: {
+    quant_method?: string
+    bits?: number
+    config_groups?: Record<string, { weights?: { num_bits?: number }; input_activations?: { num_bits?: number } | null }>
+  }
+  /** Multimodal models (gemma4_unified, llava, qwen-vl…) nest the language-model
+   *  fields under `text_config`; read ctx/layers/heads from there when absent up top. */
+  text_config?: Omit<MlxConfig, 'text_config'>
+}
+
+/** Human quant label for a safetensors model dir. Recognizes HF/vLLM post-training
+ *  quant (compressed-tensors → e.g. "w4a16", awq/gptq → "awq-4bit") and MLX-style
+ *  quant ("4bit"); falls back to "fp16" for an unquantized checkpoint. Keeps the label
+ *  engine-neutral — a safetensors dir loads on either MLX or vLLM (compat.ts). */
+function detectSafetensorsQuant(cfg: MlxConfig): string {
+  const qc = cfg.quantization_config
+  if (qc?.quant_method) {
+    const method = qc.quant_method.toLowerCase()
+    const group0 = qc.config_groups ? Object.values(qc.config_groups)[0] : undefined
+    const wBits = group0?.weights?.num_bits ?? qc.bits
+    if (method === 'compressed-tensors') {
+      if (wBits) {
+        const aBits = group0?.input_activations?.num_bits ?? 16
+        return `w${wBits}a${aBits}`
+      }
+      return 'compressed-tensors'
+    }
+    return wBits ? `${method}-${wBits}bit` : method
+  }
+  const mlxBits = cfg.quantization?.bits
+  return mlxBits ? `${mlxBits}bit` : 'fp16'
 }
 
 /** Build a ModelEntry for an MLX model directory by reading its config.json. */
@@ -392,10 +425,13 @@ export function mlxEntryFor(dir: string): ModelEntry {
     }
   } catch { /* best effort */ }
 
-  const expertCount = cfg.num_local_experts ?? cfg.num_experts ?? 0
-  const bits = cfg.quantization?.bits
-  const quant = bits ? `${bits}bit` : 'fp16'
-  const arch = cfg.model_type || cfg.architectures?.[0] || 'unknown'
+  // Multimodal configs nest the LM fields under text_config; fall back to it so
+  // ctx/layers/heads aren't reported as 0 (which would, e.g., lock the vLLM
+  // --max-model-len control to a [0,0] range in the UI).
+  const lm = cfg.text_config ?? {}
+  const expertCount = cfg.num_local_experts ?? cfg.num_experts ?? lm.num_local_experts ?? lm.num_experts ?? 0
+  const quant = detectSafetensorsQuant(cfg)
+  const arch = cfg.model_type || cfg.architectures?.[0] || lm.model_type || 'unknown'
   const name = basename(dir).replace(/[-_]/g, ' ').replace(/\s+/g, ' ').trim()
 
   return {
@@ -408,9 +444,9 @@ export function mlxEntryFor(dir: string): ModelEntry {
     sizeLabel: '',
     arch,
     quant,
-    nativeCtx: cfg.max_position_embeddings ?? 0,
-    blockCount: cfg.num_hidden_layers ?? 0,
-    headCountKv: cfg.num_key_value_heads ?? 0,
+    nativeCtx: cfg.max_position_embeddings ?? lm.max_position_embeddings ?? 0,
+    blockCount: cfg.num_hidden_layers ?? lm.num_hidden_layers ?? 0,
+    headCountKv: cfg.num_key_value_heads ?? lm.num_key_value_heads ?? 0,
     moe: expertCount > 0,
     expertCount,
     nextnLayers: 0,

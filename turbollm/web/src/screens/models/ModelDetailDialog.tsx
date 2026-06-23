@@ -254,7 +254,7 @@ export function ModelDetailDialog({
             {isVllm && (
               <Section>
                 <Row label="Max model length" hint="vLLM --max-model-len. Max context tokens. 0 = derive from the model config.">
-                  <NumberInput value={draft.vllm?.maxModelLen ?? 0} min={0} max={Math.max(0, detail.nativeCtx || 0)} step={1024} onChange={(v) => setV('maxModelLen', v)} />
+                  <NumberInput value={draft.vllm?.maxModelLen ?? 0} min={0} max={detail.nativeCtx || 1_048_576} step={1024} onChange={(v) => setV('maxModelLen', v)} />
                 </Row>
                 <Slider
                   label="GPU memory utilization"

@@ -73,7 +73,7 @@ export function ModelLoadMenu({
               </span>
               <span className="min-w-0 flex-1 truncate">{m.name}</span>
               <span className="shrink-0 text-[11px] uppercase text-faint">
-                {m.format === 'mlx' ? 'MLX' : m.quant}
+                {m.quant}
               </span>
             </div>
           )
