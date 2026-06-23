@@ -72,7 +72,7 @@ import {
 } from '../lib/engine-groups'
 
 const ISSUE_URL =
-  'https://github.com/mohitsoni48/Turbo-LLM/issues/new?template=engine-request.yml'
+  'https://github.com/mohitsoni48/TurboLLM/issues/new?template=engine-request.yml'
 
 /** Auto-downloaded official llama.cpp builds live in
  *  `<config>/engines/llama.cpp-<tag>-<backend>/`; everything else is a user fork. */

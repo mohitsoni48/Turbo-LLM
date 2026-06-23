@@ -25,6 +25,17 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
+## [1.4.1] - 2026-06-23
+
+**Maintenance — brand-name consistency.** The GitHub repository was renamed `Turbo-LLM` →
+`TurboLLM` so the name matches everywhere (product, npm package `turbollm`, and repo). No
+runtime or behavior changes.
+
+### Changed
+- Repository renamed to `github.com/mohitsoni48/TurboLLM`; all in-repo links (package metadata,
+  README badges/images, the in-app "Register your engine" issue link) updated to the new URL.
+  Old links continue to redirect.
+
 ## [1.4.0] - 2026-06-23
 
 **Hygiene release — the small gaps that made the tool feel unfinished: stop the daemon from the CLI, launch Claude Code without pre-loading a model, see gateway-loaded models as loaded, and import chats from ChatGPT/Claude JSON.**
