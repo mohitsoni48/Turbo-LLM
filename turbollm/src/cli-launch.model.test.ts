@@ -197,6 +197,42 @@ test('launchCli auto-load when no model loaded: loads first model and launches',
   }
 })
 
+test('launchCli auto-load prefers lastLoaded.modelKey over the first library model', async () => {
+  const { calls, fn } = makeSpawn()
+  const unsilence = silenceOutput()
+  // lastLoaded points at the SECOND model; auto-load must pick it, not models[0].
+  let runningKey: string | null = null
+  let startedKey: string | null = null
+  const lastUsedFetch: typeof fetch = (async (input: string | URL | globalThis.Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as globalThis.Request).url
+    if (url.includes('/api/v1/status')) {
+      const body =
+        runningKey !== null
+          ? { engine: { state: 'running' }, model: { key: runningKey, name: runningKey }, lastLoaded: { modelKey: MODELS[1].key } }
+          : { engine: { state: 'idle' }, model: null, lastLoaded: { modelKey: MODELS[1].key } }
+      return { ok: true, status: 200, json: async () => body } as Response
+    }
+    if (url.includes('/api/v1/models')) {
+      return { ok: true, status: 200, json: async () => ({ models: MODELS }) } as Response
+    }
+    if (url.includes('/api/v1/engine/start')) {
+      const parsed = JSON.parse((await init?.body?.toString()) ?? '{}') as { modelKey?: string }
+      startedKey = parsed.modelKey ?? null
+      runningKey = startedKey
+      return { ok: true, status: 202, json: async () => ({ ok: true }) } as Response
+    }
+    return { ok: false, status: 404, json: async () => ({}) } as Response
+  }) as unknown as typeof fetch
+  try {
+    const code = await launchCli('claude', 6996, [], fn, undefined, lastUsedFetch)
+    assert.equal(code, 0)
+    assert.equal(startedKey, MODELS[1].key, 'should auto-load the last-used model, not the first')
+    assert.equal(calls[0].env['ANTHROPIC_MODEL'], MODELS[1].key)
+  } finally {
+    unsilence()
+  }
+})
+
 test('launchCli auto-load with empty library: returns 1 with friendly message', async () => {
   const { fn } = makeSpawn()
   let stderrOutput = ''

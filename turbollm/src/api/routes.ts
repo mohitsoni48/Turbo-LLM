@@ -89,6 +89,9 @@ export function registerApi(app: Hono, d: Deps): void {
       version: d.version,
       engine,
       model,
+      // Last model the user loaded (config-tracked) — lets `turbollm launch` auto-load the
+      // true last-used model instead of guessing the first library entry (F-034).
+      lastLoaded: d.store.snapshot().lastLoaded,
       engineStats,
       liveGeneration,
       // Auto-tune runner state (spec 09 §1): real progress while a sweep runs, then

@@ -22,6 +22,7 @@ const SUPPORTED: Record<string, CliSpec> = {
 interface DaemonStatus {
   engine?: { state?: string }
   model?: { name?: string; key?: string } | null
+  lastLoaded?: { modelKey?: string } | null
 }
 
 interface ModelEntry {
@@ -203,10 +204,11 @@ export async function launchCli(
       )
       return 1
     }
-    // The daemon tracks lastLoaded.modelKey in config but does not expose it via
-    // HTTP (it is an internal config field). Fall back to the first model in the
-    // library list, which matches the order the UI presents models.
-    const autoKey = models[0].key
+    // Prefer the true last-used model (exposed on /status as lastLoaded) when it's still
+    // in the library; otherwise fall back to the first model in the list, which matches
+    // the order the UI presents models.
+    const lastKey = status?.lastLoaded?.modelKey
+    const autoKey = lastKey && models.some((m) => m.key === lastKey) ? lastKey : models[0].key
     process.stdout.write(`▸ Auto-loading model "${autoKey}"…\n`)
     const loaded = await loadAndWait(base, autoKey, 180_000, _fetch)
     if (!loaded) {
