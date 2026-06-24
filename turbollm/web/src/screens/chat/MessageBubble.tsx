@@ -130,7 +130,7 @@ const Markdown = memo(function Markdown({ children, streaming }: { children: str
               return (
                 <div className="my-2 flex items-center gap-2 rounded-lg border border-border bg-panel-2 px-3 py-2 text-[12px] text-muted">
                   <Loader2 size={12} className="animate-spin" />
-                  Generating {lang} preview…
+                  Generating artifact…
                 </div>
               )
             }
