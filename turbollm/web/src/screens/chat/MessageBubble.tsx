@@ -101,7 +101,7 @@ function childrenToString(node: ReactNode): string {
   return ''
 }
 
-const Markdown = memo(function Markdown({ children }: { children: string }) {
+const Markdown = memo(function Markdown({ children, streaming }: { children: string; streaming?: boolean }) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
@@ -123,6 +123,17 @@ const Markdown = memo(function Markdown({ children }: { children: string }) {
           const lang = className?.match(/language-(\S+)/)?.[1] ?? ''
           const artifactType = isArtifactLang(lang)
           if (artifactType) {
+            // While the message is still streaming, the artifact code is partial and
+            // re-parsed every token — rendering the live iframe makes it flicker. Show
+            // a calm placeholder; the real preview mounts once when generation finishes.
+            if (streaming) {
+              return (
+                <div className="my-2 flex items-center gap-2 rounded-lg border border-border bg-panel-2 px-3 py-2 text-[12px] text-muted">
+                  <Loader2 size={12} className="animate-spin" />
+                  Generating {lang} preview…
+                </div>
+              )
+            }
             return <ArtifactCard lang={lang} code={childrenToString(children).replace(/\n$/, '')} />
           }
           return (
@@ -362,7 +373,7 @@ export function StreamingBubble({
         {reasoning && <ThinkingBlock reasoning={reasoning} streaming />}
         <ToolCallsPanel calls={toolCalls} />
         <div className="prose-tllm text-[15px] leading-[1.7] text-ink">
-          {content ? <Markdown>{content}</Markdown> : (
+          {content ? <Markdown streaming>{content}</Markdown> : (
             <span className="text-muted">
               {isPrefill ? 'Processing prompt…' : reasoning ? 'Generating…' : toolCalls.length ? 'Working…' : 'Thinking…'}
             </span>
