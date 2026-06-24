@@ -67,7 +67,7 @@ export function registerChatRoutes(app: Hono, d: Deps): void {
 
   app.get('/api/v1/conversations', (c) => {
     const q = c.req.query('q')
-    return c.json({ conversations: db.listConversations(q) })
+    return c.json({ conversations: db.listConversations(q, 'chat') })
   })
 
   app.post('/api/v1/conversations', async (c) => {

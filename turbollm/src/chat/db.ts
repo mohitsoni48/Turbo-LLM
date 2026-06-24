@@ -17,9 +17,25 @@ export interface Conversation {
   /** Tool-calling policy for this conversation. 'force_web_search' forces the model
    *  to call web_search on the first iteration before composing a reply. */
   toolPolicy?: string
+  /** Conversation kind: 'chat' (default user-facing) or 'agent' (background agent run). */
+  kind: 'chat' | 'agent'
   createdAt: string
   updatedAt: string
   messages?: Message[]
+}
+
+/** A background agent run record (v8 migration). */
+export interface AgentRun {
+  id: string
+  convId: string
+  title: string
+  status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted'
+  allowedTools: string[]
+  error?: string
+  createdAt: string
+  updatedAt: string
+  startedAt?: string
+  endedAt?: string
 }
 
 export interface MessageStats {
@@ -92,7 +108,8 @@ export interface Message {
   createdAt: string
 }
 
-interface ConvRow { id: string; title: string; system_prompt: string; model_key: string; sampling: string; expert_mode: number; tool_policy: string | null; created_at: string; updated_at: string }
+interface ConvRow { id: string; title: string; system_prompt: string; model_key: string; sampling: string; expert_mode: number; tool_policy: string | null; kind: string | null; created_at: string; updated_at: string }
+interface AgentRunRow { id: string; conv_id: string; title: string; status: string; allowed_tools: string; error: string | null; created_at: string; updated_at: string; started_at: string | null; ended_at: string | null }
 interface MsgRow  { id: string; conv_id: string; seq: number; role: 'user' | 'assistant'; content: string; reasoning: string; attachments: string; text_attachments: string | null; tool_calls: string | null; stats: string; model_key: string | null; research_meta: string | null; created_at: string }
 
 // node:sqlite named-param objects need an explicit cast to Record<string, SQLInputValue>
@@ -101,7 +118,18 @@ type P = Record<string, SQLInputValue>
 function safeJson(s: string): unknown { try { return JSON.parse(s) } catch { return {} } }
 
 function rowToConv(r: ConvRow): Conversation {
-  return { id: r.id, title: r.title, systemPrompt: r.system_prompt, modelKey: r.model_key, sampling: safeJson(r.sampling) as Record<string, unknown>, expertMode: r.expert_mode === 1, toolPolicy: r.tool_policy ?? undefined, createdAt: r.created_at, updatedAt: r.updated_at }
+  return { id: r.id, title: r.title, systemPrompt: r.system_prompt, modelKey: r.model_key, sampling: safeJson(r.sampling) as Record<string, unknown>, expertMode: r.expert_mode === 1, toolPolicy: r.tool_policy ?? undefined, kind: (r.kind === 'agent' ? 'agent' : 'chat'), createdAt: r.created_at, updatedAt: r.updated_at }
+}
+
+function rowToAgentRun(r: AgentRunRow): AgentRun {
+  return {
+    id: r.id, convId: r.conv_id, title: r.title,
+    status: r.status as AgentRun['status'],
+    allowedTools: safeJson(r.allowed_tools) as string[],
+    error: r.error ?? undefined,
+    createdAt: r.created_at, updatedAt: r.updated_at,
+    startedAt: r.started_at ?? undefined, endedAt: r.ended_at ?? undefined,
+  }
 }
 
 function rowToMsg(r: MsgRow): Message {
@@ -195,26 +223,60 @@ export class ConversationStore {
         PRAGMA user_version = 7;
       `)
     }
+    // v8 (ADR-112): background agent runs table. Each run maps to a dedicated
+    // conversation of kind='agent'. Ring buffer events are in-memory only;
+    // this table stores the durable run record and status.
+    if (v < 8) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS agent_runs (
+          id TEXT PRIMARY KEY,
+          conv_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          title TEXT NOT NULL DEFAULT 'Agent run',
+          status TEXT NOT NULL DEFAULT 'queued',
+          allowed_tools TEXT NOT NULL DEFAULT '[]',
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          started_at TEXT,
+          ended_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_runs_status ON agent_runs(status, created_at);
+        PRAGMA user_version = 8;
+      `)
+    }
+    // v9 (ADR-112): conversations.kind column — 'chat' (default) or 'agent'.
+    // Agent conversations are owned by a run and excluded from the chat sidebar.
+    if (v < 9) {
+      this.db.exec(`
+        ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat';
+        PRAGMA user_version = 9;
+      `)
+    }
   }
 
-  listConversations(q?: string): Conversation[] {
+  listConversations(q?: string, kind: 'chat' | 'agent' | 'all' = 'all'): Conversation[] {
     if (q) {
+      const kindClause = kind !== 'all' ? ' AND c.kind = $kind' : ''
+      const params = kind !== 'all' ? { $q: `%${q}%`, $kind: kind } : { $q: `%${q}%` }
       const rows = this.db.prepare(`
         SELECT DISTINCT c.* FROM conversations c
         LEFT JOIN messages m ON m.conv_id = c.id
-        WHERE c.title LIKE $q OR m.content LIKE $q
+        WHERE (c.title LIKE $q OR m.content LIKE $q)${kindClause}
         ORDER BY c.updated_at DESC LIMIT 200
-      `).all({ $q: `%${q}%` } as P) as unknown as ConvRow[]
+      `).all(params as P) as unknown as ConvRow[]
       return rows.map(rowToConv)
+    }
+    if (kind !== 'all') {
+      return (this.db.prepare(`SELECT * FROM conversations WHERE kind = $kind ORDER BY updated_at DESC LIMIT 200`).all({ $kind: kind } as P) as unknown as ConvRow[]).map(rowToConv)
     }
     return (this.db.prepare(`SELECT * FROM conversations ORDER BY updated_at DESC LIMIT 200`).all() as unknown as ConvRow[]).map(rowToConv)
   }
 
-  createConversation(partial?: Partial<Pick<Conversation, 'title' | 'systemPrompt' | 'modelKey' | 'sampling' | 'expertMode' | 'toolPolicy'>>): Conversation {
+  createConversation(partial?: Partial<Pick<Conversation, 'title' | 'systemPrompt' | 'modelKey' | 'sampling' | 'expertMode' | 'toolPolicy' | 'kind'>>): Conversation {
     const now = new Date().toISOString()
     const id = randomUUID()
-    this.db.prepare(`INSERT INTO conversations (id,title,system_prompt,model_key,sampling,expert_mode,tool_policy,created_at,updated_at) VALUES ($id,$title,$sp,$mk,$samp,$expert,$tp,$now,$now)`)
-      .run({ $id: id, $title: partial?.title ?? 'New chat', $sp: partial?.systemPrompt ?? '', $mk: partial?.modelKey ?? '', $samp: JSON.stringify(partial?.sampling ?? {}), $expert: partial?.expertMode ? 1 : 0, $tp: partial?.toolPolicy ?? null, $now: now } as P)
+    this.db.prepare(`INSERT INTO conversations (id,title,system_prompt,model_key,sampling,expert_mode,tool_policy,kind,created_at,updated_at) VALUES ($id,$title,$sp,$mk,$samp,$expert,$tp,$kind,$now,$now)`)
+      .run({ $id: id, $title: partial?.title ?? 'New chat', $sp: partial?.systemPrompt ?? '', $mk: partial?.modelKey ?? '', $samp: JSON.stringify(partial?.sampling ?? {}), $expert: partial?.expertMode ? 1 : 0, $tp: partial?.toolPolicy ?? null, $kind: partial?.kind ?? 'chat', $now: now } as P)
     return this.getConversation(id)!
   }
 
@@ -316,6 +378,42 @@ export class ConversationStore {
   getLastMessage(convId: string): Message | null {
     const row = this.db.prepare(`SELECT * FROM messages WHERE conv_id = $id ORDER BY seq DESC LIMIT 1`).get({ $id: convId } as P) as unknown as MsgRow | undefined
     return row ? rowToMsg(row) : null
+  }
+
+  // ── Agent run methods (v8 migration) ──────────────────────────────────────
+
+  createAgentRun(params: { convId: string; title: string; allowedTools: string[] }): AgentRun {
+    const id = randomUUID()
+    const now = new Date().toISOString()
+    this.db.prepare(`INSERT INTO agent_runs (id,conv_id,title,status,allowed_tools,created_at,updated_at) VALUES ($id,$cid,$title,'queued',$at,$now,$now)`)
+      .run({ $id: id, $cid: params.convId, $title: params.title, $at: JSON.stringify(params.allowedTools), $now: now } as P)
+    return this.getAgentRun(id)!
+  }
+
+  getAgentRun(id: string): AgentRun | null {
+    const row = this.db.prepare(`SELECT * FROM agent_runs WHERE id = $id`).get({ $id: id } as P) as unknown as AgentRunRow | undefined
+    return row ? rowToAgentRun(row) : null
+  }
+
+  listAgentRuns(opts?: { statuses?: string[] }): AgentRun[] {
+    if (opts?.statuses?.length) {
+      const placeholders = opts.statuses.map((_, i) => `$s${i}`).join(',')
+      const params: Record<string, SQLInputValue> = {}
+      opts.statuses.forEach((s, i) => { params[`$s${i}`] = s })
+      return (this.db.prepare(`SELECT * FROM agent_runs WHERE status IN (${placeholders}) ORDER BY created_at DESC LIMIT 200`).all(params) as unknown as AgentRunRow[]).map(rowToAgentRun)
+    }
+    return (this.db.prepare(`SELECT * FROM agent_runs ORDER BY created_at DESC LIMIT 200`).all() as unknown as AgentRunRow[]).map(rowToAgentRun)
+  }
+
+  updateAgentRun(id: string, patch: Partial<Pick<AgentRun, 'status' | 'error' | 'startedAt' | 'endedAt'>>): boolean {
+    const now = new Date().toISOString()
+    const sets: string[] = ['updated_at = $now']
+    const params: Record<string, SQLInputValue> = { $id: id, $now: now }
+    if (patch.status    !== undefined) { sets.push('status = $status');      params.$status  = patch.status }
+    if (patch.error     !== undefined) { sets.push('error = $error');        params.$error   = patch.error }
+    if (patch.startedAt !== undefined) { sets.push('started_at = $started'); params.$started = patch.startedAt }
+    if (patch.endedAt   !== undefined) { sets.push('ended_at = $ended');     params.$ended   = patch.endedAt }
+    return ((this.db.prepare(`UPDATE agent_runs SET ${sets.join(', ')} WHERE id = $id`).run(params) as unknown) as Changes).changes > 0
   }
 
   close(): void { this.db.close() }

@@ -26,6 +26,8 @@ import { DownloadManager } from './downloads/downloads'
 import { BenchRunner } from './bench/bench'
 import { ModelRouter } from './gateway/model-router'
 import { ToolRegistry } from './tools/tool-registry'
+import { GenerationGate } from './agents/gate'
+import { AgentRunner } from './agents/runner'
 import { launchCli } from './cli-launch'
 import { writePidfile, removePidfile, stopDaemon } from './daemon-pid'
 import { createApp } from './server'
@@ -197,6 +199,9 @@ const startedAt = Date.now()
 const appUpdates = new AppUpdateChecker(version)
 // `requestRestart` is attached after the server is created (it must close over it).
 const deps: Deps = { store, registry, manager, scanner, hashes, db, provision, build, updates, appUpdates, hf, downloads, bench, modelRouter, comfy, tools: toolRegistry, version, startedAt }
+deps.gate = new GenerationGate()
+deps.agentRunner = new AgentRunner(deps)
+deps.agentRunner.reconcileOnStartup()
 const app = createApp(deps)
 
 // Warm the app-update cache shortly after boot (ADR-031: "once per daemon start") so the
