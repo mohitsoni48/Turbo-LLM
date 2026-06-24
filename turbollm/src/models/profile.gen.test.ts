@@ -2,7 +2,7 @@
 // rope scaling, frequency_penalty, stop strings.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { defaultSampling, deriveDefault, profileToArgs, resolveProfile } from './profile'
+import { defaultSampling, deriveDefault, estimateVram, profileToArgs, resolveProfile } from './profile'
 import type { LoadProfile } from './profile'
 import type { ModelEntry } from './scanner'
 import type { SysInfo } from '../sysinfo/sysinfo'
@@ -88,6 +88,33 @@ test('stop strings do not appear in profileToArgs (they are per-request only)', 
   const args = profileToArgs(p, model(), caps)
   assert.equal(args.includes('--stop'), false)
   assert.equal(args.some((a) => a.includes('</s>')), false)
+})
+
+// ── KV cache offload (GPU vs RAM) ─────────────────────────────────────────────
+
+test('kvOffload default (true) emits no --no-kv-offload', () => {
+  const p = base()
+  assert.equal(p.kvOffload, true)
+  assert.equal(profileToArgs(p, model(), caps).includes('--no-kv-offload'), false)
+})
+
+test('kvOffload false emits --no-kv-offload (KV cache in RAM)', () => {
+  const p = { ...base(), kvOffload: false }
+  assert.equal(profileToArgs(p, model(), caps).includes('--no-kv-offload'), true)
+})
+
+test('--no-kv-offload gated by engine capability', () => {
+  const limited = { kvTypes: [], flags: ['-ngl', '--parallel'] }
+  const p = { ...base(), kvOffload: false }
+  assert.equal(profileToArgs(p, model(), limited).includes('--no-kv-offload'), false)
+})
+
+test('kvOffload false excludes the KV cache from the VRAM estimate', () => {
+  const m = model()
+  const s = sys()
+  const onGpu = estimateVram({ ...base(), kvOffload: true }, m, s)
+  const inRam = estimateVram({ ...base(), kvOffload: false }, m, s)
+  assert.ok(inRam.estMb < onGpu.estMb, 'KV in RAM should lower the GPU estimate')
 })
 
 // ── Context overflow ──────────────────────────────────────────────────────────

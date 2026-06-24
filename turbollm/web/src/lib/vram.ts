@@ -39,7 +39,11 @@ export function estimateVram(
   const gpuFrac = m.moe ? 1 - 0.85 * (p.nCpuMoe / blocks) : Math.min(p.ngl, blocks) / blocks
   const weightsMb = sizeMb * Math.max(0, Math.min(1, gpuFrac))
   const kvElems = 2 * blocks * p.ctx * (m.headCountKv || 8) * HEAD_DIM
-  const kvMb = ((kvElems * kvBytesPerElem(p.kvTypeK)) / 1e6) * (p.kvUnified ? 1 : Math.max(1, p.parallel))
+  // KV cache only weighs on VRAM when offloaded to the GPU; in RAM mode (--no-kv-offload) it
+  // costs no VRAM. Absent on pre-feature profiles → treated as the GPU default.
+  const kvMb = p.kvOffload === false
+    ? 0
+    : ((kvElems * kvBytesPerElem(p.kvTypeK)) / 1e6) * (p.kvUnified ? 1 : Math.max(1, p.parallel))
   const mmprojMb = p.useMmproj && p.mmprojGpu && m.mmprojPath ? 600 : 0
   const estMb = Math.round(weightsMb + kvMb + 800 + mmprojMb)
   const pct = estMb / totalVramMb

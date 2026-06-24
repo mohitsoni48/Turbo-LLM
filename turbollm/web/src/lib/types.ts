@@ -486,6 +486,8 @@ export type LoadProfile = {
   kvTypeK: string
   kvTypeV: string
   flashAttn: 'auto' | 'on' | 'off'
+  /** KV cache location: true (default) = on the GPU; false = system RAM (--no-kv-offload). */
+  kvOffload: boolean
   threads: number
   threadsBatch: number
   useMmproj: boolean

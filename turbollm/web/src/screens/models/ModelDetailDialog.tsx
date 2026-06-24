@@ -331,6 +331,13 @@ export function ModelDetailDialog({
               <Row label="Flash attention">
                 <Segmented value={draft.flashAttn} options={['auto', 'on', 'off']} onChange={(v) => set('flashAttn', v as LoadProfile['flashAttn'])} />
               </Row>
+              <Row label="KV cache" hint="VRAM is fastest; RAM frees VRAM for bigger models.">
+                <Segmented
+                  value={draft.kvOffload === false ? 'RAM' : 'GPU'}
+                  options={['GPU', 'RAM']}
+                  onChange={(v) => set('kvOffload', v === 'GPU')}
+                />
+              </Row>
               <Toggle label="Use Jinja chat template" value={draft.useJinja} onChange={(v) => set('useJinja', v)} />
               {draft.useJinja && (
                 <PathField
@@ -798,11 +805,13 @@ function Slider({ label, hint, value, min, max, step, onChange, fmt }: {
 function Row({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <div className="flex items-center justify-between gap-3">
-      <div>
+      {/* min-w-0 lets a long hint wrap instead of forcing the row wider than the
+          (resizable, often narrow) panel; shrink-0 keeps the control fully visible. */}
+      <div className="min-w-0">
         <div className="text-[13px] text-ink">{label}</div>
         {hint && <div className="text-[11px] text-faint">{hint}</div>}
       </div>
-      {children}
+      <div className="shrink-0">{children}</div>
     </div>
   )
 }

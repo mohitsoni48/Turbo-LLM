@@ -87,6 +87,12 @@ export interface LoadProfile {
   kvTypeK: string
   kvTypeV: string
   flashAttn: 'auto' | 'on' | 'off'
+  /** KV cache location (llama.cpp --no-kv-offload). true (default) keeps the KV cache on the
+   *  GPU next to the weights — fastest, and llama.cpp's own default. false emits
+   *  --no-kv-offload, holding the KV cache in system RAM instead: frees VRAM for a larger model
+   *  or longer context at the cost of speed. llama.cpp-only; ignored by mlx/vllm. May be absent
+   *  on pre-feature saved profiles → treated as the GPU default (see {@link profileToArgs}). */
+  kvOffload: boolean
   threads: number
   threadsBatch: number
   useMmproj: boolean
@@ -183,7 +189,12 @@ export function estimateVram(p: LoadProfile, m: ModelEntry, sys: SysInfo): VramF
 
   const kvHeads = m.headCountKv || 8
   const kvElems = 2 * blocks * p.ctx * kvHeads * HEAD_DIM
-  const kvMb = ((kvElems * kvBytesPerElem(p.kvTypeK)) / 1e6) * (p.kvUnified ? 1 : Math.max(1, p.parallel))
+  // KV cache only counts against VRAM when it's offloaded to the GPU. With --no-kv-offload
+  // (kvOffload === false) it lives in system RAM, so it adds nothing to the GPU estimate.
+  // Absent on pre-feature profiles → treated as the GPU default.
+  const kvMb = p.kvOffload === false
+    ? 0
+    : ((kvElems * kvBytesPerElem(p.kvTypeK)) / 1e6) * (p.kvUnified ? 1 : Math.max(1, p.parallel))
 
   const mmprojMb = p.useMmproj && p.mmprojGpu && m.mmprojPath ? 600 : 0
   const estMb = Math.round(weightsMb + kvMb + 800 + mmprojMb)
@@ -206,6 +217,9 @@ export function deriveDefault(m: ModelEntry, sys: SysInfo): LoadProfile {
     // Flash attention on by default — faster and lower KV memory on every modern
     // backend; gated by engine capability in profileToArgs so it's a safe default.
     flashAttn: 'on',
+    // KV cache on the GPU by default (llama.cpp's own default — fastest). The user can
+    // flip it to RAM to free VRAM; mapped to --no-kv-offload in profileToArgs.
+    kvOffload: true,
     // CPU threads: 0 = auto, resolved to half the logical cores at launch
     // (profileToArgs) — leaves headroom for the OS; user-overridable via slider.
     threads: 0,
@@ -322,6 +336,11 @@ export function profileToArgs(p: LoadProfile, m: ModelEntry, caps: Capabilities,
   if (p.kvTypeK !== 'f16' && has('--cache-type-k') && kvOk(p.kvTypeK)) a.push('--cache-type-k', p.kvTypeK)
   if (p.kvTypeV !== 'f16' && has('--cache-type-v') && kvOk(p.kvTypeV)) a.push('--cache-type-v', p.kvTypeV)
   if (p.flashAttn !== 'auto' && has('--flash-attn')) a.push('--flash-attn', p.flashAttn)
+  // KV cache location: on the GPU by default (llama.cpp's default — no flag). When the user
+  // pins it to RAM, emit --no-kv-offload so the KV cache lives in system memory, freeing VRAM
+  // for a bigger model / longer context at the cost of speed. `kvOffload` is absent on
+  // pre-feature saved profiles → `=== false` treats that as the GPU default (no flag).
+  if (p.kvOffload === false && has('--no-kv-offload')) a.push('--no-kv-offload')
   // threads 0 = auto → half the logical cores (matches the UI's "Auto" label).
   const threads = p.threads > 0 ? p.threads : cores > 0 ? Math.max(1, Math.floor(cores / 2)) : 0
   if (threads > 0) a.push('--threads', String(threads))
