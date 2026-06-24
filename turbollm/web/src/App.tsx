@@ -14,6 +14,7 @@ import { ApiError, setAuthToken } from './lib/api'
 
 // Route-level code splitting: each screen loads only when first navigated to.
 const ChatScreen = lazy(() => import('./screens/ChatScreen').then((m) => ({ default: m.ChatScreen })))
+const AgentsScreen = lazy(() => import('./screens/AgentsScreen').then((m) => ({ default: m.AgentsScreen })))
 const ModelsScreen = lazy(() => import('./screens/ModelsScreen').then((m) => ({ default: m.ModelsScreen })))
 const EnginesScreen = lazy(() => import('./screens/EnginesScreen').then((m) => ({ default: m.EnginesScreen })))
 const DeveloperScreen = lazy(() => import('./screens/DeveloperScreen').then((m) => ({ default: m.DeveloperScreen })))
@@ -63,6 +64,8 @@ export function App() {
           <Routes>
             <Route path="/chat" element={<ChatScreen />} />
             <Route path="/chat/:convId" element={<ChatScreen />} />
+            <Route path="/agents" element={<AgentsScreen />} />
+            <Route path="/agents/:id" element={<AgentsScreen />} />
             <Route path="/models" element={<ModelsScreen />} />
             <Route path="/engines" element={<EnginesScreen />} />
             <Route path="/developer" element={<DeveloperScreen />} />

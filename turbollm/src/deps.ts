@@ -14,6 +14,8 @@ import type { DownloadManager } from './downloads/downloads'
 import type { BenchRunner } from './bench/bench'
 import type { ModelRouter } from './gateway/model-router'
 import type { ToolRegistry } from './tools/tool-registry'
+import type { GenerationGate } from './agents/gate'
+import type { AgentRunner } from './agents/runner'
 
 export interface Deps {
   store: ConfigStore
@@ -43,6 +45,11 @@ export interface Deps {
   /** ComfyUI GPU coordinator (spec: unload/block while ComfyUI renders, reload after).
    *  Optional: only wired in the real `serve()` entrypoint (cli.ts); absent under tests. */
   comfy?: ComfyGuard
+  /** Priority-queue mutex serialising engine calls (fg > bg). Optional — absent under
+   *  tests; only wired in cli.ts where the agent runner co-exists with chat. */
+  gate?: GenerationGate
+  /** Background agent runner. Optional — same wiring conditions as gate. */
+  agentRunner?: AgentRunner
   version: string
   startedAt: number
   /** Re-exec the daemon so config changes (port, LAN bind) take effect (spec 08 §2).

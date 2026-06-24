@@ -6,6 +6,7 @@ import { CheckCircle2, ChevronDown, ChevronRight, FileText, Loader2, Pencil, Ref
 import type { ClaimVerdict, LiveToolCall, Message, MessageStats, ResearchMeta, ResearchSource, ToolCallRecord } from '../../lib/chat-types'
 import { Button } from '../../components/ui/button'
 import { CopyButton } from '../../components/ui/copy-button'
+import { ArtifactCard, isArtifactLang } from '../../components/ArtifactCard'
 
 // ── Thinking block ────────────────────────────────────────────────────────────
 
@@ -85,7 +86,22 @@ function StatsRow({ stats }: { stats: Partial<MessageStats> }) {
 
 // ── Markdown renderer ─────────────────────────────────────────────────────────
 
-const Markdown = memo(function Markdown({ children }: { children: string }) {
+/** Reconstruct raw text from a markdown code block's children. `rehypeHighlight`
+ *  tokenizes code into nested <span> elements, so `children` is a React node tree,
+ *  not a string — `String(children)` yields "[object Object]". Walk it to get the
+ *  original source back (highlight.js wraps text, never drops characters). */
+function childrenToString(node: ReactNode): string {
+  if (node == null || typeof node === 'boolean') return ''
+  if (typeof node === 'string') return node
+  if (typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(childrenToString).join('')
+  if (typeof node === 'object' && 'props' in node) {
+    return childrenToString((node as { props?: { children?: ReactNode } }).props?.children)
+  }
+  return ''
+}
+
+const Markdown = memo(function Markdown({ children, streaming }: { children: string; streaming?: boolean }) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
@@ -101,12 +117,30 @@ const Markdown = memo(function Markdown({ children }: { children: string }) {
           const hasLang = !!className?.includes('language-')
           const isBlock = hasLang || (typeof children === 'string' && children.includes('\n'))
           if (!isBlock) return <code className="rounded bg-panel-2 px-1 py-0.5 font-mono text-[0.88em]" {...props}>{children}</code>
-          const lang = className?.replace('language-', '') ?? ''
+          // rehypeHighlight rewrites the class to "hljs language-html", so a plain
+          // `.replace('language-','')` leaves "hljs html" and breaks artifact detection.
+          // Pull just the language token out of whatever classes are present.
+          const lang = className?.match(/language-(\S+)/)?.[1] ?? ''
+          const artifactType = isArtifactLang(lang)
+          if (artifactType) {
+            // While the message is still streaming, the artifact code is partial and
+            // re-parsed every token — rendering the live iframe makes it flicker. Show
+            // a calm placeholder; the real preview mounts once when generation finishes.
+            if (streaming) {
+              return (
+                <div className="my-2 flex items-center gap-2 rounded-lg border border-border bg-panel-2 px-3 py-2 text-[12px] text-muted">
+                  <Loader2 size={12} className="animate-spin" />
+                  Generating artifact…
+                </div>
+              )
+            }
+            return <ArtifactCard lang={lang} code={childrenToString(children).replace(/\n$/, '')} />
+          }
           return (
             <div className="relative my-2 overflow-hidden rounded-lg border border-border">
               <div className="flex items-center justify-between border-b border-border bg-panel-2 px-3 py-1 font-mono text-[11px] text-muted">
                 <span>{lang}</span>
-                <CopyButton text={String(children)} size={12} />
+                <CopyButton text={childrenToString(children)} size={12} />
               </div>
               <div className="overflow-x-auto overscroll-x-contain" onScroll={e => e.stopPropagation()}>
                 <code className={`${className ?? ''} block p-3 font-mono text-[13px] leading-relaxed whitespace-pre`} {...props}>{children}</code>
@@ -339,7 +373,7 @@ export function StreamingBubble({
         {reasoning && <ThinkingBlock reasoning={reasoning} streaming />}
         <ToolCallsPanel calls={toolCalls} />
         <div className="prose-tllm text-[15px] leading-[1.7] text-ink">
-          {content ? <Markdown>{content}</Markdown> : (
+          {content ? <Markdown streaming>{content}</Markdown> : (
             <span className="text-muted">
               {isPrefill ? 'Processing prompt…' : reasoning ? 'Generating…' : toolCalls.length ? 'Working…' : 'Thinking…'}
             </span>

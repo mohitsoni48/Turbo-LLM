@@ -18,6 +18,7 @@ function makeConv(overrides: Partial<Conversation & { messages: Message[] }> = {
     sampling: {},
     expertMode: false,
     toolPolicy: 'force_web_search',
+    kind: 'chat',
     createdAt: '2026-06-19T00:00:00.000Z',
     updatedAt: '2026-06-19T00:00:01.000Z',
     messages: [],

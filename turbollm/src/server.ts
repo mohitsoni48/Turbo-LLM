@@ -6,6 +6,7 @@ import { dirname, join, normalize } from 'node:path'
 import { Agent, setGlobalDispatcher } from 'undici'
 import { registerApi } from './api/routes'
 import { registerChatRoutes } from './chat/chat-routes'
+import { registerAgentRoutes } from './agents/agent-routes'
 import type { Deps } from './deps'
 import { registerGateway } from './gateway/gateway'
 import { lanAuth } from './auth'
@@ -43,6 +44,7 @@ export function createApp(d: Deps): Hono {
 
   registerApi(app, d)
   registerChatRoutes(app, d)
+  registerAgentRoutes(app, d)
   registerGateway(app, d)
 
   // Embedded SPA with client-side-routing fallback (spec 08 §1).
