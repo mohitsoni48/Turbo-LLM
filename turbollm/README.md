@@ -18,7 +18,7 @@
   <img src="https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg" alt="license" />
   <img src="https://img.shields.io/badge/platform-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-555.svg" alt="platforms" />
   <a href="https://ko-fi.com/mohitsoni"><img src="https://img.shields.io/badge/Ko--fi-support%20us-FF5E5B?logo=kofi&logoColor=white" alt="Ko-fi" /></a>
-  <a href="https://discord.gg/v6kRbV7nC"><img src="https://img.shields.io/discord/1519565431495590039.svg?label=Discord&logo=discord&color=5865F2&logoColor=white" alt="Discord" /></a>
+  <a href="https://discord.gg/v6kRbV7nC"><img src="https://img.shields.io/badge/Discord-join%20chat-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
 </p>
 
 <!-- Brand: shipped app icon web/public/brand/turbollm-icon-512.jpeg · high-res masters web/brand-assets/ (unshipped) · in-app mark web/src/components/Logo.tsx · favicon web/public/favicon.svg -->
