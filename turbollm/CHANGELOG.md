@@ -25,6 +25,30 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
+## [1.5.1] - 2026-06-25
+
+**Bugfix / polish release — auto-tune run log, TurboLLM Expert persona improvements.**
+
+### Added
+- **Auto-tune run log.** A "Download run log" checkbox (checked by default) appears in the
+  Save Results dialog after an auto-tune completes. Checking it downloads a structured JSON log
+  of every probe — parameters, outcomes, VRAM readings, timestamps, hardware info, and the
+  winning config.
+- **TurboLLM Expert persona.** The Expert is now a first-class persona in the persona picker
+  (alongside Default, Designer, Research, etc.) instead of a hidden launch from Settings. It
+  carries a comprehensive built-in knowledge base covering every screen, load profile parameter,
+  engine, auto-tune algorithm, gateway, built-in tools, and troubleshooting patterns, and is
+  given your actual hardware (GPU, VRAM, RAM, OS) so it can suggest models that fit your machine.
+
+### Changed
+- Removed the "Launch TurboLLM Expert" section from Settings — use the persona picker instead.
+
+### Fixed
+- **Mermaid artifact image export.** Downloading a Mermaid diagram (e.g. a flowchart the model
+  drew) as PNG or JPEG failed with "Couldn't export this artifact as an image." Mermaid rendered
+  text labels as HTML `<foreignObject>`, which taints the export canvas in the browser. Labels are
+  now rendered as native SVG text, so PNG/JPEG export works.
+
 ## [1.5.0] - 2026-06-25
 
 **Feature release — background agents, inline artifacts, and a Designer persona.** Run agent

@@ -16,6 +16,10 @@ async function req<T>(path: string, init?: RequestInit & { json?: unknown }): Pr
   return data as T
 }
 
+export interface SysInfoGpu { name: string; vramMb: number }
+export interface SysInfo { gpus: SysInfoGpu[]; ramMB: number; cpu: string; os: string; cores: number }
+export function fetchSysInfo(): Promise<SysInfo> { return req<SysInfo>('/api/v1/sysinfo') }
+
 export function listConversations(q?: string): Promise<{ conversations: Conversation[] }> {
   return req(`/api/v1/conversations${q ? `?q=${encodeURIComponent(q)}` : ''}`)
 }
@@ -24,11 +28,6 @@ export function createConversation(partial?: Partial<Pick<Conversation, 'title' 
   return req('/api/v1/conversations', { method: 'POST', json: partial ?? {} })
 }
 
-/** Launch the built-in TurboLLM Expert thread (spec 08 §2). The expert system
- *  prompt lives server-side and is never sent from the client. */
-export function createExpertConversation(): Promise<Conversation> {
-  return req('/api/v1/conversations/expert', { method: 'POST', json: {} })
-}
 
 export function getConversation(id: string): Promise<Conversation> {
   return req(`/api/v1/conversations/${encodeURIComponent(id)}`)

@@ -276,7 +276,18 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
       setMermaid({ loading: true })
       try {
         const m = (await import('mermaid')).default
-        m.initialize({ startOnLoad: false, theme: resolveDark(theme) ? 'dark' : 'default', suppressErrorRendering: true })
+        // htmlLabels:false renders labels as native SVG <text> instead of <foreignObject>.
+        // foreignObject taints the canvas when the SVG is rasterized via <img> for PNG/JPEG
+        // export (Chrome SecurityError), so image downloads of mermaid artifacts fail. Native
+        // <text> rasterizes cleanly. securityLevel:'strict' is the default — set explicitly.
+        m.initialize({
+          startOnLoad: false,
+          theme: resolveDark(theme) ? 'dark' : 'default',
+          suppressErrorRendering: true,
+          securityLevel: 'strict',
+          htmlLabels: false,
+          flowchart: { htmlLabels: false },
+        })
         await m.parse(stableCode)
         if (cancelled) return
         const id = `mmd${Math.random().toString(36).slice(2, 8)}`
