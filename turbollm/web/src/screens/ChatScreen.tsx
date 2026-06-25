@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { ArrowDown, Brain, Copy, Download, Paperclip, SendHorizontal, Share2, SlidersHorizontal, Square, UserRound, X } from 'lucide-react'
-import { continueConversation, sendMessage } from '../lib/chat-api'
+import { continueConversation, fetchSysInfo, sendMessage } from '../lib/chat-api'
 import { useConversation, useConversationMutations } from '../lib/chat-queries'
 import { useModelActions, useModels, useStatus } from '../lib/queries'
 import type { ChatSseEvent, LiveToolCall, Message } from '../lib/chat-types'
@@ -382,7 +382,17 @@ export function ChatScreen() {
       // Create conversation on first message, baking in the selected persona + personalization.
       let convId = activeId
       if (!convId) {
-        const sp = buildSystemPrompt(selectedPersonaId, getPersonalization())
+        let sp = buildSystemPrompt(selectedPersonaId, getPersonalization())
+        if (selectedPersonaId === 'expert') {
+          try {
+            const sys = await fetchSysInfo()
+            const gpuLine = sys.gpus.length > 0
+              ? sys.gpus.map(g => `${g.name} (${Math.round(g.vramMb / 1024)} GB VRAM)`).join(', ')
+              : 'No GPU detected (CPU inference)'
+            const hwSection = `## User's hardware\nGPU: ${gpuLine}\nRAM: ${Math.round(sys.ramMB / 1024)} GB\nOS: ${sys.os}`
+            sp = sp ? `${sp}\n\n${hwSection}` : hwSection
+          } catch { /* non-fatal — proceed without hardware info */ }
+        }
         const newConv = await mut.create.mutateAsync({
           modelKey: model.key,
           systemPrompt: sp || undefined,

@@ -16,6 +16,10 @@ async function req<T>(path: string, init?: RequestInit & { json?: unknown }): Pr
   return data as T
 }
 
+export interface SysInfoGpu { name: string; vramMb: number }
+export interface SysInfo { gpus: SysInfoGpu[]; ramMB: number; cpu: string; os: string; cores: number }
+export function fetchSysInfo(): Promise<SysInfo> { return req<SysInfo>('/api/v1/sysinfo') }
+
 export function listConversations(q?: string): Promise<{ conversations: Conversation[] }> {
   return req(`/api/v1/conversations${q ? `?q=${encodeURIComponent(q)}` : ''}`)
 }
