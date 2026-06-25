@@ -17,6 +17,8 @@
   <img src="https://img.shields.io/badge/node-%E2%89%A522-3c873a.svg" alt="node >= 22" />
   <img src="https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg" alt="license" />
   <img src="https://img.shields.io/badge/platform-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-555.svg" alt="platforms" />
+  <a href="https://ko-fi.com/mohitsoni"><img src="https://img.shields.io/badge/Ko--fi-support%20us-FF5E5B?logo=kofi&logoColor=white" alt="Ko-fi" /></a>
+  <a href="https://discord.gg/v6kRbV7nC"><img src="https://img.shields.io/discord/1519565431495590039.svg?label=Discord&logo=discord&color=5865F2&logoColor=white" alt="Discord" /></a>
 </p>
 
 <!-- Brand: shipped app icon web/public/brand/turbollm-icon-512.jpeg · high-res masters web/brand-assets/ (unshipped) · in-app mark web/src/components/Logo.tsx · favicon web/public/favicon.svg -->
@@ -51,6 +53,7 @@ LLMs** — built for people who today hand-compile forks and hunt forums for the
 - [How TurboLLM compares](#how-turbollm-compares)
 - [Troubleshooting](#troubleshooting)
 - [Develop from source](#develop-from-source)
+- [Community](#community)
 - [License](#license)
 
 ---
@@ -479,6 +482,12 @@ Frontend hot-reload: `cd web && npm run dev` (proxies `/api` and `/v1` to the da
 
 **Stack:** Node ≥22 · TypeScript · Hono · `node:sqlite` · tsup — and a React 19 + Tailwind v4 +
 shadcn/ui frontend. One TypeScript codebase, shipped as an npm package.
+
+---
+
+## Community
+
+Questions, ideas, and show-and-tell — join the [Discord](https://discord.gg/v6kRbV7nC).
 
 ---
 
