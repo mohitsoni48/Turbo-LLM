@@ -37,10 +37,17 @@ _Nothing yet._
 - **TurboLLM Expert persona.** The Expert is now a first-class persona in the persona picker
   (alongside Default, Designer, Research, etc.) instead of a hidden launch from Settings. It
   carries a comprehensive built-in knowledge base covering every screen, load profile parameter,
-  engine, auto-tune algorithm, gateway, built-in tools, and troubleshooting patterns.
+  engine, auto-tune algorithm, gateway, built-in tools, and troubleshooting patterns, and is
+  given your actual hardware (GPU, VRAM, RAM, OS) so it can suggest models that fit your machine.
 
 ### Changed
 - Removed the "Launch TurboLLM Expert" section from Settings — use the persona picker instead.
+
+### Fixed
+- **Mermaid artifact image export.** Downloading a Mermaid diagram (e.g. a flowchart the model
+  drew) as PNG or JPEG failed with "Couldn't export this artifact as an image." Mermaid rendered
+  text labels as HTML `<foreignObject>`, which taints the export canvas in the browser. Labels are
+  now rendered as native SVG text, so PNG/JPEG export works.
 
 ## [1.5.0] - 2026-06-25
 
