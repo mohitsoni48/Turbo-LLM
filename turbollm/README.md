@@ -178,8 +178,11 @@ the detail:
   collapsible, timed "thought for N s" blocks.
 - **Markdown + syntax-highlighted code** with one-click copy — plus **inline Unicode charts**
   the model draws when a comparison, trend, or hierarchy is genuinely worth a visual.
-- **Personas** — pick a style (Concise · Detailed · Blunt · Formal · Tutor · Creative · Default)
-  per conversation, no prompt-wrangling required.
+- **Live artifacts** — `html`, `svg`, and `mermaid` replies render as **sandboxed, offline
+  previews** shown as an image, with one-click export to **PNG / JPEG / SVG / animated GIF / HTML**.
+- **Personas** — pick a style (Default · **Designer** · Concise · Detailed · Blunt · Formal · Tutor ·
+  Creative · Research) per conversation, no prompt-wrangling required. The **Designer** persona
+  produces polished, self-contained, previewable designs by default.
 - **Edit, regenerate, delete, copy** any message; **persistent, searchable conversations**
   with rename, delete, and **auto-generated titles**.
 - **Per-chat system prompt** and **per-chat sampling** overrides — temperature, top-p/k, min-p,
@@ -189,6 +192,21 @@ the detail:
 - **Agentic tools** — built-in `web_search` (Tavily), `fetch_url`, and sandboxed `run_code`, plus
   **MCP server support** (stdio / SSE) so any MCP server's tools appear in every chat. A **Research**
   persona forces multi-step web search and cites sources inline.
+
+</details>
+
+<details>
+<summary><strong>🤖 Background agents — long-running tasks that don't tie up your chat</strong></summary>
+
+<br/>
+
+- **Launch an agent and walk away.** The **Agents** screen runs tasks in the daemon, separate from
+  the chat tab — describe the task, pick which tools it may use (web search / fetch URL / run code),
+  and let it work.
+- **Live, reconnectable progress.** Watch the run stream in real time; navigate away or reload and
+  the view **reconnects** to the in-progress output. Runs **queue** behind any active run and
+  **persist** across restarts.
+- **Cancel anytime**, and review completed runs (messages + the tool calls they made) later.
 
 </details>
 

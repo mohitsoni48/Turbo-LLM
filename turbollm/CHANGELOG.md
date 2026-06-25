@@ -25,6 +25,35 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
+## [1.5.0] - 2026-06-25
+
+**Feature release — background agents, inline artifacts, and a Designer persona.** Run agent
+tasks in the background while you keep chatting, get HTML/SVG/Mermaid replies rendered as live
+previews you can export as images, and a new persona that produces polished, self-contained
+designs by default.
+
+### Added
+- **Background agents.** A new **Agents** screen launches long-running agent tasks that run in
+  the daemon — independent of the chat tab. Each run has a live-streaming view, queues behind any
+  active run, **reconnects** to in-progress output if you navigate away or reload, lets you pick
+  per-run tool consent (web search / fetch URL / run code) at launch, and can be cancelled. Runs
+  are persisted, so they survive a restart (in-flight runs are marked interrupted).
+- **Inline artifacts.** Fenced ` ```html `, ` ```svg `, and ` ```mermaid ` blocks now render as
+  **live, sandboxed previews** presented as an image, with one-click export to **PNG / JPEG / SVG /
+  animated GIF / HTML**. The preview card fits to its content (capped at ~60% of the screen) with a
+  fit-width / fit-height toggle. Everything renders **fully offline** — the sandbox blocks all
+  network access.
+- **Designer persona.** A senior front-end designer that turns a request into a beautiful,
+  self-contained artifact you can preview — with strong built-in defaults for typography, color,
+  layout, depth, and accessibility, and a hard offline constraint (no CDNs, all assets inline).
+
+### Changed
+- **Personas now guide artifact use.** The **Default** persona advertises diagram & preview
+  capability, and every persona gets guidance to reach for `html` / `svg` / `mermaid` when a visual
+  is genuinely useful — and to stay in prose otherwise (no over-rendering).
+- **Artifacts read as results, not code.** They are shown purely as a rendered image — no language
+  tag, no code/preview toggle — with downloads offered by output format.
+
 ## [1.4.2] - 2026-06-23
 
 **Bugfix — vLLM (safetensors) models now load and chat correctly.** Three issues kept vLLM
