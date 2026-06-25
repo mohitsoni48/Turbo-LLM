@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { Moon, Sun, Monitor, Save, ExternalLink, ShieldAlert, Sparkles, RefreshCw, Check, X, Loader2, AlertTriangle, ArrowUpCircle } from 'lucide-react'
+import { Moon, Sun, Monitor, Save, ExternalLink, ShieldAlert, RefreshCw, Check, X, Loader2, AlertTriangle, ArrowUpCircle } from 'lucide-react'
 import {
   PERSONAS, getDefaultPersonaId, getPersonalization, savePersonalization,
   setDefaultPersonaId, type PersonaId, type Personalization,
@@ -23,7 +22,7 @@ import {
 } from '../lib/queries'
 import { CopyButton } from '../components/ui/copy-button'
 import { ModelDirs } from './models/ModelDirs'
-import { useConversationMutations } from '../lib/chat-queries'
+
 import { ApiError, type TelemetryLevel } from '../lib/api'
 import { TELEMETRY_UI_ENABLED } from '../lib/flags'
 import { toast } from '../components/ui/sonner'
@@ -216,9 +215,6 @@ export function SettingsScreen() {
       {restartOverlay && <RestartOverlay onDismiss={() => setRestartOverlay(false)} />}
 
       <div className="flex flex-col gap-6">
-
-        {/* TurboLLM Expert (spec 08 §2) */}
-        <ExpertSection />
 
         {/* Theme */}
         <section className="rounded-lg border border-border bg-panel p-4">
@@ -477,64 +473,6 @@ export function SettingsScreen() {
 }
 
 // ── TurboLLM Expert (spec 08 §2): launch an in-app expert chat ─────────────────
-
-function ExpertSection() {
-  const navigate = useNavigate()
-  const { data: status } = useStatus()
-  const mut = useConversationMutations()
-  const setPendingConversationId = useUiStore((s) => s.setPendingConversationId)
-
-  const modelLoaded = status?.engine.state === 'running' && !!status?.model
-
-  const launch = () => {
-    if (!modelLoaded) return
-    mut.createExpert.mutate(undefined, {
-      onSuccess: (conv) => {
-        setPendingConversationId(conv.id)
-        navigate('/chat')
-      },
-      onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not launch the Expert assistant.'),
-    })
-  }
-
-  return (
-    <section className="rounded-lg border border-border bg-panel p-4">
-      <h2 className="mb-1 text-[13px] font-semibold uppercase tracking-wide text-faint">TurboLLM Expert</h2>
-      <p className="mb-3 text-[12px] text-muted">
-        Chat with a built-in assistant that knows TurboLLM — it can explain features, help
-        configure engines, models, and settings, and troubleshoot. Runs on your loaded model.
-      </p>
-
-      {modelLoaded ? (
-        <Button onClick={launch} disabled={mut.createExpert.isPending}>
-          <Sparkles size={14} />
-          {mut.createExpert.isPending ? 'Launching…' : 'Launch Expert'}
-        </Button>
-      ) : (
-        <div
-          className="flex items-start gap-2 rounded-md border p-2.5 text-[12px]"
-          style={{
-            borderColor: 'color-mix(in srgb, var(--accent) 40%, var(--border))',
-            background: 'color-mix(in srgb, var(--accent) 6%, transparent)',
-          }}
-        >
-          <Sparkles size={14} className="mt-0.5 shrink-0" style={{ color: 'var(--accent)' }} />
-          <div className="text-muted">
-            Load a model first to chat with the Expert assistant. Pick one on the{' '}
-            <button
-              type="button"
-              onClick={() => navigate('/models')}
-              className="font-medium text-ink underline-offset-2 hover:underline"
-            >
-              Models
-            </button>{' '}
-            screen.
-          </div>
-        </div>
-      )}
-    </section>
-  )
-}
 
 // ── ComfyUI GPU coordination (push) ───────────────────────────────────────────
 // ComfyUI and the LLM engine both want the GPU's VRAM. A one-time-installed ComfyUI

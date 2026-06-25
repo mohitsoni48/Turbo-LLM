@@ -24,11 +24,6 @@ export function createConversation(partial?: Partial<Pick<Conversation, 'title' 
   return req('/api/v1/conversations', { method: 'POST', json: partial ?? {} })
 }
 
-/** Launch the built-in TurboLLM Expert thread (spec 08 §2). The expert system
- *  prompt lives server-side and is never sent from the client. */
-export function createExpertConversation(): Promise<Conversation> {
-  return req('/api/v1/conversations/expert', { method: 'POST', json: {} })
-}
 
 export function getConversation(id: string): Promise<Conversation> {
   return req(`/api/v1/conversations/${encodeURIComponent(id)}`)

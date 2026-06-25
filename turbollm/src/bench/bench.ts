@@ -46,6 +46,28 @@ export interface BenchCandidate {
   vramAbsMb: number | null
 }
 
+export interface BenchLogEntry {
+  ts: string
+  step: string
+  candidate?: BenchCandidate
+}
+
+export interface BenchLogWinner {
+  params: BenchCandidate['params']
+  tps: number
+  prefillTps?: number | null
+  ttftMs: number
+  vramMb: number | null
+}
+
+export interface BenchLog {
+  modelKey: string
+  startedAt: string
+  hardware: { gpus: Array<{ name: string; vramMb: number }>; ramMb: number; os: string }
+  entries: BenchLogEntry[]
+  winner: BenchLogWinner | null
+}
+
 /** Live state surfaced on GET /status (spec 02 §7 / 09 §1). `running:false` resets
  *  step/best; `done`/`error` linger after a finished run until the next starts. */
 export interface BenchState {
@@ -140,6 +162,9 @@ export class BenchRunner {
   // stop/restart/load (kill switches) interrupts auto-tune immediately rather than
   // waiting out the current candidate's request.
   private abort: AbortController | null = null
+  private runLog: BenchLogEntry[] = []
+  private runLogMeta: { modelKey: string; startedAt: string; sys: SysInfo } | null = null
+  private logWinner: BenchLogWinner | null = null
   // The finished run's winning candidate, held (not persisted) until the user clicks Save.
   private winning:
     | { modelKey: string; profile: LoadProfile; cand: BenchCandidate; entry: ModelEntry; sys: SysInfo; engineVersion: string }
@@ -196,6 +221,26 @@ export class BenchRunner {
     while (this.state.running && Date.now() < deadline) await sleep(150)
   }
 
+  getLog(): BenchLog | null {
+    if (!this.runLogMeta) return null
+    const { modelKey, startedAt, sys } = this.runLogMeta
+    return {
+      modelKey,
+      startedAt,
+      hardware: {
+        gpus: sys.gpus.map((g) => ({ name: g.name, vramMb: g.vramMb })),
+        ramMb: sys.ramMB,
+        os: sys.os,
+      },
+      entries: [...this.runLog],
+      winner: this.logWinner,
+    }
+  }
+
+  private emit(step: string, candidate?: BenchCandidate): void {
+    this.runLog.push({ ts: new Date().toISOString(), step, ...(candidate ? { candidate } : {}) })
+  }
+
   /** Start a run for `modelKey`. Rejects (throws BenchError) when a run is already
    *  active, the engine is busy, or the model isn't a benchmarkable GGUF. The run
    *  itself proceeds in the background; callers get 202 + poll /status. */
@@ -222,6 +267,9 @@ export class BenchRunner {
     this.cancelled = false
     this.abort = new AbortController()
     this.winning = null
+    this.runLog = []
+    this.runLogMeta = null
+    this.logWinner = null
     this.deadline = Date.now() + TOTAL_BUDGET_MS
     this.state = { running: true, modelKey, step: 'Preparing…', candidates: [] }
     void this.run(modelKey, entry, base).catch((e) => {
@@ -236,6 +284,7 @@ export class BenchRunner {
 
   private async run(modelKey: string, entry: ModelEntry, base?: Partial<LoadProfile>): Promise<void> {
     const sys = getSysInfo()
+    this.runLogMeta = { modelKey, startedAt: new Date().toISOString(), sys }
     const active = this.registry.active()
     const caps = active?.capabilities ?? { flags: [], kvTypes: [] }
     const saved = this.store.snapshot().modelProfiles[modelKey] as Partial<LoadProfile> | undefined
@@ -278,6 +327,7 @@ export class BenchRunner {
       kvToTune = decideKvToBench(spread, kvCandidates)
       const swing = spread < 0 ? 'unknown' : spread >= Number.MAX_SAFE_INTEGER ? 'huge' : `${Math.round(spread)} MB`
       this.state = { ...this.state, step: `KV cache swing ${swing} → tuning ${kvToTune.join(' + ')}`, candidates: results }
+      this.emit(`KV spread ${swing} → tuning ${kvToTune.join(' + ')}`)
     }
 
     for (let i = 0; i < kvToTune.length && !this.cancelled && Date.now() <= this.deadline; i++) {
@@ -321,6 +371,7 @@ export class BenchRunner {
       // Hold the winner instead of auto-saving — the UI shows a Save/Cancel results dialog and
       // persists via POST /bench/save only when the user clicks Save.
       this.winning = { modelKey, profile, cand: best.cand, entry, sys, engineVersion: active?.version ?? '' }
+      this.logWinner = { params: best.cand.params, tps: best.cand.tps ?? 0, prefillTps: best.cand.prefillTps, ttftMs: best.cand.ttftMs ?? 0, vramMb: best.cand.vramMb }
       this.state = {
         running: false,
         modelKey,
@@ -521,7 +572,7 @@ export class BenchRunner {
     value: number,
     probe: { outcome: BenchCandidate['outcome']; vramAbsMb: number | null },
   ): void {
-    results.push({
+    const probeCand: BenchCandidate = {
       label: `probe ${knob}=${value}`,
       params: {
         ctx: base.ctx,
@@ -537,7 +588,9 @@ export class BenchRunner {
       ttftMs: null,
       vramMb: null,
       vramAbsMb: probe.vramAbsMb,
-    })
+    }
+    results.push(probeCand)
+    this.emit(`${probeCand.label} → ${probe.outcome}${probe.vramAbsMb != null ? ` (${probe.vramAbsMb} MB)` : ''}`, probeCand)
     this.state = { ...this.state, candidates: results }
   }
 
@@ -554,6 +607,7 @@ export class BenchRunner {
     this.state = { ...this.state, step: `KV ${profile.kvTypeK}: measuring best (${label})…`, candidates: results }
     const cand = await this.measure(entry, sys, profile, caps, label, `Measuring ${label}`)
     results.push(cand)
+    this.emit(`bench ${label} → ${cand.outcome}${cand.tps != null ? ` (${cand.tps.toFixed(1)} tok/s)` : ''}`, cand)
     this.state = { ...this.state, candidates: results, bestTps: cand.tps ?? this.state.bestTps }
     await this.settleGpu()
     return cand.outcome === 'ok' && cand.tps !== null ? { cand, profile } : null

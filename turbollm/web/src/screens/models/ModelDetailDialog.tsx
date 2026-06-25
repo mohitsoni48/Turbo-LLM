@@ -180,9 +180,16 @@ export function ModelDetailDialog({
 
   // Auto-tune results dialog (shown on a finished run). Both buttons close the whole model dialog;
   // Save persists the tuned profile (POST /bench/save), Cancel discards it.
-  const onTuneSave = () => {
+  const onTuneSave = (downloadLog: boolean) => {
     bench.save.mutate(undefined, {
-      onSuccess: () => toast.success('Tuned settings saved'),
+      onSuccess: () => {
+        toast.success('Tuned settings saved')
+        if (downloadLog) {
+          const a = document.createElement('a')
+          a.href = '/api/v1/bench/log'
+          a.click()
+        }
+      },
       onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not save tuned settings.'),
     })
     onClose()
@@ -619,9 +626,10 @@ function AutoTuneResultDialog({
     recommendedSampling?: CardSampling
   }
   modelName?: string
-  onSave: () => void
+  onSave: (downloadLog: boolean) => void
   onCancel: () => void
 }) {
+  const [downloadLog, setDownloadLog] = useState(true)
   const rec = result?.recommendedSampling
   const s = result?.sampling
   const fromCard = (k: keyof CardSampling) => rec?.[k] != null
@@ -683,8 +691,12 @@ function AutoTuneResultDialog({
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
+          <label className="mr-auto flex cursor-pointer items-center gap-1.5 text-[12px] text-muted">
+            <input type="checkbox" checked={downloadLog} onChange={(e) => setDownloadLog(e.target.checked)} className="h-3.5 w-3.5 accent-[var(--accent)]" />
+            Download run log
+          </label>
           <AlertDialogCancel onClick={onCancel}>Cancel</AlertDialogCancel>
-          <AlertDialogAction onClick={onSave}>Save</AlertDialogAction>
+          <AlertDialogAction onClick={() => onSave(downloadLog)}>Save</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

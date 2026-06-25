@@ -1219,6 +1219,14 @@ export function registerApi(app: Hono, d: Deps): void {
     return c.json({ ok: true })
   })
 
+  app.get('/api/v1/bench/log', (c) => {
+    const log = d.bench.getLog()
+    if (!log) return err(c, 404, 'no_bench_log', 'No auto-tune log available.')
+    const slug = log.modelKey.replace(/[^a-z0-9]/gi, '-').replace(/-+/g, '-').slice(0, 60)
+    c.header('Content-Disposition', `attachment; filename="autotune-${slug}-${log.startedAt.slice(0, 10)}.json"`)
+    return c.json(log)
+  })
+
   // ---- models (A3, spec 04) ----
   app.get('/api/v1/models', (c) => {
     const { models, scanning, lastScanAt } = d.scanner.list()

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  createConversation, createExpertConversation, deleteConversation, deleteMessage, editMessage,
+  createConversation, deleteConversation, deleteMessage, editMessage,
   getConversation, listConversations, regenerate, stopGeneration, updateConversation,
 } from './chat-api'
 import type { Conversation } from './chat-types'
@@ -39,11 +39,7 @@ export function useConversationMutations() {
       mutationFn: (p?: Partial<Pick<Conversation, 'title' | 'systemPrompt' | 'modelKey' | 'toolPolicy'>>) => createConversation(p),
       onSuccess: invalidateList,
     }),
-    createExpert: useMutation({
-      mutationFn: () => createExpertConversation(),
-      onSuccess: invalidateList,
-    }),
-    update: useMutation({
+update: useMutation({
       mutationFn: (v: { id: string } & Partial<Pick<Conversation, 'title' | 'systemPrompt' | 'sampling'>>) => updateConversation(v.id, v),
       onSuccess: (_d, v) => { invalidateList(); invalidateDetail(v.id) },
     }),

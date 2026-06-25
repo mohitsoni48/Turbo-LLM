@@ -7,7 +7,7 @@ import { clampMaxTokens } from '../config/config'
 import { engineModelAlias } from '../engines/compat'
 import { feedChunk, flushState, initParseState } from './parser'
 import { needsExtraPass } from './think-utils'
-import { getSysInfo } from '../sysinfo/sysinfo'
+
 import type { ClaimVerdict, ConversationStore, MessageStats, ResearchMeta, ResearchSource, ToolCallRecord } from './db'
 import { checkReply } from '../tools/research-referee.js'
 import { buildSnapshot } from './chat-export'
@@ -24,36 +24,6 @@ export function abortAllInFlightChats(): number {
   for (const ac of inflight.values()) ac.abort()
   inflight.clear()
   return n
-}
-
-// Built-in system prompt for the TurboLLM Expert thread (spec 08 §2). Kept
-// server-side and never sent to the client, so it stays hidden from the UI.
-const EXPERT_SYSTEM_PROMPT = `You are the TurboLLM in-app expert assistant — a knowledgeable, friendly guide built into TurboLLM, a local-first desktop app for running large language models on the user's own machine.
-
-Your job is to help the user get the most out of TurboLLM:
-- Explain what TurboLLM features do and how to use them: chatting with local models, the Models screen (discover, download, load, and tune models), the Engines screen (install and manage inference backends like llama.cpp), and Settings (idle timeout, model defaults such as context length and GPU layers, auto-load, theme, network/LAN exposure, and privacy/telemetry).
-- Help the user configure things: picking and loading a model, adjusting sampling (temperature, top-p, top-k, min-p), setting context length and GPU offload, and managing per-thread system prompts and sampling overrides.
-- Troubleshoot common problems: a model that won't load, slow generation, running out of context, missing or failed engine installs, and GPU/CPU offload questions. Reason from the symptoms the user describes and the hardware they mention.
-
-Guidelines:
-- Keep answers practical, concise, and actionable. Prefer concrete steps ("Open the Models screen, click …") over abstract advice.
-- When something depends on the user's hardware or which model is loaded, say so and ask a brief clarifying question if needed.
-- Everything runs locally and offline; never suggest sending the user's data to external services.
-- If you are unsure or a feature may not exist, say so honestly rather than inventing details.`
-
-function buildExpertPrompt(): string {
-  const sys = getSysInfo()
-  const ramGb = Math.round(sys.ramMB / 1024)
-  const gpuLines = sys.gpus.length
-    ? sys.gpus.map((g) => `- GPU: ${g.name}${g.vramMb ? ` (${Math.round(g.vramMb / 1024)} GB VRAM)` : ''}`).join('\n')
-    : '- GPU: none detected'
-  const hw = [
-    '\n\n## User\'s hardware',
-    `- CPU: ${sys.cpu}${sys.cores ? ` (${sys.cores} cores)` : ''}`,
-    `- RAM: ${ramGb} GB`,
-    gpuLines,
-  ].join('\n')
-  return EXPERT_SYSTEM_PROMPT + hw
 }
 
 type S = 200 | 201 | 202 | 400 | 404 | 409 | 500
@@ -73,20 +43,6 @@ export function registerChatRoutes(app: Hono, d: Deps): void {
   app.post('/api/v1/conversations', async (c) => {
     const b = await body<{ title?: string; systemPrompt?: string; modelKey?: string; toolPolicy?: string }>(c)
     const conv = db.createConversation({ title: b.title, systemPrompt: b.systemPrompt, modelKey: b.modelKey, toolPolicy: b.toolPolicy })
-    return c.json(conv, 201)
-  })
-
-  // Launch the built-in TurboLLM Expert thread (spec 08 §2). The system prompt is
-  // injected server-side and the conversation is flagged expertMode so the client
-  // never sees or edits it.
-  app.post('/api/v1/conversations/expert', async (c) => {
-    const ms = d.manager.status()
-    const conv = db.createConversation({
-      title: 'TurboLLM Expert',
-      systemPrompt: buildExpertPrompt(),
-      modelKey: ms.model?.key ?? '',
-      expertMode: true,
-    })
     return c.json(conv, 201)
   })
 
