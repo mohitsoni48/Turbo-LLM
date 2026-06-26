@@ -98,7 +98,9 @@ const TURBOLLM_KNOWLEDGE =
   '**Core**:\n' +
   '- `ngl` (GPU layers): 0 = CPU only; blockCount = all layers on GPU. Higher = faster inference but more VRAM. Shown as a slider with the real layer count as max.\n' +
   '- `ctx` (context length): max token window. VRAM scales linearly with ctx (KV cache). Reduce if VRAM is tight; increase for long conversations.\n' +
-  '- `threads`: CPU threads for computation. Defaults to core count.\n\n' +
+  '- `threads`: CPU threads for computation. Defaults to core count.\n' +
+  '- `batchSize` (`--batch-size`, default 2048): logical batch size — how many prompt tokens are submitted per decode step during prefill. Larger = faster prefill on long prompts, more VRAM at load. Leave blank for the engine default.\n' +
+  '- `uBatchSize` (`--ubatch-size`, default 512): physical micro-batch size — the chunk actually computed at once. Must be ≤ batchSize. Tune down if a large batch OOMs at load. Both live in the main llama.cpp settings (not Advanced); blank = engine default.\n\n' +
   '**MoE models only**:\n' +
   '- `nCpuMoe` (CPU MoE expert count): number of MoE router experts kept on CPU. Reducing it frees GPU VRAM (moves more routing to GPU). Auto-tune searches this for MoE models.\n\n' +
   '**KV Cache**:\n' +
