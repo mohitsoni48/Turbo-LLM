@@ -147,7 +147,7 @@ export class DownloadManager {
       const u = input.url.trim()
       if (!/^https?:\/\//i.test(u)) throw new DownloadError('invalid_url', 'URL must start with http:// or https://.')
       const path = safePathname(u)
-      if (!subdir && !/\.gguf$/i.test(path) && !HF_BLOB_RE.test(u)) {
+      if (!subdir && !/\.gguf$/i.test(path) && !HF_BLOB_RE.test(u.split('?')[0])) {
         throw new DownloadError('invalid_url', 'URL must point to a .gguf file.')
       }
       filename = basename(path)

@@ -260,8 +260,8 @@ export function ModelDetailDialog({
 
             {isVllm && (
               <Section>
-                <Row label="Max model length" hint="vLLM --max-model-len. Max context tokens. 0 = derive from the model config.">
-                  <NumberInput value={draft.vllm?.maxModelLen ?? 0} min={0} max={detail.nativeCtx || 1_048_576} step={1024} onChange={(v) => setV('maxModelLen', v)} />
+                <Row label="Max model length" hint="vLLM --max-model-len. Max context tokens. Leave blank to derive from the model config.">
+                  <DefaultableNumberInput value={draft.vllm?.maxModelLen || undefined} placeholder="from model" min={1} max={detail.nativeCtx || 1_048_576} step={1024} onChange={(v) => setV('maxModelLen', v ?? 0)} />
                 </Row>
                 <Slider
                   label="GPU memory utilization"
@@ -273,8 +273,8 @@ export function ModelDetailDialog({
                   onChange={(v) => setV('gpuMemoryUtilization', v / 100)}
                   fmt={(v) => `${v}%`}
                 />
-                <Row label="Max concurrent sequences" hint="vLLM --max-num-seqs. Requests served in parallel. 0 = vLLM default.">
-                  <NumberInput value={draft.vllm?.maxNumSeqs ?? 0} min={0} max={1024} step={1} onChange={(v) => setV('maxNumSeqs', v)} />
+                <Row label="Max concurrent sequences" hint="vLLM --max-num-seqs. Requests served in parallel.">
+                  <DefaultableNumberInput value={draft.vllm?.maxNumSeqs || undefined} placeholder="auto" min={1} max={1024} step={1} onChange={(v) => setV('maxNumSeqs', v ?? 0)} />
                 </Row>
                 <Row label="Compute dtype" hint="vLLM --dtype. 'auto' follows the model's config.">
                   <Select value={draft.vllm?.dtype ?? 'auto'} options={['auto', 'bfloat16', 'float16', 'float32']} onChange={(v) => setV('dtype', v as LoadProfile['vllm']['dtype'])} />
@@ -308,6 +308,12 @@ export function ModelDetailDialog({
                   <NumberInput value={draft.nKeep} min={0} max={draft.ctx} onChange={(v) => set('nKeep', v)} />
                 </Row>
               )}
+              <Row label="Batch size" hint="--batch-size: logical prompt-processing batch. Larger = faster prefill, more VRAM.">
+                <DefaultableNumberInput value={draft.batchSize} placeholder="2048" min={1} max={65536} step={128} onChange={(v) => set('batchSize', v)} />
+              </Row>
+              <Row label="Micro-batch size" hint="--ubatch-size: physical micro-batch. Must be ≤ batch size.">
+                <DefaultableNumberInput value={draft.uBatchSize} placeholder="512" min={1} max={65536} step={128} onChange={(v) => set('uBatchSize', v)} />
+              </Row>
             </Section>
             )}
 
@@ -448,11 +454,11 @@ export function ModelDetailDialog({
                 </Row>
                 {draft.ropeScalingType !== 'none' && (
                   <>
-                    <Row label="RoPE freq base" hint="Base frequency override. 0 = model native.">
-                      <NumberInput value={draft.ropeFreqBase} min={0} max={10_000_000} onChange={(v) => set('ropeFreqBase', v)} />
+                    <Row label="RoPE freq base" hint="Base frequency override. Leave blank for model native.">
+                      <DefaultableNumberInput value={draft.ropeFreqBase || undefined} placeholder="model native" min={1} max={10_000_000} onChange={(v) => set('ropeFreqBase', v ?? 0)} />
                     </Row>
-                    <Row label="RoPE freq scale" hint="Frequency scale. 0 = model native; e.g. 0.25 for 4× context.">
-                      <NumberInput value={draft.ropeFreqScale} min={0} max={10} step={0.01} onChange={(v) => set('ropeFreqScale', v)} />
+                    <Row label="RoPE freq scale" hint="Frequency scale — e.g. 0.25 for 4× context. Leave blank for model native.">
+                      <DefaultableNumberInput value={draft.ropeFreqScale || undefined} placeholder="model native" min={0.01} max={10} step={0.01} onChange={(v) => set('ropeFreqScale', v ?? 0)} />
                     </Row>
                   </>
                 )}
@@ -839,6 +845,34 @@ function NumberInput({ value, min, max, step = 1, onChange }: { value: number; m
       onChange={(e) => onChange(Math.max(min, Math.min(max, Number(e.target.value) || min)))}
       className="w-20 rounded-md border border-border bg-bg px-2 py-1 text-right text-[13px] text-ink outline-none"
     />
+  )
+}
+
+/** Number input that treats `undefined` as "engine default". Shows a faint placeholder with
+ *  the default value and a × reset button when the user has set an explicit override. */
+function DefaultableNumberInput({ value, placeholder, min, max, step = 1, onChange }: {
+  value: number | undefined; placeholder: string; min: number; max: number; step?: number
+  onChange: (v: number | undefined) => void
+}) {
+  return (
+    <div className="flex items-center gap-1">
+      <input
+        type="number"
+        min={min}
+        max={max}
+        step={step}
+        value={value ?? ''}
+        placeholder={placeholder}
+        onChange={(e) => {
+          const raw = e.target.value
+          onChange(raw === '' ? undefined : Math.max(min, Math.min(max, Number(raw))))
+        }}
+        className="w-20 rounded-md border border-border bg-bg px-2 py-1 text-right text-[13px] text-ink outline-none placeholder:text-faint"
+      />
+      {value !== undefined && (
+        <button type="button" onClick={() => onChange(undefined)} className="shrink-0 text-faint hover:text-ink" title="Reset to default">×</button>
+      )}
+    </div>
   )
 }
 

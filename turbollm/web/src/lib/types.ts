@@ -510,6 +510,10 @@ export type LoadProfile = {
   /** vLLM-specific load controls (F-027). Mirrors the daemon's VllmProfile. */
   vllm: VllmProfile
   extraArgs: string[]
+  /** llama.cpp --batch-size. Prompt processing batch size. 0 / absent = engine default (2048). */
+  batchSize?: number
+  /** llama.cpp --ubatch-size. Physical micro-batch size. 0 / absent = engine default (512). */
+  uBatchSize?: number
   tunedBy?: string
 }
 

@@ -25,6 +25,8 @@ class RunBuffer {
   }
 
   since(fromSeq: number): BufferedEvent[] {
+    // Events older than the ring-buffer window (BUFFER_CAP) are silently dropped —
+    // subscribers reconnecting after a long gap may miss events in that gap.
     return this.events.filter((e) => e.seq >= fromSeq)
   }
 }
@@ -49,6 +51,7 @@ export class AgentRunner {
   private acs = new Map<string, AbortController>()
   private queue: PendingRun[] = []
   private active: string | null = null
+  private interruptedIds = new Set<string>()
 
   constructor(d: Deps) { this.d = d }
 
@@ -142,11 +145,14 @@ export class AgentRunner {
       this.d.db.updateAgentRun?.(pending.id, { status: 'done', endedAt: new Date().toISOString() })
     } catch (e) {
       const isAbort = (e as Error)?.name === 'AbortError'
-      this.d.db.updateAgentRun?.(pending.id, {
-        status: isAbort ? 'cancelled' : 'failed',
-        error: isAbort ? undefined : (e as Error).message,
-        endedAt: new Date().toISOString(),
-      })
+      // interruptActive() pre-writes 'interrupted' status — don't overwrite it.
+      if (!this.interruptedIds.delete(pending.id)) {
+        this.d.db.updateAgentRun?.(pending.id, {
+          status: isAbort ? 'cancelled' : 'failed',
+          error: isAbort ? undefined : (e as Error).message,
+          endedAt: new Date().toISOString(),
+        })
+      }
     } finally {
       this.finish(pending.id)
     }
@@ -156,6 +162,8 @@ export class AgentRunner {
     this.emitters.get(id)?.emit('done')
     this.acs.delete(id)
     this.active = null
+    // Delay cleanup so in-flight subscribers can drain pending events before maps are cleared.
+    setTimeout(() => { this.buffers.delete(id); this.emitters.delete(id) }, 5000)
     void this.processNext()
   }
 
@@ -180,6 +188,7 @@ export class AgentRunner {
   /** Called by the engine manager when the active model is evicted. */
   interruptActive(): void {
     if (!this.active) return
+    this.interruptedIds.add(this.active)
     this.acs.get(this.active)?.abort()
     this.d.db.updateAgentRun?.(this.active, { status: 'interrupted', endedAt: new Date().toISOString() })
   }

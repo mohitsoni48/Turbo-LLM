@@ -237,3 +237,11 @@ html.tllm-config-resizing .tllm-sheet {
   --normal-text: var(--ink);
   --normal-border: var(--border);
 }
+
+/* Hide number-input spinners globally — they clutter small inline inputs. */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] { -moz-appearance: textfield; }

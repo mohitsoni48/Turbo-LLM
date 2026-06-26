@@ -128,6 +128,12 @@ export interface LoadProfile {
    *  Power-user override for models that should always respond in a fixed format. */
   grammar: string
   extraArgs: string[]
+  /** llama.cpp --batch-size (-b). Logical batch size for prompt processing. 0 / absent = engine
+   *  default (2048). Larger values use more memory but can improve prompt-ingestion speed. */
+  batchSize?: number
+  /** llama.cpp --ubatch-size (-ub). Physical micro-batch size for prompt processing. 0 / absent =
+   *  engine default (512). Must be ≤ batchSize. Tune alongside batchSize for throughput. */
+  uBatchSize?: number
   /** Provenance of a saved profile (spec 05 §3, 09 §1): 'bench' = written by the
    *  auto-tune runner, 'user' = hand-saved. Absent on heuristic/global defaults. */
   tunedBy?: 'bench' | 'user'
@@ -345,6 +351,8 @@ export function profileToArgs(p: LoadProfile, m: ModelEntry, caps: Capabilities,
   const threads = p.threads > 0 ? p.threads : cores > 0 ? Math.max(1, Math.floor(cores / 2)) : 0
   if (threads > 0) a.push('--threads', String(threads))
   if (p.threadsBatch > 0) a.push('--threads-batch', String(p.threadsBatch))
+  if (p.batchSize && p.batchSize > 0 && has('--batch-size')) a.push('--batch-size', String(p.batchSize))
+  if (p.uBatchSize && p.uBatchSize > 0 && has('--ubatch-size')) a.push('--ubatch-size', String(p.uBatchSize))
   if (m.vision && p.useMmproj && m.mmprojPath) a.push('--mmproj', m.mmprojPath)
   if (m.vision && p.useMmproj && !p.mmprojGpu && has('--no-mmproj-offload')) a.push('--no-mmproj-offload')
   if (p.imageMaxTokens > 0 && has('--image-max-tokens')) a.push('--image-max-tokens', String(p.imageMaxTokens))

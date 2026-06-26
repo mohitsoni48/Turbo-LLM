@@ -38,16 +38,43 @@ function deriveFilename(raw: string): string {
   }
 }
 
+/** Convert non-standard HF URL forms to a direct https resolve URL.
+ *  Handles hf://owner/repo/file.gguf and ?show_file_info=file.gguf page URLs.
+ *  All other URLs are returned unchanged. */
+function normalizeHfUrl(raw: string): string {
+  try {
+    if (raw.startsWith('hf://')) {
+      const parts = raw.slice(5).split('/')
+      if (parts.length >= 3 && parts[parts.length - 1].toLowerCase().endsWith('.gguf')) {
+        const [owner, repo, ...rest] = parts
+        return `https://huggingface.co/${owner}/${repo}/resolve/main/${rest.join('/')}`
+      }
+    }
+    const u = new URL(raw)
+    if (u.hostname === 'huggingface.co') {
+      const file = u.searchParams.get('show_file_info')
+      if (file && file.toLowerCase().endsWith('.gguf')) {
+        return `https://huggingface.co${u.pathname}/resolve/main/${file}`
+      }
+    }
+  } catch { /* ignore */ }
+  return raw
+}
+
 export function ImportUrlDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const mut = useDownloadMutations()
   const [url, setUrl] = useState('')
 
   const trimmed = url.trim()
-  const filename = useMemo(() => deriveFilename(trimmed), [trimmed])
-  const valid = trimmed.length > 0 && isValidGgufUrl(trimmed)
+  const normalized = useMemo(() => normalizeHfUrl(trimmed), [trimmed])
+  const wasNormalized = normalized !== trimmed
+  const filename = useMemo(() => deriveFilename(normalized), [normalized])
+  const valid = trimmed.length > 0 && isValidGgufUrl(normalized)
   const showInvalid = trimmed.length > 0 && !valid
 
-  const enqueueError = mut.enqueue.error instanceof ApiError ? mut.enqueue.error.message : null
+  const enqueueErr = mut.enqueue.error instanceof ApiError ? mut.enqueue.error : null
+  const enqueueError = enqueueErr?.message ?? null
+  const noModelDir = enqueueErr?.code === 'no_model_dir'
 
   const close = () => {
     setUrl('')
@@ -58,7 +85,7 @@ export function ImportUrlDialog({ open, onClose }: { open: boolean; onClose: () 
   const submit = () => {
     if (!valid) return
     mut.enqueue.mutate(
-      { url: trimmed },
+      { url: normalized },
       {
         onSuccess: () => close(),
       },
@@ -89,6 +116,9 @@ export function ImportUrlDialog({ open, onClose }: { open: boolean; onClose: () 
             <div className="rounded-md border border-border bg-panel-2 px-3 py-2 text-[12px]">
               <span className="text-muted">Will save as </span>
               <span className="font-mono text-ink">{filename}</span>
+              {wasNormalized && (
+                <p className="mt-1 text-faint">URL converted to a direct download link.</p>
+              )}
             </div>
           )}
 
@@ -100,6 +130,11 @@ export function ImportUrlDialog({ open, onClose }: { open: boolean; onClose: () 
 
           {enqueueError && (
             <p className="text-[12px]" style={{ color: 'var(--err)' }}>{enqueueError}</p>
+          )}
+          {noModelDir && (
+            <p className="text-[12px] text-muted">
+              → Open <span className="font-medium text-ink">Settings → Model folders</span> to add a folder, then try again.
+            </p>
           )}
         </div>
 

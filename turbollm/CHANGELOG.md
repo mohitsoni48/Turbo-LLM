@@ -25,6 +25,42 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
+## [1.5.2] - 2026-06-26
+
+**Bug-fix + batch-size release — llama.cpp batch controls, artifact rendering overhaul,
+import-URL fixes, and the deferred v1.5.0 review nits.**
+
+### Added
+- **llama.cpp `--batch-size` / `--ubatch-size` controls** (#26). Logical batch size and
+  physical micro-batch size are now first-class load settings (shown alongside context and
+  MoE options, not buried in Advanced), for tuning prefill throughput and load-time VRAM.
+- **Import from URL accepts more Hugging Face link shapes** — `?show_file_info=<file>.gguf`
+  page URLs and `hf://owner/repo/file.gguf` URIs are auto-converted to a direct download link.
+- **Static ↔ Interactive artifact toggle.** HTML artifacts render a real, non-interactive
+  browser preview by default (pixel-accurate, can't run scripts) and can be switched to a fully
+  interactive view. Mermaid/SVG render a crisp rasterized image.
+
+### Changed
+- **Defaultable number inputs.** Fields that used a `0 = default` sentinel now show the real
+  default as placeholder text with a one-click reset, instead of asking you to type `0`.
+  Number-input spinner arrows are hidden globally.
+- **Higher-resolution artifact exports** — PNG/JPEG now enforce a 2048px minimum on the
+  shortest side.
+- **Agent runner hygiene** (BUG-007): per-run buffers/emitters are freed on finish (fixes an
+  unbounded daemon-lifetime memory leak); interrupt status no longer mislabeled as "cancelled";
+  the artifact `fetch` is guarded to `data:` URLs; Mermaid `securityLevel` is set explicitly.
+
+### Fixed
+- **BUG-009: Import from URL no longer always errors** — the HF blob regex is tested against
+  `origin + pathname` (so `?download=true` links work), with an inline "→ add a model folder"
+  hint when no model folder is configured.
+- **BUG-008: artifact PNG/JPEG exports fill the theme background** instead of exporting on a
+  transparent (black-on-paste) canvas.
+- **Mermaid/SVG artifact cards size consistently** (fit-to-height) instead of occasionally
+  blowing out to full column width.
+- **MLX venv recovery** (#18, external contributor) — re-installing recovers from a broken or
+  incompatible MLX venv (uv 0.11+ `--clear`, pinned interpreter).
+
 ## [1.5.1] - 2026-06-25
 
 **Bugfix / polish release — auto-tune run log, TurboLLM Expert persona improvements.**
