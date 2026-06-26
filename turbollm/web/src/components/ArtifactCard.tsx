@@ -96,8 +96,9 @@ function svgToRaster(svg: string, mime: 'image/png' | 'image/jpeg', scale = 2): 
         if (p.length === 4) { w = p[2]; h = p[3] } else { w = 800; h = 600 }
       }
       const canvas = document.createElement('canvas')
-      canvas.width = Math.max(1, Math.round(w * scale))
-      canvas.height = Math.max(1, Math.round(h * scale))
+      const effectiveScale = Math.max(scale, 2048 / Math.min(w, h))
+      canvas.width = Math.max(1, Math.round(w * effectiveScale))
+      canvas.height = Math.max(1, Math.round(h * effectiveScale))
       const ctx = canvas.getContext('2d')
       if (!ctx) { URL.revokeObjectURL(url); return resolve(null) }
       if (mime === 'image/jpeg') {
@@ -107,7 +108,7 @@ function svgToRaster(svg: string, mime: 'image/png' | 'image/jpeg', scale = 2): 
         ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#ffffff'
       }
       ctx.fillRect(0, 0, canvas.width, canvas.height)
-      ctx.scale(scale, scale); ctx.drawImage(img, 0, 0, w, h)
+      ctx.scale(effectiveScale, effectiveScale); ctx.drawImage(img, 0, 0, w, h)
       URL.revokeObjectURL(url)
       try { canvas.toBlob((b) => resolve(b), mime, 0.95) } catch { resolve(null) }
     }
