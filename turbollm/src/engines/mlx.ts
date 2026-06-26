@@ -77,9 +77,35 @@ export async function ensureMlxEnv(root: string, onProgress?: (p: ProvisionProgr
   const envDir = join(root, 'mlx', 'venv')
   const py = venvPython(envDir)
 
+  // If the venv Python exists but is incompatible (e.g. Python 3.14 or x86_64 from
+  // Rosetta — neither of which has mlx wheels), wipe the venv so the block below
+  // recreates it with the pinned 3.12 interpreter.
+  if (existsSync(py)) {
+    let compatible = false
+    try {
+      const { stdout } = await execFileP(py, ['--version'], { timeout: 5_000 })
+      const m = stdout.match(/Python 3\.(\d+)/)
+      if (m) {
+        const minor = Number(m[1])
+        compatible = minor >= 10 && minor <= 13
+      }
+    } catch { /* treat as incompatible — will recreate */ }
+    if (!compatible) rmSync(envDir, { recursive: true, force: true })
+  }
+
   if (!existsSync(py)) {
     onProgress?.({ phase: 'extracting', pct: -1 })
-    await execFileP(uv, ['venv', envDir], { cwd: root })
+    // Pin --python 3.12: mlx-lm requires Python ≤3.13 and has no cp314 wheels.
+    // uv downloads a managed native arm64 3.12 automatically if not found locally,
+    // avoiding Rosetta/wrong-arch picks (e.g. /usr/local/opt/python@3.14 on Apple Silicon).
+    // Pass --clear when the dir already exists (broken prior install): uv 0.11+ refuses
+    // to overwrite without it.
+    // Use the full uv platform specifier to force native arm64 Python 3.12.
+    // A bare "3.12" picks the first match on PATH, which on machines with Intel
+    // Homebrew at /usr/local/opt/ is an x86_64 Python — mlx has no x86_64 wheels.
+    const PINNED_PYTHON = 'cpython-3.12-macos-aarch64'
+    const venvArgs = ['venv', '--python', PINNED_PYTHON, ...(existsSync(envDir) ? ['--clear'] : []), envDir]
+    await execFileP(uv, venvArgs, { cwd: root })
   }
   // Install (or no-op if already satisfied) mlx-lm into the venv.
   // `--upgrade` forces an upgrade to the latest release when requested.
