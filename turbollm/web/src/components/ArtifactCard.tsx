@@ -44,7 +44,7 @@ function buildSrcdoc(type: string, code: string): string {
  *  the content. Renders full-width to measure first; DOM shape is identical in
  *  both states (no reload). */
 function FittedIframe({
-  srcDoc, frameRef, naturalW, naturalH, scale, cap, ready,
+  srcDoc, frameRef, naturalW, naturalH, scale, cap, ready, sandbox = 'allow-scripts',
 }: {
   srcDoc: string
   frameRef: React.RefObject<HTMLIFrameElement | null>
@@ -53,6 +53,9 @@ function FittedIframe({
   scale: number
   cap: number
   ready: boolean
+  // 'allow-scripts' = interactive (isolated, runs JS). 'allow-same-origin' = static
+  // (real browser render, NO scripts — untrusted markup can't execute).
+  sandbox?: string
 }) {
   const boxW = ready ? Math.round(naturalW * scale) : undefined
   const boxH = ready ? Math.round(naturalH * scale) : Math.min(naturalH, cap)
@@ -61,7 +64,7 @@ function FittedIframe({
       <iframe
         ref={frameRef}
         srcDoc={srcDoc}
-        sandbox="allow-scripts"
+        sandbox={sandbox}
         title="Artifact"
         className={cn('block border-0', ready ? '' : 'w-full')}
         style={ready
@@ -399,9 +402,14 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  const staticRef = useRef<HTMLIFrameElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [interactive, setInteractive] = useState(false)
+  // Intrinsic pixel size of the captured preview image. Used to size the card in
+  // static mode — Mermaid/SVG never render the sizing iframe, so without this their
+  // card would fall back to full column width.
+  const [imgDims, setImgDims] = useState<{ w: number; h: number } | null>(null)
 
   // Debounced code (handles any re-render churn; equals code once settled).
   const [stableCode, setStableCode] = useState(code)
@@ -478,6 +486,7 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
   useEffect(() => {
     setPreviewUrl(null)
     setInteractive(false)
+    setImgDims(null)
   }, [stableCode, theme])
 
   // Capture Mermaid SVG → static preview image once the SVG is rendered.
@@ -495,30 +504,20 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
     return () => { cancelled = true }
   }, [type, mermaid.svg])
 
-  // Capture SVG/HTML → static preview image once the iframe has sized itself.
+  // Capture SVG → static preview image (perfect SVG raster). Mermaid has its own
+  // capture effect; HTML renders a live browser iframe instead and only rasterizes
+  // (via html2canvas) on download.
   useEffect(() => {
-    if (type === 'application/vnd.mermaid' || !fitReady) return
+    if (type !== 'image/svg+xml' || !fitReady) return
     let cancelled = false
-    const doCapture = async () => {
-      const url = type === 'image/svg+xml'
-        ? await svgToPreview(stableCode)
-        : await captureHtmlPreview(stableCode, iframeRef.current, naturalW, naturalH)
+    void svgToPreview(stableCode).then((url) => {
       if (cancelled || !url) return
       setPreviewUrl(url)
       void verifyWithVision(url).then((ok) => {
-        if (!ok && !cancelled) {
-          const retry = type === 'image/svg+xml'
-            ? svgToPreview(stableCode)
-            : captureHtmlPreview(stableCode, iframeRef.current, naturalW, naturalH)
-          void retry.then((u2) => { if (u2 && !cancelled) setPreviewUrl(u2) })
-        }
+        if (!ok && !cancelled) void svgToPreview(stableCode).then((u2) => { if (u2 && !cancelled) setPreviewUrl(u2) })
       })
-    }
-    void doCapture()
+    })
     return () => { cancelled = true }
-    // naturalW/H intentionally omitted: capture fires once when fitReady flips true
-    // (naturalW is already set by then); re-running on every size tick would thrash.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [type, fitReady, stableCode])
 
   useEffect(() => {
@@ -531,21 +530,32 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
   const srcdoc = type !== 'application/vnd.mermaid' ? buildSrcdoc(type, stableCode) : ''
   const mermaidSrcdoc = mermaid.svg ? buildSrcdoc('image/svg+xml', mermaid.svg) : ''
 
+  // Static vs interactive. HTML toggles between a real no-JS render (static, default)
+  // and a scripted iframe; Mermaid/SVG show their rasterized image once it's ready.
+  const showStatic = type === 'text/html' ? !interactive : (!!previewUrl && !interactive)
+  // Dimensions used to fit the visible content. For the Mermaid/SVG static image the
+  // image's own pixels are authoritative (no iframe sizes the card after it appears);
+  // HTML is always sized by the (hidden, scripted) iframe's reported natural size.
+  const usingImg = showStatic && type !== 'text/html' && !!imgDims
+  const dispW = usingImg ? imgDims!.w : naturalW
+  const dispH = usingImg ? imgDims!.h : naturalH
+  const dispReady = dispW > 0 && availW > 0
+
   // Fit-height: scale to the 60vh cap, card hugs content. Fit-width: full column.
   const cap = maxH
   let scale = 1
-  if (fitReady) {
+  if (dispReady) {
     if (fitMode === 'width') {
-      scale = availW / naturalW
+      scale = availW / dispW
     } else {
-      const heightScale = naturalH > cap ? cap / naturalH : 1
-      const wAfterH = naturalW * heightScale
+      const heightScale = dispH > cap ? cap / dispH : 1
+      const wAfterH = dispW * heightScale
       const widthScale = wAfterH > availW ? availW / wAfterH : 1
       scale = heightScale * widthScale
     }
   }
-  const displayW = fitReady ? Math.round(naturalW * scale) : 0
-  const cardWidth = fitReady && fitMode === 'height' ? `${displayW}px` : '100%'
+  const displayW = dispReady ? Math.round(dispW * scale) : 0
+  const cardWidth = dispReady && fitMode === 'height' ? `${displayW}px` : '100%'
 
   // Applicable image-format downloads — the underlying html/svg/mermaid is abstracted.
   const formats: Fmt[] = type === 'text/html' ? ['png', 'jpeg', 'gif', 'html'] : ['png', 'jpeg', 'svg']
@@ -591,7 +601,6 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
   }
 
   // ── Body content ──────────────────────────────────────────────────────────────
-  const showStatic = !!previewUrl && !interactive
   let body: React.ReactNode
 
   if (type === 'application/vnd.mermaid' && mermaid.error) {
@@ -609,24 +618,38 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
         </div>
       </div>
     )
-  } else if (showStatic) {
-    body = (
+  } else if (type === 'text/html') {
+    // HTML renders as a REAL browser frame (perfect fidelity, matches interactive).
+    //  · static (default): same-origin, NO scripts — non-interactive, can't execute.
+    //  · interactive: scripted, isolated.
+    // A hidden scripted iframe stays mounted in static mode to report the card size
+    // and power GIF / canvas downloads. PNG/JPEG are rasterized on demand.
+    body = interactive ? (
+      <FittedIframe frameRef={iframeRef} srcDoc={srcdoc} sandbox="allow-scripts" naturalW={naturalW} naturalH={naturalH} scale={scale} cap={cap} ready={fitReady} />
+    ) : (
       <>
-        <img
-          src={previewUrl!}
-          alt="Artifact"
-          style={{ width: cardWidth, height: 'auto', display: 'block' }}
-          className="min-w-0"
-        />
-        {/* HTML iframe stays alive (hidden) so GIF/canvas downloads still work. */}
-        {type === 'text/html' && (
-          <div style={{ height: 0, overflow: 'hidden' }} aria-hidden>
-            <FittedIframe frameRef={iframeRef} srcDoc={srcdoc} naturalW={naturalW} naturalH={naturalH} scale={scale} cap={cap} ready={fitReady} />
-          </div>
-        )}
+        <FittedIframe frameRef={staticRef} srcDoc={buildCaptureDoc(stableCode)} sandbox="allow-same-origin" naturalW={naturalW} naturalH={naturalH} scale={scale} cap={cap} ready={fitReady} />
+        <div style={{ height: 0, overflow: 'hidden' }} aria-hidden>
+          <FittedIframe frameRef={iframeRef} srcDoc={srcdoc} naturalW={naturalW} naturalH={naturalH} scale={scale} cap={cap} ready={fitReady} />
+        </div>
       </>
     )
+  } else if (showStatic) {
+    // Mermaid/SVG: perfect SVG-rasterized image.
+    body = (
+      <img
+        src={previewUrl!}
+        alt="Artifact"
+        onLoad={(e) => {
+          const el = e.currentTarget
+          if (el.naturalWidth && el.naturalHeight) setImgDims({ w: el.naturalWidth, h: el.naturalHeight })
+        }}
+        style={{ width: cardWidth, height: 'auto', display: 'block' }}
+        className="min-w-0"
+      />
+    )
   } else {
+    // Mermaid/SVG before the image is ready: live render.
     const doc = type === 'application/vnd.mermaid' ? mermaidSrcdoc : srcdoc
     body = <FittedIframe frameRef={iframeRef} srcDoc={doc} naturalW={naturalW} naturalH={naturalH} scale={scale} cap={cap} ready={fitReady} />
   }
@@ -642,12 +665,12 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
         <div className="flex items-center justify-between border-b border-border bg-panel-2 px-3 py-1">
           <span className="text-[11px] text-faint">Artifact</span>
           <div className="flex items-center gap-0.5">
-            {/* Interactive/Static toggle — HTML only, shown once preview is ready */}
-            {type === 'text/html' && previewUrl && (
+            {/* Static (real no-JS render) ↔ Interactive (scripted) toggle — HTML only */}
+            {type === 'text/html' && (
               <button
                 type="button"
                 onClick={() => setInteractive((v) => !v)}
-                title={interactive ? 'Switch to static image' : 'Switch to interactive mode'}
+                title={interactive ? 'Switch to static render' : 'Switch to interactive mode'}
                 className="rounded px-1.5 py-0.5 text-[11px] text-faint transition-colors hover:text-ink"
               >
                 {interactive ? 'Static' : 'Interactive'}
