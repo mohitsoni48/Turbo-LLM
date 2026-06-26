@@ -203,6 +203,89 @@ function captureGif(iframe: HTMLIFrameElement | null): Promise<Blob | null> {
   })
 }
 
+/** Rasterize an SVG string to a PNG data URL (2048px minimum on shortest side).
+ *  Returns null on failure. */
+function svgToPreview(svg: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const img = new Image()
+    img.onload = () => {
+      let w = img.naturalWidth, h = img.naturalHeight
+      if (!w || !h) {
+        const m = /viewBox="([^"]+)"/.exec(svg)
+        const p = m ? m[1].trim().split(/\s+/).map(Number) : []
+        if (p.length === 4) { w = p[2]; h = p[3] } else { w = 800; h = 600 }
+      }
+      const scale = Math.max(2, 2048 / Math.min(w, h))
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.max(1, Math.round(w * scale))
+      canvas.height = Math.max(1, Math.round(h * scale))
+      const ctx = canvas.getContext('2d')
+      if (!ctx) { URL.revokeObjectURL(url); return resolve(null) }
+      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#ffffff'
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+      ctx.scale(scale, scale); ctx.drawImage(img, 0, 0, w, h)
+      URL.revokeObjectURL(url)
+      resolve(canvas.toDataURL('image/png'))
+    }
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(null) }
+    img.src = url
+  })
+}
+
+/** Capture an HTML iframe to a PNG data URL (2048px min). Waits 300 ms for paint
+ *  to settle, tries canvas-grab first, falls back to foreignObject screenshot. */
+async function captureHtmlPreview(iframe: HTMLIFrameElement | null): Promise<string | null> {
+  await new Promise((r) => setTimeout(r, 300))
+  const blob = (await htmlIframeFrame(iframe)) ?? (await htmlIframeToPng(iframe))
+  if (!blob) return null
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(blob)
+    const img = new Image()
+    img.onload = () => {
+      const w = img.naturalWidth || 800, h = img.naturalHeight || 600
+      const scale = Math.max(1, 2048 / Math.min(w, h))
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.round(w * scale); canvas.height = Math.round(h * scale)
+      const ctx = canvas.getContext('2d')
+      if (!ctx) { URL.revokeObjectURL(url); return resolve(null) }
+      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#ffffff'
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+      URL.revokeObjectURL(url)
+      resolve(canvas.toDataURL('image/png'))
+    }
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(null) }
+    img.src = url
+  })
+}
+
+/** Post the preview to the vision model for quality verification.
+ *  Returns true if OK or if the model doesn't support vision. */
+async function verifyWithVision(dataUrl: string): Promise<boolean> {
+  try {
+    const res = await fetch('/api/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: [
+          { type: 'image_url', image_url: { url: dataUrl } },
+          { type: 'text', text: 'Does this diagram or UI render correctly with no visual errors or garbled content? Reply only "ok" or briefly describe any issue.' },
+        ]}],
+        max_tokens: 30,
+        stream: false,
+      }),
+    })
+    if (!res.ok) return true
+    const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> }
+    const text = (data.choices?.[0]?.message?.content ?? 'ok').toLowerCase().trim()
+    return text.startsWith('ok') || text.length <= 2
+  } catch {
+    return true
+  }
+}
+
 const DEFAULT_H = 200
 const MIN_CARD_W = 300
 const SETTLE_MS = 350
@@ -238,6 +321,8 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
   const [busy, setBusy] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [interactive, setInteractive] = useState(false)
 
   // Debounced code (handles any re-render churn; equals code once settled).
   const [stableCode, setStableCode] = useState(code)
@@ -307,6 +392,51 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
     return () => { cancelled = true }
   }, [type, stableCode, theme])
 
+  // Computed here (before capture effects) so the effects can reference it safely.
+  const fitReady = naturalW > 0 && availW > 0
+
+  // Clear static preview whenever content or theme changes.
+  useEffect(() => {
+    setPreviewUrl(null)
+    setInteractive(false)
+  }, [stableCode, theme])
+
+  // Capture Mermaid SVG → static preview image once the SVG is rendered.
+  useEffect(() => {
+    if (type !== 'application/vnd.mermaid' || !mermaid.svg) return
+    let cancelled = false
+    const svg = mermaid.svg
+    void svgToPreview(svg).then((url) => {
+      if (cancelled || !url) return
+      setPreviewUrl(url)
+      void verifyWithVision(url).then((ok) => {
+        if (!ok && !cancelled) void svgToPreview(svg).then((u2) => { if (u2 && !cancelled) setPreviewUrl(u2) })
+      })
+    })
+    return () => { cancelled = true }
+  }, [type, mermaid.svg])
+
+  // Capture SVG/HTML → static preview image once the iframe has sized itself.
+  useEffect(() => {
+    if (type === 'application/vnd.mermaid' || !fitReady) return
+    let cancelled = false
+    const doCapture = async () => {
+      const url = type === 'image/svg+xml'
+        ? await svgToPreview(stableCode)
+        : await captureHtmlPreview(iframeRef.current)
+      if (cancelled || !url) return
+      setPreviewUrl(url)
+      void verifyWithVision(url).then((ok) => {
+        if (!ok && !cancelled) {
+          const retry = type === 'image/svg+xml' ? svgToPreview(stableCode) : captureHtmlPreview(iframeRef.current)
+          void retry.then((u2) => { if (u2 && !cancelled) setPreviewUrl(u2) })
+        }
+      })
+    }
+    void doCapture()
+    return () => { cancelled = true }
+  }, [type, fitReady, stableCode])
+
   useEffect(() => {
     if (!menuOpen) return
     const close = () => setMenuOpen(false)
@@ -319,7 +449,6 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
 
   // Fit-height: scale to the 60vh cap, card hugs content. Fit-width: full column.
   const cap = maxH
-  const fitReady = naturalW > 0 && availW > 0
   let scale = 1
   if (fitReady) {
     if (fitMode === 'width') {
@@ -373,7 +502,9 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
   }
 
   // ── Body content ──────────────────────────────────────────────────────────────
+  const showStatic = !!previewUrl && !interactive
   let body: React.ReactNode
+
   if (type === 'application/vnd.mermaid' && mermaid.error) {
     body = (
       <div className="flex items-center justify-center px-3 py-6 text-[12px] text-muted" style={{ minHeight: 100 }}>
@@ -388,6 +519,23 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
           <span className="text-[13px]">Rendering artifact…</span>
         </div>
       </div>
+    )
+  } else if (showStatic) {
+    body = (
+      <>
+        <img
+          src={previewUrl!}
+          alt="Artifact"
+          style={{ width: cardWidth, height: 'auto', display: 'block' }}
+          className="min-w-0"
+        />
+        {/* HTML iframe stays alive (hidden) so GIF/canvas downloads still work. */}
+        {type === 'text/html' && (
+          <div style={{ height: 0, overflow: 'hidden' }} aria-hidden>
+            <FittedIframe frameRef={iframeRef} srcDoc={srcdoc} naturalW={naturalW} naturalH={naturalH} scale={scale} cap={cap} ready={fitReady} />
+          </div>
+        )}
+      </>
     )
   } else {
     const doc = type === 'application/vnd.mermaid' ? mermaidSrcdoc : srcdoc
@@ -405,6 +553,17 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
         <div className="flex items-center justify-between border-b border-border bg-panel-2 px-3 py-1">
           <span className="text-[11px] text-faint">Artifact</span>
           <div className="flex items-center gap-0.5">
+            {/* Interactive/Static toggle — HTML only, shown once preview is ready */}
+            {type === 'text/html' && previewUrl && (
+              <button
+                type="button"
+                onClick={() => setInteractive((v) => !v)}
+                title={interactive ? 'Switch to static image' : 'Switch to interactive mode'}
+                className="rounded px-1.5 py-0.5 text-[11px] text-faint transition-colors hover:text-ink"
+              >
+                {interactive ? 'Static' : 'Interactive'}
+              </button>
+            )}
             <button
               type="button"
               title={fitMode === 'height' ? 'Expand to full width' : 'Fit to screen height'}
