@@ -100,7 +100,13 @@ function svgToRaster(svg: string, mime: 'image/png' | 'image/jpeg', scale = 2): 
       canvas.height = Math.max(1, Math.round(h * scale))
       const ctx = canvas.getContext('2d')
       if (!ctx) { URL.revokeObjectURL(url); return resolve(null) }
-      if (mime === 'image/jpeg') { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height) }
+      if (mime === 'image/jpeg') {
+        ctx.fillStyle = '#ffffff'
+      } else {
+        // PNG: fill with the app's background so the export matches the current theme.
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#ffffff'
+      }
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
       ctx.scale(scale, scale); ctx.drawImage(img, 0, 0, w, h)
       URL.revokeObjectURL(url)
       try { canvas.toBlob((b) => resolve(b), mime, 0.95) } catch { resolve(null) }
@@ -138,7 +144,7 @@ function htmlIframeToPng(iframe: HTMLIFrameElement | null): Promise<Blob | null>
       if (e.source !== win) return
       if (typeof e.data !== 'object' || e.data?.type !== 'tllm-shot-result') return
       window.removeEventListener('message', onMsg)
-      if (e.data.png) fetch(e.data.png).then((r) => r.blob()).then(resolve).catch(() => resolve(null))
+      if (e.data.png && typeof e.data.png === 'string' && e.data.png.startsWith('data:')) fetch(e.data.png).then((r) => r.blob()).then(resolve).catch(() => resolve(null))
       else resolve(null)
     }
     window.addEventListener('message', onMsg)
@@ -157,7 +163,7 @@ function htmlIframeFrame(iframe: HTMLIFrameElement | null): Promise<Blob | null>
       if (e.source !== win) return
       if (typeof e.data !== 'object' || e.data?.type !== 'tllm-frame-result') return
       window.removeEventListener('message', onMsg)
-      if (e.data.png) fetch(e.data.png).then((r) => r.blob()).then(resolve).catch(() => resolve(null))
+      if (e.data.png && typeof e.data.png === 'string' && e.data.png.startsWith('data:')) fetch(e.data.png).then((r) => r.blob()).then(resolve).catch(() => resolve(null))
       else resolve(null)
     }
     window.addEventListener('message', onMsg)

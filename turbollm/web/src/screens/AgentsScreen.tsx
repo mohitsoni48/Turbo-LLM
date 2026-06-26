@@ -198,6 +198,7 @@ function RunDetail({ run }: { run: AgentRun }) {
             content += (ev.data as { delta: string }).delta
             setLiveContent(content)
           } else if (ev.event === 'done' || ev.event === 'error') {
+            setLiveContent('')
             void qc.invalidateQueries({ queryKey: agentRunKeys.detail(run.id) })
             void qc.invalidateQueries({ queryKey: agentRunKeys.list() })
             break

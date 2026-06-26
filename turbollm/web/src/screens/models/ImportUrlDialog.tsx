@@ -47,7 +47,9 @@ export function ImportUrlDialog({ open, onClose }: { open: boolean; onClose: () 
   const valid = trimmed.length > 0 && isValidGgufUrl(trimmed)
   const showInvalid = trimmed.length > 0 && !valid
 
-  const enqueueError = mut.enqueue.error instanceof ApiError ? mut.enqueue.error.message : null
+  const enqueueErr = mut.enqueue.error instanceof ApiError ? mut.enqueue.error : null
+  const enqueueError = enqueueErr?.message ?? null
+  const noModelDir = enqueueErr?.code === 'no_model_dir'
 
   const close = () => {
     setUrl('')
@@ -100,6 +102,11 @@ export function ImportUrlDialog({ open, onClose }: { open: boolean; onClose: () 
 
           {enqueueError && (
             <p className="text-[12px]" style={{ color: 'var(--err)' }}>{enqueueError}</p>
+          )}
+          {noModelDir && (
+            <p className="text-[12px] text-muted">
+              → Open <span className="font-medium text-ink">Settings → Model folders</span> to add a folder, then try again.
+            </p>
           )}
         </div>
 
