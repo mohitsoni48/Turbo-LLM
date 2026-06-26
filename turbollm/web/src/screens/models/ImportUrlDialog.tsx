@@ -38,10 +38,18 @@ function deriveFilename(raw: string): string {
   }
 }
 
-/** Convert a HF model-page URL with ?show_file_info=file.gguf to a direct resolve URL.
+/** Convert non-standard HF URL forms to a direct https resolve URL.
+ *  Handles hf://owner/repo/file.gguf and ?show_file_info=file.gguf page URLs.
  *  All other URLs are returned unchanged. */
 function normalizeHfUrl(raw: string): string {
   try {
+    if (raw.startsWith('hf://')) {
+      const parts = raw.slice(5).split('/')
+      if (parts.length >= 3 && parts[parts.length - 1].toLowerCase().endsWith('.gguf')) {
+        const [owner, repo, ...rest] = parts
+        return `https://huggingface.co/${owner}/${repo}/resolve/main/${rest.join('/')}`
+      }
+    }
     const u = new URL(raw)
     if (u.hostname === 'huggingface.co') {
       const file = u.searchParams.get('show_file_info')
