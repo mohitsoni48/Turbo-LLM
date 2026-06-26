@@ -38,13 +38,30 @@ function deriveFilename(raw: string): string {
   }
 }
 
+/** Convert a HF model-page URL with ?show_file_info=file.gguf to a direct resolve URL.
+ *  All other URLs are returned unchanged. */
+function normalizeHfUrl(raw: string): string {
+  try {
+    const u = new URL(raw)
+    if (u.hostname === 'huggingface.co') {
+      const file = u.searchParams.get('show_file_info')
+      if (file && file.toLowerCase().endsWith('.gguf')) {
+        return `https://huggingface.co${u.pathname}/resolve/main/${file}`
+      }
+    }
+  } catch { /* ignore */ }
+  return raw
+}
+
 export function ImportUrlDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const mut = useDownloadMutations()
   const [url, setUrl] = useState('')
 
   const trimmed = url.trim()
-  const filename = useMemo(() => deriveFilename(trimmed), [trimmed])
-  const valid = trimmed.length > 0 && isValidGgufUrl(trimmed)
+  const normalized = useMemo(() => normalizeHfUrl(trimmed), [trimmed])
+  const wasNormalized = normalized !== trimmed
+  const filename = useMemo(() => deriveFilename(normalized), [normalized])
+  const valid = trimmed.length > 0 && isValidGgufUrl(normalized)
   const showInvalid = trimmed.length > 0 && !valid
 
   const enqueueErr = mut.enqueue.error instanceof ApiError ? mut.enqueue.error : null
@@ -60,7 +77,7 @@ export function ImportUrlDialog({ open, onClose }: { open: boolean; onClose: () 
   const submit = () => {
     if (!valid) return
     mut.enqueue.mutate(
-      { url: trimmed },
+      { url: normalized },
       {
         onSuccess: () => close(),
       },
@@ -91,6 +108,9 @@ export function ImportUrlDialog({ open, onClose }: { open: boolean; onClose: () 
             <div className="rounded-md border border-border bg-panel-2 px-3 py-2 text-[12px]">
               <span className="text-muted">Will save as </span>
               <span className="font-mono text-ink">{filename}</span>
+              {wasNormalized && (
+                <p className="mt-1 text-faint">URL converted to a direct download link.</p>
+              )}
             </div>
           )}
 
