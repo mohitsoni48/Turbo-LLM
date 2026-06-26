@@ -308,6 +308,12 @@ export function ModelDetailDialog({
                   <NumberInput value={draft.nKeep} min={0} max={draft.ctx} onChange={(v) => set('nKeep', v)} />
                 </Row>
               )}
+              <Row label="Batch size" hint="--batch-size: logical prompt-processing batch. 0 = engine default (2048). Larger = faster prefill, more memory.">
+                <NumberInput value={draft.batchSize ?? 0} min={0} max={65536} step={128} onChange={(v) => set('batchSize', v || undefined)} />
+              </Row>
+              <Row label="Micro-batch size" hint="--ubatch-size: physical micro-batch for prompt processing. 0 = engine default (512). Must be ≤ batch size.">
+                <NumberInput value={draft.uBatchSize ?? 0} min={0} max={65536} step={128} onChange={(v) => set('uBatchSize', v || undefined)} />
+              </Row>
             </Section>
             )}
 
@@ -431,12 +437,6 @@ export function ModelDetailDialog({
                   onChange={(v) => set('threads', v)}
                   fmt={(v) => (v === 0 ? 'Auto' : String(v))}
                 />
-                <Row label="Batch size" hint="--batch-size: logical prompt-processing batch. 0 = engine default (2048). Larger = faster ingestion, more memory.">
-                  <NumberInput value={draft.batchSize ?? 0} min={0} max={65536} step={128} onChange={(v) => set('batchSize', v || undefined)} />
-                </Row>
-                <Row label="Micro-batch size" hint="--ubatch-size: physical micro-batch for prompt processing. 0 = engine default (512). Must be ≤ batch size.">
-                  <NumberInput value={draft.uBatchSize ?? 0} min={0} max={65536} step={128} onChange={(v) => set('uBatchSize', v || undefined)} />
-                </Row>
                 <Toggle
                   label="Reuse cached prompt"
                   hint="Skips re-processing the unchanged start of a prompt on repeated or continued requests — faster first token. Recommended on."
