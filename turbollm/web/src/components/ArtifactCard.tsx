@@ -234,12 +234,8 @@ function svgToPreview(svg: string): Promise<string | null> {
   })
 }
 
-/** Capture an HTML iframe to a PNG data URL (2048px min). Waits 300 ms for paint
- *  to settle, tries canvas-grab first, falls back to foreignObject screenshot. */
-async function captureHtmlPreview(iframe: HTMLIFrameElement | null): Promise<string | null> {
-  await new Promise((r) => setTimeout(r, 300))
-  const blob = (await htmlIframeFrame(iframe)) ?? (await htmlIframeToPng(iframe))
-  if (!blob) return null
+/** Upscale a (PNG) blob to a data URL with the shortest side ≥ 2048px. */
+function blobToScaledDataUrl(blob: Blob): Promise<string | null> {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(blob)
     const img = new Image()
@@ -259,6 +255,89 @@ async function captureHtmlPreview(iframe: HTMLIFrameElement | null): Promise<str
     img.onerror = () => { URL.revokeObjectURL(url); resolve(null) }
     img.src = url
   })
+}
+
+/** App background color token (used as the capture canvas fill). */
+function appBg(): string {
+  return getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#ffffff'
+}
+
+/** Minimal capture-only document: the raw artifact HTML with a CSP that blocks
+ *  external network, no helper scripts (scripts never run in this iframe). */
+function buildCaptureDoc(code: string): string {
+  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:;">`
+  const norm = `<style>html,body{margin:0}img,svg,canvas,video{max-width:100%}</style>`
+  if (/<head[\s>]/i.test(code)) return code.replace(/(<head[^>]*>)/i, `$1\n${csp}\n${norm}`)
+  return `<!doctype html><html><head>${csp}${norm}</head><body>${code}</body></html>`
+}
+
+/** Style injected into html2canvas's CLONE just before rasterization. html2canvas
+ *  deep-clones the document, which restarts CSS entry animations from their start
+ *  frame (often opacity:0) — so without this the screenshot captures invisible
+ *  content. Forcing 0s duration + forwards fill lands every element on its final
+ *  keyframe synchronously. Applied in onclone (not the source doc) because only the
+ *  clone is what gets rasterized. */
+const CAPTURE_FREEZE_CSS =
+  '*,*::before,*::after{animation-duration:0s!important;animation-delay:0s!important;animation-fill-mode:forwards!important;transition:none!important}'
+
+/** Render the HTML in an isolated, same-origin, SCRIPT-DISABLED iframe and rasterize
+ *  it with html2canvas. Unlike the foreignObject trick, html2canvas performs real
+ *  layout — so 100vh, position:fixed, flex and overflow render correctly. The iframe
+ *  is same-origin (parent can read it) but carries no `allow-scripts`, so untrusted
+ *  artifact markup cannot execute. Returns a PNG data URL, or null on failure. */
+async function html2canvasCapture(code: string, naturalW: number, naturalH: number): Promise<string | null> {
+  const bg = appBg()
+  const w = Math.max(320, Math.round(naturalW) || 800)
+  const h = Math.max(200, Math.round(naturalH) || 600)
+  const frame = document.createElement('iframe')
+  frame.setAttribute('sandbox', 'allow-same-origin')
+  frame.style.cssText = `position:fixed;left:-100000px;top:0;border:0;background:${bg};width:${w}px;height:${h}px;`
+  frame.srcdoc = buildCaptureDoc(code)
+  document.body.appendChild(frame)
+  try {
+    await new Promise((res) => {
+      frame.onload = () => res(null)
+      setTimeout(() => res(null), 4000)
+    })
+    const doc = frame.contentDocument
+    if (!doc || !doc.body) return null
+    try { if (doc.fonts?.ready) await doc.fonts.ready } catch { /* ignore */ }
+    await new Promise((r) => setTimeout(r, 250))
+    const realW = Math.max(doc.documentElement.scrollWidth, doc.body.scrollWidth, w)
+    const realH = Math.max(doc.documentElement.scrollHeight, doc.body.scrollHeight, 200)
+    const scale = Math.max(2, 2048 / Math.min(realW, realH))
+    const { default: html2canvas } = await import('html2canvas')
+    const canvas = await html2canvas(doc.body, {
+      width: realW, height: realH, windowWidth: realW, windowHeight: realH,
+      scale, backgroundColor: bg, useCORS: true, logging: false, scrollX: 0, scrollY: 0,
+      onclone: (cloned: Document) => {
+        const s = cloned.createElement('style')
+        s.textContent = CAPTURE_FREEZE_CSS
+        cloned.head.appendChild(s)
+      },
+    })
+    return canvas.toDataURL('image/png')
+  } catch {
+    return null
+  } finally {
+    frame.remove()
+  }
+}
+
+/** Capture an HTML artifact to a PNG data URL (2048px min on the shortest side).
+ *  CSS layouts go through html2canvas (faithful); script/canvas-driven artifacts
+ *  fall back to grabbing the live <canvas>, then the foreignObject screenshot. */
+async function captureHtmlPreview(
+  code: string, liveIframe: HTMLIFrameElement | null, naturalW: number, naturalH: number,
+): Promise<string | null> {
+  const scriptDriven = /<canvas[\s>]/i.test(code) && /<script[\s>]/i.test(code)
+  if (!scriptDriven) {
+    const url = await html2canvasCapture(code, naturalW, naturalH)
+    if (url) return url
+  }
+  await new Promise((r) => setTimeout(r, 200))
+  const blob = (await htmlIframeFrame(liveIframe)) ?? (await htmlIframeToPng(liveIframe))
+  return blob ? blobToScaledDataUrl(blob) : null
 }
 
 /** Post the preview to the vision model for quality verification.
@@ -423,18 +502,23 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
     const doCapture = async () => {
       const url = type === 'image/svg+xml'
         ? await svgToPreview(stableCode)
-        : await captureHtmlPreview(iframeRef.current)
+        : await captureHtmlPreview(stableCode, iframeRef.current, naturalW, naturalH)
       if (cancelled || !url) return
       setPreviewUrl(url)
       void verifyWithVision(url).then((ok) => {
         if (!ok && !cancelled) {
-          const retry = type === 'image/svg+xml' ? svgToPreview(stableCode) : captureHtmlPreview(iframeRef.current)
+          const retry = type === 'image/svg+xml'
+            ? svgToPreview(stableCode)
+            : captureHtmlPreview(stableCode, iframeRef.current, naturalW, naturalH)
           void retry.then((u2) => { if (u2 && !cancelled) setPreviewUrl(u2) })
         }
       })
     }
     void doCapture()
     return () => { cancelled = true }
+    // naturalW/H intentionally omitted: capture fires once when fitReady flips true
+    // (naturalW is already set by then); re-running on every size tick would thrash.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [type, fitReady, stableCode])
 
   useEffect(() => {
@@ -488,9 +572,14 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
         let blob: Blob | null = null
         if (type === 'application/vnd.mermaid') blob = mermaid.svg ? await svgToRaster(mermaid.svg, mime) : null
         else if (type === 'image/svg+xml') blob = await svgToRaster(stableCode, mime)
-        else {
-          // Canvas grab is reliable; foreignObject is the fallback (taints on some browsers).
-          const png = (await htmlIframeFrame(iframeRef.current)) ?? (await htmlIframeToPng(iframeRef.current))
+        else if (previewUrl) {
+          // Reuse the exact image shown in chat so the download always matches.
+          const png = await (await fetch(previewUrl)).blob()
+          blob = fmt === 'jpeg' ? await blobToJpeg(png) : png
+        } else {
+          // No preview yet (e.g. capture still running): capture on demand.
+          const url = await captureHtmlPreview(stableCode, iframeRef.current, naturalW, naturalH)
+          const png = url ? await (await fetch(url)).blob() : null
           blob = png ? (fmt === 'jpeg' ? await blobToJpeg(png) : png) : null
         }
         if (blob) downloadBlob(blob, fmt === 'jpeg' ? 'artifact.jpg' : 'artifact.png')
