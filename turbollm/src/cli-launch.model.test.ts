@@ -227,7 +227,9 @@ test('launchCli auto-load prefers lastLoaded.modelKey over the first library mod
     const code = await launchCli('claude', 6996, [], fn, undefined, lastUsedFetch)
     assert.equal(code, 0)
     assert.equal(startedKey, MODELS[1].key, 'should auto-load the last-used model, not the first')
-    assert.equal(calls[0].env['ANTHROPIC_MODEL'], MODELS[1].key)
+    // Without --model we auto-load a model but do NOT pin it: ANTHROPIC_MODEL stays unset
+    // so Claude Code uses the gateway's loaded model as-is.
+    assert.equal(calls[0].env['ANTHROPIC_MODEL'], undefined)
   } finally {
     unsilence()
   }
@@ -285,6 +287,63 @@ test('launchCli --model already loaded with same key: skips load and launches', 
     assert.equal(code, 0)
     assert.equal(startCalls, 0, 'engine/start should NOT be called when model already loaded')
     assert.equal(calls.length, 1)
+  } finally {
+    unsilence()
+  }
+})
+
+test('launchCli without --model: does NOT set ANTHROPIC_MODEL (uses loaded model as-is)', async () => {
+  const { calls, fn } = makeSpawn()
+  const unsilence = silenceOutput()
+  try {
+    const code = await launchCli(
+      'claude', 6996, [], fn,
+      undefined, // no --model flag
+      makeFetch('running', MODELS[0].key),
+    )
+    assert.equal(code, 0)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].env['ANTHROPIC_MODEL'], undefined, 'ANTHROPIC_MODEL must be unset without --model')
+    // The rest of the gateway wiring is still applied.
+    assert.equal(calls[0].env['ANTHROPIC_BASE_URL'], 'http://127.0.0.1:6996')
+    assert.equal(calls[0].env['ANTHROPIC_AUTH_TOKEN'], 'turbollm-local')
+  } finally {
+    unsilence()
+  }
+})
+
+test('launchCli without --model: strips an ANTHROPIC_MODEL inherited from the environment', async () => {
+  const { calls, fn } = makeSpawn()
+  const unsilence = silenceOutput()
+  const had = Object.prototype.hasOwnProperty.call(process.env, 'ANTHROPIC_MODEL')
+  const prev = process.env.ANTHROPIC_MODEL
+  process.env.ANTHROPIC_MODEL = 'stray-global-model'
+  try {
+    const code = await launchCli(
+      'claude', 6996, [], fn,
+      undefined, // no --model flag
+      makeFetch('running', MODELS[0].key),
+    )
+    assert.equal(code, 0)
+    assert.equal(calls[0].env['ANTHROPIC_MODEL'], undefined, 'a stray inherited ANTHROPIC_MODEL must be stripped')
+  } finally {
+    if (had) process.env.ANTHROPIC_MODEL = prev
+    else delete process.env.ANTHROPIC_MODEL
+    unsilence()
+  }
+})
+
+test('launchCli with --model: pins ANTHROPIC_MODEL to the resolved model', async () => {
+  const { calls, fn } = makeSpawn()
+  const unsilence = silenceOutput()
+  try {
+    const code = await launchCli(
+      'claude', 6996, [], fn,
+      MODELS[0].key, // explicit --model
+      makeFetch('running', MODELS[0].key),
+    )
+    assert.equal(code, 0)
+    assert.equal(calls[0].env['ANTHROPIC_MODEL'], MODELS[0].key, '--model must pin ANTHROPIC_MODEL')
   } finally {
     unsilence()
   }

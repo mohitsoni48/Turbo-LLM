@@ -37,6 +37,27 @@ export function readPidfile(dir: string): PidfileData | null {
   }
 }
 
+/**
+ * Resolve the TCP port to reach the daemon on, WITHOUT assuming a fixed default.
+ * Priority:
+ *   1. `explicitPort` — an explicit `--port` the caller passed.
+ *   2. The running daemon's pidfile (`<dir>/daemon.pid`) — its ACTUAL bound port,
+ *      which is correct even when the daemon was started with `--port`/`--addr` or a
+ *      custom config that moved it off the shipped default.
+ *   3. `fallbackPort` — the caller's configured / shipped default (last resort, used
+ *      when no daemon is running or its pidfile is missing).
+ */
+export function resolveDaemonPort(
+  dir: string,
+  explicitPort: number | undefined,
+  fallbackPort: number,
+): number {
+  if (explicitPort && explicitPort > 0) return explicitPort
+  const data = readPidfile(dir)
+  if (data && data.port > 0) return data.port
+  return fallbackPort
+}
+
 /** Remove <dir>/daemon.pid. Best-effort — never throws. */
 export function removePidfile(dir: string): void {
   try {

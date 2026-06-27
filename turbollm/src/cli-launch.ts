@@ -232,24 +232,40 @@ export async function launchCli(
   }
   const model = status.model.name
 
-  process.stdout.write(`▸ Launching ${spec.label} → TurboLLM  (model: ${model}, ${base})\n`)
+  // Only PIN a model id (via ANTHROPIC_MODEL) when the user explicitly asked for one with
+  // --model. Without --model we leave it unset so Claude Code talks to whatever model the
+  // gateway currently has loaded, as-is. Pinning makes Claude Code send that id on every
+  // request, which forces the gateway's auto-swap router to resolve it and can surface
+  // model-specific behaviour (e.g. a strict chat template) the user didn't ask for —
+  // when they ran a bare `launch`, they just want "use the loaded model".
+  const modelNote = modelKey ? `model: ${model}` : `using loaded model: ${model}`
+  process.stdout.write(`▸ Launching ${spec.label} → TurboLLM  (${modelNote}, ${base})\n`)
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ANTHROPIC_BASE_URL: base,
+    // No auth is enforced on the local gateway; the CLI just needs a non-empty token.
+    ANTHROPIC_AUTH_TOKEN: 'turbollm-local',
+    // Local LLMs are 30–120 s per response — raise Claude Code's request timeout so it
+    // doesn't abort mid-generation. 300 s (5 min) covers even the slowest local model.
+    // Zero retries: retrying a slow local model cold-starts it again and makes things worse.
+    ANTHROPIC_TIMEOUT: '300000',
+    ANTHROPIC_MAX_RETRIES: '0',
+  }
+  if (modelKey) {
+    // --model was given: pin Claude Code to the resolved model.
+    env.ANTHROPIC_MODEL = model
+  } else {
+    // No --model: do not set a model, and strip any ANTHROPIC_MODEL inherited from the
+    // parent environment so a stray global value can't silently pin the model either.
+    delete env.ANTHROPIC_MODEL
+  }
 
   const child = _spawn(spec.bin, passthrough, {
     stdio: 'inherit',
     // On Windows the CLI is usually a `.cmd`/`.ps1` shim; a shell resolves it via PATHEXT.
     shell: process.platform === 'win32',
-    env: {
-      ...process.env,
-      ANTHROPIC_BASE_URL: base,
-      // No auth is enforced on the local gateway; the CLI just needs a non-empty token.
-      ANTHROPIC_AUTH_TOKEN: 'turbollm-local',
-      ANTHROPIC_MODEL: model,
-      // Local LLMs are 30–120 s per response — raise Claude Code's request timeout so it
-      // doesn't abort mid-generation. 300 s (5 min) covers even the slowest local model.
-      // Zero retries: retrying a slow local model cold-starts it again and makes things worse.
-      ANTHROPIC_TIMEOUT: '300000',
-      ANTHROPIC_MAX_RETRIES: '0',
-    },
+    env,
   })
 
   return await new Promise<number>((resolve) => {

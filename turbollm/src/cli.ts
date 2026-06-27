@@ -3,7 +3,7 @@ import { openSync, readFileSync } from 'node:fs'
 import { serve } from '@hono/node-server'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ConfigStore, defaultConfigPath, migrateLegacyDataDir } from './config/config'
+import { ConfigStore, defaultConfig, defaultConfigPath, migrateLegacyDataDir } from './config/config'
 import { Manager, killTrackedEnginesSync, reapStaleEngines, type StartOpts } from './engines/manager'
 import { ComfyGuard } from './engines/comfy-guard'
 import { Registry } from './engines/registry'
@@ -29,7 +29,7 @@ import { ToolRegistry } from './tools/tool-registry'
 import { GenerationGate } from './agents/gate'
 import { AgentRunner } from './agents/runner'
 import { launchCli } from './cli-launch'
-import { writePidfile, removePidfile, stopDaemon } from './daemon-pid'
+import { writePidfile, removePidfile, stopDaemon, resolveDaemonPort } from './daemon-pid'
 import { createApp } from './server'
 import type { Deps } from './deps'
 
@@ -81,18 +81,40 @@ function argValue(name: string, fallback: string): string {
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : fallback
 }
 
+/** The daemon's configured port from config.json, falling back to the shipped
+ *  default. Best-effort — a missing/invalid config yields the shipped default.
+ *  Keeps the literal default in ONE place (defaultConfig) rather than hardcoded. */
+function configuredDaemonPort(configPath: string): number {
+  try {
+    const cfg = JSON.parse(readFileSync(configPath, 'utf8')) as { daemon?: { port?: number } }
+    if (typeof cfg.daemon?.port === 'number' && cfg.daemon.port > 0) return cfg.daemon.port
+  } catch { /* missing or invalid config — use the shipped default below */ }
+  return defaultConfig().daemon.port
+}
+
 // ── `turbollm launch <cli>` — start a coding CLI wired to TurboLLM ──────────────
 // Handled before --help so `turbollm launch claude --help` forwards --help to the
 // launched CLI rather than printing TurboLLM's help.
 if (argv[0] === 'launch') {
   const target = argv[1] ?? ''
-  const port = Number(argValue('--port', '')) || 6996
   const modelKey = argValue('--model', '') || undefined
-  // Everything after `launch <cli>` is forwarded to the CLI, minus our own --port and --model.
+  // Resolve the daemon's port without ever assuming a fixed default: an explicit
+  // --port wins; otherwise the running daemon's pidfile gives its ACTUAL bound port
+  // (correct even when it was started with --port/--addr or a custom --config);
+  // otherwise the configured port in config.json; otherwise the shipped default.
+  const launchConfigPath = argValue('--config', defaultConfigPath())
+  const explicitPort = Number(argValue('--port', '')) || undefined
+  const port = resolveDaemonPort(
+    dirname(launchConfigPath),
+    explicitPort,
+    configuredDaemonPort(launchConfigPath),
+  )
+  // Everything after `launch <cli>` is forwarded to the CLI, minus our own flags.
   const passthrough = argv.slice(2).filter(
     (a, i, arr) =>
       a !== '--port' && arr[i - 1] !== '--port' &&
-      a !== '--model' && arr[i - 1] !== '--model',
+      a !== '--model' && arr[i - 1] !== '--model' &&
+      a !== '--config' && arr[i - 1] !== '--config',
   )
   const code = await launchCli(target, port, passthrough, undefined, modelKey)
   process.exit(code)
@@ -108,8 +130,9 @@ if (hasFlag('--help', '-h')) {
     `  turbollm launch <cli>            # run a coding CLI on your local model\n\n` +
     `Commands:\n` +
     `  launch claude                    Launch Claude Code wired to TurboLLM\n` +
-    `                                   Auto-loads the last-used model if none is loaded.\n` +
-    `  launch claude --model <key>      Load a specific model by key or name, then launch\n\n` +
+    `                                   Uses whatever model is loaded (auto-loads the\n` +
+    `                                   last-used one if none is); does not pin a model.\n` +
+    `  launch claude --model <key>      Load a specific model by key or name and pin it\n\n` +
     `Options:\n` +
     `  --port <n>     Port to listen on / connect to (default: 6996)\n` +
     `  --addr <h:p>   Full host:port override (e.g. 0.0.0.0:6996)\n` +

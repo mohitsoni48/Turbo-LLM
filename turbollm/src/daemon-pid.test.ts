@@ -9,6 +9,7 @@ import {
   writePidfile,
   readPidfile,
   removePidfile,
+  resolveDaemonPort,
   stopDaemon,
   type StopHooks,
 } from './daemon-pid.js'
@@ -80,6 +81,49 @@ test('readPidfile returns null for invalid JSON', () => {
   try {
     writeFileSync(join(dir, 'daemon.pid'), 'not-json')
     assert.equal(readPidfile(dir), null)
+  } finally {
+    cleanup()
+  }
+})
+
+// ── resolveDaemonPort ─────────────────────────────────────────────────────────
+
+test('resolveDaemonPort: explicit port wins over pidfile and fallback', () => {
+  const { dir, cleanup } = makeTmpDir()
+  try {
+    writePidfile(dir, 1, 7000)
+    assert.equal(resolveDaemonPort(dir, 9000, 6996), 9000)
+  } finally {
+    cleanup()
+  }
+})
+
+test('resolveDaemonPort: uses the running daemon pidfile port when no explicit port', () => {
+  const { dir, cleanup } = makeTmpDir()
+  try {
+    writePidfile(dir, 1, 7000)
+    // fallback differs from the pidfile — the actual bound port must win.
+    assert.equal(resolveDaemonPort(dir, undefined, 6996), 7000)
+  } finally {
+    cleanup()
+  }
+})
+
+test('resolveDaemonPort: falls back when no pidfile exists', () => {
+  const { dir, cleanup } = makeTmpDir()
+  try {
+    assert.equal(resolveDaemonPort(dir, undefined, 6996), 6996)
+  } finally {
+    cleanup()
+  }
+})
+
+test('resolveDaemonPort: ignores a zero/NaN explicit port and uses the pidfile', () => {
+  const { dir, cleanup } = makeTmpDir()
+  try {
+    writePidfile(dir, 1, 7000)
+    assert.equal(resolveDaemonPort(dir, 0, 6996), 7000)
+    assert.equal(resolveDaemonPort(dir, Number('x') || undefined, 6996), 7000)
   } finally {
     cleanup()
   }
