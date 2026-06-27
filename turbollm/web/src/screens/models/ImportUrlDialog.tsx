@@ -39,7 +39,8 @@ function deriveFilename(raw: string): string {
 }
 
 /** Convert non-standard HF URL forms to a direct https resolve URL.
- *  Handles hf://owner/repo/file.gguf and ?show_file_info=file.gguf page URLs.
+ *  Handles hf://owner/repo/file.gguf, ?show_file_info=file.gguf page URLs,
+ *  and /blob/ viewer URLs (rewrites to /resolve/ direct-download).
  *  All other URLs are returned unchanged. */
 function normalizeHfUrl(raw: string): string {
   try {
@@ -56,6 +57,8 @@ function normalizeHfUrl(raw: string): string {
       if (file && file.toLowerCase().endsWith('.gguf')) {
         return `https://huggingface.co${u.pathname}/resolve/main/${file}`
       }
+      u.pathname = u.pathname.replace(/\/blob\//, '/resolve/')
+      return u.toString()
     }
   } catch { /* ignore */ }
   return raw

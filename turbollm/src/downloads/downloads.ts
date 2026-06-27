@@ -144,7 +144,7 @@ export class DownloadManager {
     let url: string
     let filename: string
     if (input.url) {
-      const u = input.url.trim()
+      const u = normalizeHfBlobUrl(input.url.trim())
       if (!/^https?:\/\//i.test(u)) throw new DownloadError('invalid_url', 'URL must start with http:// or https://.')
       const path = safePathname(u)
       if (!subdir && !/\.gguf$/i.test(path) && !HF_BLOB_RE.test(u.split('?')[0])) {
@@ -455,6 +455,20 @@ export class DownloadManager {
 
 function gb(bytes: number): string {
   return (bytes / 1e9).toFixed(1)
+}
+
+/** Rewrite HF blob viewer URLs to the direct-download resolve URL so raw HTTP
+ *  clients receive the binary rather than the HTML file-viewer page. */
+function normalizeHfBlobUrl(u: string): string {
+  try {
+    const parsed = new URL(u)
+    if (parsed.hostname === 'huggingface.co') {
+      parsed.pathname = parsed.pathname.replace(/\/blob\//, '/resolve/')
+    }
+    return parsed.toString()
+  } catch {
+    return u
+  }
 }
 
 /** Extract the URL pathname without throwing on a malformed URL. */
