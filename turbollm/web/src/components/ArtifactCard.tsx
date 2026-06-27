@@ -385,21 +385,29 @@ async function rasterizeStaticFrozen(
   const tagged: Element[] = []
   let i = 0
   doc.querySelectorAll('*').forEach((el) => { el.setAttribute('data-h2cpad', String(i++)); tagged.push(el) })
-  const fixes: { id: string; col: boolean; pad: number }[] = []
+  // (a) flex COLUMN containers whose justify-content centers/ends the content — html2canvas
+  // top-aligns them, so re-create the leading offset with flex-start + padding-top. Only
+  // column is touched: row space-between is left to html2canvas (the padding hack would
+  // mis-handle it). (b) background-clip:text headings — html2canvas paints the gradient as a
+  // solid box, so flatten them to their text colour.
+  const pads: { id: string; pad: number }[] = []
+  const clips: { id: string; color: string }[] = []
   doc.querySelectorAll('*').forEach((el) => {
     const cs = win.getComputedStyle(el)
-    if (cs.display !== 'flex' && cs.display !== 'inline-flex') return
-    const jc = cs.justifyContent
-    if (!jc || jc === 'flex-start' || jc === 'normal' || jc === 'start') return
-    const first = el.firstElementChild
     const id = el.getAttribute('data-h2cpad')
-    if (!first || !id) return
-    const cr = el.getBoundingClientRect()
-    const fr = first.getBoundingClientRect()
-    const col = cs.flexDirection.startsWith('column')
-    const b = parseFloat(col ? cs.borderTopWidth : cs.borderLeftWidth) || 0
-    const pad = Math.max(0, Math.round((col ? fr.top - cr.top : fr.left - cr.left) - b))
-    fixes.push({ id, col, pad })
+    if (!id) return
+    if ((cs.display === 'flex' || cs.display === 'inline-flex') && cs.flexDirection.startsWith('column')) {
+      const jc = cs.justifyContent
+      const first = el.firstElementChild
+      if (first && jc && jc !== 'flex-start' && jc !== 'normal' && jc !== 'start') {
+        const cr = el.getBoundingClientRect()
+        const fr = first.getBoundingClientRect()
+        const b = parseFloat(cs.borderTopWidth) || 0
+        pads.push({ id, pad: Math.max(0, Math.round(fr.top - cr.top - b)) })
+      }
+    }
+    const clip = cs.getPropertyValue('-webkit-background-clip') || cs.backgroundClip
+    if (clip && clip.includes('text')) clips.push({ id, color: cs.color })
   })
   try {
     const bg = appBg()
@@ -412,12 +420,21 @@ async function rasterizeStaticFrozen(
         const s = cloned.createElement('style')
         s.textContent = CAPTURE_FREEZE_CSS
         cloned.head.appendChild(s)
-        for (const f of fixes) {
-          const el = cloned.querySelector<HTMLElement>(`[data-h2cpad="${f.id}"]`)
+        for (const p of pads) {
+          const el = cloned.querySelector<HTMLElement>(`[data-h2cpad="${p.id}"]`)
           if (!el) continue
           el.style.justifyContent = 'flex-start'
           el.style.boxSizing = 'border-box'
-          el.style[f.col ? 'paddingTop' : 'paddingLeft'] = `${f.pad}px`
+          el.style.paddingTop = `${p.pad}px`
+        }
+        for (const c of clips) {
+          const el = cloned.querySelector<HTMLElement>(`[data-h2cpad="${c.id}"]`)
+          if (!el) continue
+          el.style.setProperty('-webkit-text-fill-color', c.color)
+          el.style.color = c.color
+          el.style.background = 'none'
+          el.style.setProperty('-webkit-background-clip', 'border-box')
+          el.style.backgroundClip = 'border-box'
         }
       },
     })
