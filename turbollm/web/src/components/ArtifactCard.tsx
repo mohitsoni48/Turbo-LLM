@@ -369,6 +369,66 @@ async function captureHtmlPreview(
   return blob ? blobToScaledDataUrl(blob) : null
 }
 
+/** Rasterize the EXACT on-screen frozen static iframe (same-origin, vh already frozen to px)
+ *  to a PNG/JPEG blob, so the export matches what's shown. html2canvas doesn't reproduce flex
+ *  MAIN-axis distribution (a `justify-content:center` column hero renders top-aligned), so we
+ *  measure each such container's leading offset from the live layout and re-create it with
+ *  `flex-start` + padding in the clone. Returns null if the frozen iframe isn't ready. */
+async function rasterizeStaticFrozen(
+  iframe: HTMLIFrameElement | null,
+  dims: { w: number; h: number } | null,
+  mime: 'image/png' | 'image/jpeg',
+): Promise<Blob | null> {
+  const doc = iframe?.contentDocument
+  const win = doc?.defaultView
+  if (!doc || !doc.body || !win || !dims) return null
+  const tagged: Element[] = []
+  let i = 0
+  doc.querySelectorAll('*').forEach((el) => { el.setAttribute('data-h2cpad', String(i++)); tagged.push(el) })
+  const fixes: { id: string; col: boolean; pad: number }[] = []
+  doc.querySelectorAll('*').forEach((el) => {
+    const cs = win.getComputedStyle(el)
+    if (cs.display !== 'flex' && cs.display !== 'inline-flex') return
+    const jc = cs.justifyContent
+    if (!jc || jc === 'flex-start' || jc === 'normal' || jc === 'start') return
+    const first = el.firstElementChild
+    const id = el.getAttribute('data-h2cpad')
+    if (!first || !id) return
+    const cr = el.getBoundingClientRect()
+    const fr = first.getBoundingClientRect()
+    const col = cs.flexDirection.startsWith('column')
+    const b = parseFloat(col ? cs.borderTopWidth : cs.borderLeftWidth) || 0
+    const pad = Math.max(0, Math.round((col ? fr.top - cr.top : fr.left - cr.left) - b))
+    fixes.push({ id, col, pad })
+  })
+  try {
+    const bg = appBg()
+    const scale = Math.max(2, 2048 / Math.min(dims.w, dims.h))
+    const { default: html2canvas } = await import('html2canvas')
+    const canvas = await html2canvas(doc.body, {
+      width: dims.w, height: dims.h, windowWidth: dims.w, windowHeight: dims.h,
+      scale, backgroundColor: bg, useCORS: true, logging: false, scrollX: 0, scrollY: 0,
+      onclone: (cloned: Document) => {
+        const s = cloned.createElement('style')
+        s.textContent = CAPTURE_FREEZE_CSS
+        cloned.head.appendChild(s)
+        for (const f of fixes) {
+          const el = cloned.querySelector<HTMLElement>(`[data-h2cpad="${f.id}"]`)
+          if (!el) continue
+          el.style.justifyContent = 'flex-start'
+          el.style.boxSizing = 'border-box'
+          el.style[f.col ? 'paddingTop' : 'paddingLeft'] = `${f.pad}px`
+        }
+      },
+    })
+    return await new Promise((resolve) => canvas.toBlob((b) => resolve(b), mime, 0.95))
+  } catch {
+    return null
+  } finally {
+    tagged.forEach((el) => el.removeAttribute('data-h2cpad'))
+  }
+}
+
 /** Post the preview to the vision model for quality verification.
  *  Returns true if OK or if the model doesn't support vision. */
 async function verifyWithVision(dataUrl: string): Promise<boolean> {
@@ -428,29 +488,12 @@ function staticMeasureW(availW: number): number {
 function freezeVh(doc: Document, refH: number): void {
   const conv = (v: string) =>
     v.replace(/(-?[\d.]+)(dvh|svh|lvh|vh)\b/gi, (_m, n) => `${(parseFloat(n) / 100) * refH}px`)
-  for (const sheet of Array.from(doc.styleSheets)) {
-    let rules: CSSRuleList
-    try {
-      rules = sheet.cssRules
-    } catch {
-      continue
-    }
-    const walk = (rl: CSSRuleList) => {
-      for (const rule of Array.from(rl)) {
-        const st = (rule as CSSStyleRule).style
-        if (st) {
-          for (let i = 0; i < st.length; i++) {
-            const prop = st[i]
-            const val = st.getPropertyValue(prop)
-            if (/vh\b/i.test(val)) st.setProperty(prop, conv(val), st.getPropertyPriority(prop))
-          }
-        }
-        const inner = (rule as CSSGroupingRule).cssRules
-        if (inner) walk(inner)
-      }
-    }
-    walk(rules)
-  }
+  // Rewrite the <style> TEXT (not just the live cssRules) so the value is frozen for both the
+  // on-screen render AND any html2canvas clone of this doc, which copies <style> textContent.
+  doc.querySelectorAll('style').forEach((s) => {
+    const t = s.textContent || ''
+    if (/vh\b/i.test(t)) s.textContent = conv(t)
+  })
   doc.querySelectorAll<HTMLElement>('[style*="vh"]').forEach((el) => {
     el.setAttribute('style', conv(el.getAttribute('style') || ''))
   })
@@ -698,16 +741,16 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
         let blob: Blob | null = null
         if (type === 'application/vnd.mermaid') blob = mermaid.svg ? await svgToRaster(mermaid.svg, mime) : null
         else if (type === 'image/svg+xml') blob = await svgToRaster(stableCode, mime)
-        else if (previewUrl) {
-          // Reuse the exact image shown in chat so the download always matches.
-          const png = await (await fetch(previewUrl)).blob()
-          blob = fmt === 'jpeg' ? await blobToJpeg(png) : png
-        } else {
-          // No preview yet (e.g. capture still running): capture on demand.
-          const vw = Math.max(360, Math.round(availW))
-          const url = await captureHtmlPreview(stableCode, iframeRef.current, vw, captureViewportH(vw))
-          const png = url ? await (await fetch(url)).blob() : null
-          blob = png ? (fmt === 'jpeg' ? await blobToJpeg(png) : png) : null
+        else {
+          // HTML: rasterize the EXACT frozen static render that's shown, so the export matches.
+          blob = await rasterizeStaticFrozen(staticRef.current, staticDims, mime)
+          if (!blob) {
+            // Fallback (frozen render not ready): capture a fresh fixed-viewport raster.
+            const vw = staticMeasureW(availW)
+            const url = await captureHtmlPreview(stableCode, iframeRef.current, vw, captureViewportH(vw))
+            const png = url ? await (await fetch(url)).blob() : null
+            blob = png ? (fmt === 'jpeg' ? await blobToJpeg(png) : png) : null
+          }
         }
         if (blob) downloadBlob(blob, fmt === 'jpeg' ? 'artifact.jpg' : 'artifact.png')
         else toast.error('Couldn’t export this artifact as an image — try GIF or HTML.')
