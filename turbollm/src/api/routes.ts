@@ -50,6 +50,7 @@ import { HfError } from '../hf/hf'
 import { DownloadError } from '../downloads/downloads'
 import { BenchError } from '../bench/bench'
 import { inferRepoFromPath } from './path-utils'
+import { screenshotArtifact, findChrome } from '../artifacts/screenshot'
 
 type Status = 200 | 201 | 202 | 400 | 401 | 403 | 404 | 409 | 500 | 501 | 503
 
@@ -121,6 +122,22 @@ export function registerApi(app: Hono, d: Deps): void {
       telemetryLevel: d.store.snapshot().telemetry.level,
       uptimeSec: Math.floor((Date.now() - d.startedAt) / 1000),
     })
+  })
+
+  // ---- artifact screenshot (faithful export) ----
+  // Pixel-perfect raster of an HTML artifact via a real headless Chrome (ADR-121 follow-up).
+  // Local-only (renders arbitrary HTML in a browser); LAN clients fall back to client-side
+  // html2canvas. Returns 503 when no system browser is found so the caller falls back too.
+  app.get('/api/v1/artifacts/screenshot/available', (c) => c.json({ available: findChrome() !== null }))
+  app.post('/api/v1/artifacts/screenshot', async (c) => {
+    if (!isLocalRequest(c, d)) return err(c, 403, 'forbidden', 'Screenshot is local-only.')
+    const { html, width } = await body<{ html?: string; width?: number }>(c)
+    if (!html || typeof html !== 'string') return err(c, 400, 'bad_request', 'html is required')
+    const w = Math.max(360, Math.min(Math.round(width || 1000), 1280))
+    const h = Math.max(480, Math.round((w * 800) / 1280))
+    const png = await screenshotArtifact(html, { width: w, height: h })
+    if (!png) return err(c, 503, 'no_browser', 'No system Chrome/Chromium/Edge found.')
+    return new Response(png, { status: 200, headers: { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' } })
   })
 
   // ---- engine registry (A1) ----

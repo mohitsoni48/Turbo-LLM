@@ -369,6 +369,26 @@ async function captureHtmlPreview(
   return blob ? blobToScaledDataUrl(blob) : null
 }
 
+/** Ask the daemon to render the artifact in a real headless Chrome and return a pixel-perfect
+ *  PNG/JPEG blob. This is the faithful export (matches the on-screen render exactly); returns
+ *  null when no system browser is available (503) or the request fails, so the caller falls
+ *  back to the client-side html2canvas raster. */
+async function serverScreenshot(html: string, width: number, mime: 'image/png' | 'image/jpeg'): Promise<Blob | null> {
+  try {
+    const res = await fetch('/api/v1/artifacts/screenshot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ html, width }),
+    })
+    if (!res.ok) return null
+    const png = await res.blob()
+    if (!png || png.size === 0) return null
+    return mime === 'image/jpeg' ? await blobToJpeg(png) : png
+  } catch {
+    return null
+  }
+}
+
 /** Rasterize the EXACT on-screen frozen static iframe (same-origin, vh already frozen to px)
  *  to a PNG/JPEG blob, so the export matches what's shown. html2canvas doesn't reproduce flex
  *  MAIN-axis distribution (a `justify-content:center` column hero renders top-aligned), so we
@@ -779,10 +799,12 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
         if (type === 'application/vnd.mermaid') blob = mermaid.svg ? await svgToRaster(mermaid.svg, mime) : null
         else if (type === 'image/svg+xml') blob = await svgToRaster(stableCode, mime)
         else {
-          // HTML: rasterize the EXACT frozen static render that's shown, so the export matches.
-          blob = await rasterizeStaticFrozen(staticRef.current, staticDims, mime)
+          // HTML: prefer a real headless-Chrome screenshot from the daemon (pixel-perfect,
+          // matches the on-screen render). Fall back to the client-side raster of the frozen
+          // static iframe when no system browser is available, then a fresh capture.
+          blob = await serverScreenshot(stableCode, staticMeasureW(availW), mime)
+          if (!blob) blob = await rasterizeStaticFrozen(staticRef.current, staticDims, mime)
           if (!blob) {
-            // Fallback (frozen render not ready): capture a fresh fixed-viewport raster.
             const vw = staticMeasureW(availW)
             const url = await captureHtmlPreview(stableCode, iframeRef.current, vw, captureViewportH(vw))
             const png = url ? await (await fetch(url)).blob() : null
