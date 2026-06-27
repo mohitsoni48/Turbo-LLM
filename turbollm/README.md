@@ -18,6 +18,7 @@
   <img src="https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg" alt="license" />
   <img src="https://img.shields.io/badge/platform-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-555.svg" alt="platforms" />
   <a href="https://ko-fi.com/mohitsoni"><img src="https://img.shields.io/badge/Ko--fi-support%20us-FF5E5B?logo=kofi&logoColor=white" alt="Ko-fi" /></a>
+  <a href="https://github.com/sponsors/mohitsoni48"><img src="https://img.shields.io/badge/GitHub%20Sponsors-support%20us-EA4AAA?logo=githubsponsors&logoColor=white" alt="GitHub Sponsors" /></a>
   <a href="https://discord.gg/v6kRbV7nC"><img src="https://img.shields.io/badge/Discord-join%20chat-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
 </p>
 
