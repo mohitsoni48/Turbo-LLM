@@ -392,6 +392,7 @@ async function rasterizeStaticFrozen(
   // solid box, so flatten them to their text colour.
   const pads: { id: string; pad: number }[] = []
   const clips: { id: string; color: string }[] = []
+  const lhFix: { id: string; h: number }[] = []
   doc.querySelectorAll('*').forEach((el) => {
     const cs = win.getComputedStyle(el)
     const id = el.getAttribute('data-h2cpad')
@@ -408,6 +409,16 @@ async function rasterizeStaticFrozen(
     }
     const clip = cs.getPropertyValue('-webkit-background-clip') || cs.backgroundClip
     if (clip && clip.includes('text')) clips.push({ id, color: cs.color })
+    // (c) single-line text in a vertically-padded box (buttons, pills): html2canvas mis-places
+    // the baseline so the text sits too high. Re-center it with line-height = box height.
+    if (el.children.length === 0 && (el.textContent || '').trim()) {
+      const padT = parseFloat(cs.paddingTop) || 0
+      const padB = parseFloat(cs.paddingBottom) || 0
+      const fs = parseFloat(cs.fontSize) || 16
+      const ch = (el as HTMLElement).clientHeight
+      const contentH = ch - padT - padB
+      if ((padT > 0 || padB > 0) && contentH > 0 && contentH < fs * 1.8) lhFix.push({ id, h: Math.round(ch) })
+    }
   })
   try {
     const bg = appBg()
@@ -435,6 +446,15 @@ async function rasterizeStaticFrozen(
           el.style.background = 'none'
           el.style.setProperty('-webkit-background-clip', 'border-box')
           el.style.backgroundClip = 'border-box'
+        }
+        for (const x of lhFix) {
+          const el = cloned.querySelector<HTMLElement>(`[data-h2cpad="${x.id}"]`)
+          if (!el) continue
+          el.style.paddingTop = '0px'
+          el.style.paddingBottom = '0px'
+          el.style.height = `${x.h}px`
+          el.style.lineHeight = `${x.h}px`
+          el.style.boxSizing = 'border-box'
         }
       },
     })
