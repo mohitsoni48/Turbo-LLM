@@ -33,6 +33,7 @@ import {
 import type { BackendId } from '../engines/download'
 import { ensureMlxEnv, mlxSamplingArgs } from '../engines/mlx'
 import { ensureVllmEnv } from '../engines/vllm'
+import { ensureSglangEnv } from '../engines/sglang'
 import { ensureKoboldcpp, koboldcppBinPath, koboldcppDir, koboldcppProfileToArgs } from '../engines/koboldcpp'
 import { ensureLlamafile, llamafileBinPath, llamafileDir } from '../engines/llamafile'
 import { catalogForPlatform, catalogEngine } from '../engines/catalog'
@@ -608,6 +609,27 @@ export function registerApi(app: Hono, d: Deps): void {
       }
     })()
     return c.json({ accepted: true, engine: 'vllm' }, 202)
+  })
+
+  // Provision the SGLang engine (ADR-120): uv → venv → `uv pip install sglang[all]`,
+  // then register as a kind='sglang' engine. 202 + progress via GET /status engineProvision.
+  // ?update=1 upgrades sglang to the latest release (passes -U to uv pip install).
+  app.post('/api/v1/engines/sglang', (c) => {
+    { const busy = engineWorkBusy(d); if (busy) return err(c, 409, 'engine_already_running', busy) }
+    const root = join(d.store.dir(), 'engines')
+    const upgrade = c.req.query('update') === '1'
+    void (async () => {
+      try {
+        d.provision.start('sglang')
+        const rt = await ensureSglangEnv(root, (p) => d.provision.progress(p.phase, p.pct, p.part, p.parts), upgrade)
+        const eng = d.registry.addSglang(`SGLang (${rt.version})`, rt.python, rt.version)
+        d.registry.activate(eng.id)
+        d.provision.done()
+      } catch (e) {
+        d.provision.fail(`Could not install SGLang: ${e instanceof Error ? e.message : e}`)
+      }
+    })()
+    return c.json({ accepted: true, engine: 'sglang' }, 202)
   })
 
   // Provision a catalog fork via GitHub release (ADR-044) — TurboQuant. Downloads

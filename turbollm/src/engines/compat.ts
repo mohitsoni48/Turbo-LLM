@@ -40,7 +40,7 @@ export function engineAcceptsFormat(engineKind: string, format: ModelFormat): bo
  */
 export const ENGINE_MODEL_ALIAS = 'default_model'
 export function engineModelAlias(engineKind: string): string | null {
-  return engineKind === 'mlx' || engineKind === 'vllm' ? ENGINE_MODEL_ALIAS : null
+  return engineKind === 'mlx' || engineKind === 'vllm' || engineKind === 'sglang' ? ENGINE_MODEL_ALIAS : null
 }
 
 // ─── Hardware ↔ variant matching (engine overhaul, Phase 1) ──────────────────
