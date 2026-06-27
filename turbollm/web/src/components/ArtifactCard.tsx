@@ -404,6 +404,14 @@ function screenCap(): number {
   return Math.max(200, Math.round((v * 0.6) / 10) * 10)
 }
 
+/** The viewport HEIGHT to render an HTML artifact at when capturing its static image.
+ *  Emulates a real desktop (1280×800 → 16:10) scaled to the capture width, so `vh`-based
+ *  sections resolve to natural proportions — same idea as the fixed device viewport used
+ *  for post mockups. */
+function captureViewportH(vw: number): number {
+  return Math.max(480, Math.round(vw * (800 / 1280)))
+}
+
 type Fmt = 'png' | 'jpeg' | 'svg' | 'gif' | 'html'
 const FMT_LABEL: Record<Fmt, string> = { png: 'PNG', jpeg: 'JPEG', svg: 'SVG', gif: 'GIF', html: 'HTML' }
 
@@ -554,7 +562,11 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
     if (type !== 'text/html' || !fitReady) return
     let cancelled = false
     const vw = Math.max(360, Math.round(availW))
-    void captureHtmlPreview(stableCode, iframeRef.current, vw, maxH).then((url) => {
+    // Capture at a real DESKTOP aspect (1280×800 → 16:10), not the chat's 60vh cap. vh-based
+    // sections (e.g. `height:80vh`) then land at natural proportions instead of being stretched
+    // into an over-tall frame. This mirrors the post-mockup pipeline (fixed device viewport).
+    const vh = captureViewportH(vw)
+    void captureHtmlPreview(stableCode, iframeRef.current, vw, vh).then((url) => {
       if (!cancelled && url) setPreviewUrl(url)
     })
     return () => { cancelled = true }
@@ -629,7 +641,8 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
           blob = fmt === 'jpeg' ? await blobToJpeg(png) : png
         } else {
           // No preview yet (e.g. capture still running): capture on demand.
-          const url = await captureHtmlPreview(stableCode, iframeRef.current, Math.max(360, Math.round(availW)), cap)
+          const vw = Math.max(360, Math.round(availW))
+          const url = await captureHtmlPreview(stableCode, iframeRef.current, vw, captureViewportH(vw))
           const png = url ? await (await fetch(url)).blob() : null
           blob = png ? (fmt === 'jpeg' ? await blobToJpeg(png) : png) : null
         }
