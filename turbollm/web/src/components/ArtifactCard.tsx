@@ -269,7 +269,11 @@ function appBg(): string {
  *  external network, no helper scripts (scripts never run in this iframe). */
 function buildCaptureDoc(code: string): string {
   const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:;">`
-  const norm = `<style>html,body{margin:0}img,svg,canvas,video{max-width:100%}</style>`
+  // Match buildSrcdoc's normalization EXACTLY (height:auto / min-height:0) so the static
+  // render's intrinsic height equals the height the (scripted) sizer measured. Without
+  // this, a `min-height:100vh` page renders taller here than naturalH and the bottom is
+  // clipped. Scrollbars are hidden because the box is already sized to the full content.
+  const norm = `<style>html,body{margin:0;height:auto!important;min-height:0!important}html{scrollbar-width:none}html::-webkit-scrollbar{width:0;height:0}img,svg,canvas,video{max-width:100%}</style>`
   if (/<head[\s>]/i.test(code)) return code.replace(/(<head[^>]*>)/i, `$1\n${csp}\n${norm}`)
   return `<!doctype html><html><head>${csp}${norm}</head><body>${code}</body></html>`
 }
@@ -288,10 +292,14 @@ const CAPTURE_FREEZE_CSS =
  *  layout — so 100vh, position:fixed, flex and overflow render correctly. The iframe
  *  is same-origin (parent can read it) but carries no `allow-scripts`, so untrusted
  *  artifact markup cannot execute. Returns a PNG data URL, or null on failure. */
-async function html2canvasCapture(code: string, naturalW: number, naturalH: number): Promise<string | null> {
+async function html2canvasCapture(code: string, vw: number, vh: number): Promise<string | null> {
   const bg = appBg()
-  const w = Math.max(320, Math.round(naturalW) || 800)
-  const h = Math.max(200, Math.round(naturalH) || 600)
+  // FIXED viewport: vw × vh. `vh`-based heights (e.g. `height:80vh`) resolve against this
+  // stable height, so the layout doesn't feed back into the element height (the live-iframe
+  // failure mode that clipped the page). We then capture the FULL content height that
+  // results, with windowHeight pinned to vh so html2canvas resolves vh the same way.
+  const w = Math.max(320, Math.round(vw) || 800)
+  const h = Math.max(200, Math.round(vh) || 600)
   const frame = document.createElement('iframe')
   frame.setAttribute('sandbox', 'allow-same-origin')
   frame.style.cssText = `position:fixed;left:-100000px;top:0;border:0;background:${bg};width:${w}px;height:${h}px;`
@@ -306,12 +314,30 @@ async function html2canvasCapture(code: string, naturalW: number, naturalH: numb
     if (!doc || !doc.body) return null
     try { if (doc.fonts?.ready) await doc.fonts.ready } catch { /* ignore */ }
     await new Promise((r) => setTimeout(r, 250))
-    const realW = Math.max(doc.documentElement.scrollWidth, doc.body.scrollWidth, w)
-    const realH = Math.max(doc.documentElement.scrollHeight, doc.body.scrollHeight, 200)
-    const scale = Math.max(2, 2048 / Math.min(realW, realH))
+    // Full content height with vh resolved against the fixed viewport height h.
+    const realH = Math.max(doc.documentElement.scrollHeight, doc.body.scrollHeight, h)
+    // html2canvas can't rasterize `background-clip:text` (gradient-clipped text) — it paints
+    // the background as a solid box behind the (transparent) glyphs. Flatten such elements to
+    // their base text colour so the heading renders as plain text instead of a colour block.
+    const win = doc.defaultView
+    if (win) {
+      doc.querySelectorAll('*').forEach((node) => {
+        const el = node as HTMLElement
+        const cs = win.getComputedStyle(el)
+        const clip = cs.getPropertyValue('-webkit-background-clip') || cs.backgroundClip
+        if (clip && clip.includes('text')) {
+          el.style.setProperty('-webkit-text-fill-color', cs.color)
+          el.style.color = cs.color
+          el.style.background = 'none'
+          el.style.setProperty('-webkit-background-clip', 'border-box')
+          el.style.backgroundClip = 'border-box'
+        }
+      })
+    }
+    const scale = Math.max(2, 2048 / Math.min(w, realH))
     const { default: html2canvas } = await import('html2canvas')
     const canvas = await html2canvas(doc.body, {
-      width: realW, height: realH, windowWidth: realW, windowHeight: realH,
+      width: w, height: realH, windowWidth: w, windowHeight: h,
       scale, backgroundColor: bg, useCORS: true, logging: false, scrollX: 0, scrollY: 0,
       onclone: (cloned: Document) => {
         const s = cloned.createElement('style')
@@ -331,11 +357,11 @@ async function html2canvasCapture(code: string, naturalW: number, naturalH: numb
  *  CSS layouts go through html2canvas (faithful); script/canvas-driven artifacts
  *  fall back to grabbing the live <canvas>, then the foreignObject screenshot. */
 async function captureHtmlPreview(
-  code: string, liveIframe: HTMLIFrameElement | null, naturalW: number, naturalH: number,
+  code: string, liveIframe: HTMLIFrameElement | null, vw: number, vh: number,
 ): Promise<string | null> {
   const scriptDriven = /<canvas[\s>]/i.test(code) && /<script[\s>]/i.test(code)
   if (!scriptDriven) {
-    const url = await html2canvasCapture(code, naturalW, naturalH)
+    const url = await html2canvasCapture(code, vw, vh)
     if (url) return url
   }
   await new Promise((r) => setTimeout(r, 200))
@@ -402,7 +428,6 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
-  const staticRef = useRef<HTMLIFrameElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [interactive, setInteractive] = useState(false)
@@ -520,6 +545,23 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
     return () => { cancelled = true }
   }, [type, fitReady, stableCode])
 
+  // Capture HTML → static preview image at a FIXED viewport (full card width × the 60vh
+  // cap). This is the only reliable way to show the WHOLE design of a vh-based page: a live
+  // auto-height iframe can't (its height feeds its own `vh` units, clipping the page). The
+  // captured image is non-interactive by nature and never clips. Interactive mode uses the
+  // live scripted iframe; this is just the static preview.
+  useEffect(() => {
+    if (type !== 'text/html' || !fitReady) return
+    let cancelled = false
+    const vw = Math.max(360, Math.round(availW))
+    void captureHtmlPreview(stableCode, iframeRef.current, vw, maxH).then((url) => {
+      if (!cancelled && url) setPreviewUrl(url)
+    })
+    return () => { cancelled = true }
+    // availW/maxH read at call time; re-running on every resize would re-capture needlessly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [type, stableCode, theme, fitReady])
+
   useEffect(() => {
     if (!menuOpen) return
     const close = () => setMenuOpen(false)
@@ -530,13 +572,11 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
   const srcdoc = type !== 'application/vnd.mermaid' ? buildSrcdoc(type, stableCode) : ''
   const mermaidSrcdoc = mermaid.svg ? buildSrcdoc('image/svg+xml', mermaid.svg) : ''
 
-  // Static vs interactive. HTML toggles between a real no-JS render (static, default)
-  // and a scripted iframe; Mermaid/SVG show their rasterized image once it's ready.
-  const showStatic = type === 'text/html' ? !interactive : (!!previewUrl && !interactive)
-  // Dimensions used to fit the visible content. For the Mermaid/SVG static image the
-  // image's own pixels are authoritative (no iframe sizes the card after it appears);
-  // HTML is always sized by the (hidden, scripted) iframe's reported natural size.
-  const usingImg = showStatic && type !== 'text/html' && !!imgDims
+  // Static (default) shows a rasterized image of the WHOLE design once captured; interactive
+  // shows the live scripted iframe. Same model for HTML, Mermaid and SVG now.
+  const showStatic = !interactive && !!previewUrl
+  // The static image's own pixels are authoritative for sizing the card.
+  const usingImg = showStatic && !!imgDims
   const dispW = usingImg ? imgDims!.w : naturalW
   const dispH = usingImg ? imgDims!.h : naturalH
   const dispReady = dispW > 0 && availW > 0
@@ -555,7 +595,8 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
     }
   }
   const displayW = dispReady ? Math.round(dispW * scale) : 0
-  const cardWidth = dispReady && fitMode === 'height' ? `${displayW}px` : '100%'
+  // Interactive uses a full-width real viewport; static hugs the scaled design.
+  const cardWidth = interactive ? '100%' : (dispReady && fitMode === 'height' ? `${displayW}px` : '100%')
 
   // Applicable image-format downloads — the underlying html/svg/mermaid is abstracted.
   const formats: Fmt[] = type === 'text/html' ? ['png', 'jpeg', 'gif', 'html'] : ['png', 'jpeg', 'svg']
@@ -588,7 +629,7 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
           blob = fmt === 'jpeg' ? await blobToJpeg(png) : png
         } else {
           // No preview yet (e.g. capture still running): capture on demand.
-          const url = await captureHtmlPreview(stableCode, iframeRef.current, naturalW, naturalH)
+          const url = await captureHtmlPreview(stableCode, iframeRef.current, Math.max(360, Math.round(availW)), cap)
           const png = url ? await (await fetch(url)).blob() : null
           blob = png ? (fmt === 'jpeg' ? await blobToJpeg(png) : png) : null
         }
@@ -619,19 +660,50 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
       </div>
     )
   } else if (type === 'text/html') {
-    // HTML renders as a REAL browser frame (perfect fidelity, matches interactive).
-    //  · static (default): same-origin, NO scripts — non-interactive, can't execute.
-    //  · interactive: scripted, isolated.
-    // A hidden scripted iframe stays mounted in static mode to report the card size
-    // and power GIF / canvas downloads. PNG/JPEG are rasterized on demand.
-    body = interactive ? (
-      <FittedIframe frameRef={iframeRef} srcDoc={srcdoc} sandbox="allow-scripts" naturalW={naturalW} naturalH={naturalH} scale={scale} cap={cap} ready={fitReady} />
-    ) : (
+    //  · static (default): a captured IMAGE of the whole design at a fixed viewport — shows
+    //    the entire page (hero + everything below), can't clip, and is inherently
+    //    non-interactive. While the capture runs we show a spinner (not a clipping live
+    //    frame). A live auto-height iframe is NOT used here because `vh`-based heights make
+    //    its measured height feed back on itself and clip the page.
+    //  · interactive: a REAL viewport — scale 1, full card width, fixed 60vh height,
+    //    natively scrollable, scripts on. Fixed height = no collapse / no runaway-expand.
+    // A hidden, always-mounted scripted iframe (iframeRef) powers GIF/canvas downloads and
+    // is the html2canvas fallback source; it never displays.
+    const sizer = (
+      <div style={{ height: 0, overflow: 'hidden' }} aria-hidden>
+        <FittedIframe frameRef={iframeRef} srcDoc={srcdoc} naturalW={naturalW} naturalH={naturalH} scale={scale} cap={cap} ready={fitReady} />
+      </div>
+    )
+    body = (
       <>
-        <FittedIframe frameRef={staticRef} srcDoc={buildCaptureDoc(stableCode)} sandbox="allow-same-origin" naturalW={naturalW} naturalH={naturalH} scale={scale} cap={cap} ready={fitReady} />
-        <div style={{ height: 0, overflow: 'hidden' }} aria-hidden>
-          <FittedIframe frameRef={iframeRef} srcDoc={srcdoc} naturalW={naturalW} naturalH={naturalH} scale={scale} cap={cap} ready={fitReady} />
-        </div>
+        {sizer}
+        {interactive ? (
+          <iframe
+            srcDoc={srcdoc}
+            sandbox="allow-scripts"
+            title="Artifact"
+            className="block w-full border-0"
+            style={{ height: cap }}
+          />
+        ) : previewUrl ? (
+          <img
+            src={previewUrl}
+            alt="Artifact"
+            onLoad={(e) => {
+              const el = e.currentTarget
+              if (el.naturalWidth && el.naturalHeight) setImgDims({ w: el.naturalWidth, h: el.naturalHeight })
+            }}
+            style={{ width: cardWidth, height: 'auto', display: 'block' }}
+            className="min-w-0"
+          />
+        ) : (
+          <div className="flex items-center justify-center" style={{ minHeight: 160 }}>
+            <div className="flex items-center gap-2 text-faint">
+              <Loader2 size={14} className="animate-spin" />
+              <span className="text-[13px]">Rendering artifact…</span>
+            </div>
+          </div>
+        )}
       </>
     )
   } else if (showStatic) {
