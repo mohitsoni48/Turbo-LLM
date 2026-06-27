@@ -412,6 +412,50 @@ function captureViewportH(vw: number): number {
   return Math.max(480, Math.round(vw * (800 / 1280)))
 }
 
+/** Width to render/measure the static HTML preview at — a stable desktop width (clamped to
+ *  the available column, capped at 1280) so the responsive layout is consistent regardless of
+ *  the card's current scaled width. */
+function staticMeasureW(availW: number): number {
+  return Math.max(360, Math.min(Math.round(availW) || 1000, 1280))
+}
+
+/** Rewrite viewport-HEIGHT units (vh/dvh/svh/lvh) to fixed px against a reference viewport
+ *  height, in a (same-origin) artifact document's stylesheets + inline styles. After this,
+ *  the page's layout no longer depends on the iframe's own height — so the iframe can be
+ *  sized to the full content height without a `height:80vh` hero feeding back and clipping
+ *  the page. vw-based units are left alone (width is stable). Returns silently on cross-origin
+ *  sheets. */
+function freezeVh(doc: Document, refH: number): void {
+  const conv = (v: string) =>
+    v.replace(/(-?[\d.]+)(dvh|svh|lvh|vh)\b/gi, (_m, n) => `${(parseFloat(n) / 100) * refH}px`)
+  for (const sheet of Array.from(doc.styleSheets)) {
+    let rules: CSSRuleList
+    try {
+      rules = sheet.cssRules
+    } catch {
+      continue
+    }
+    const walk = (rl: CSSRuleList) => {
+      for (const rule of Array.from(rl)) {
+        const st = (rule as CSSStyleRule).style
+        if (st) {
+          for (let i = 0; i < st.length; i++) {
+            const prop = st[i]
+            const val = st.getPropertyValue(prop)
+            if (/vh\b/i.test(val)) st.setProperty(prop, conv(val), st.getPropertyPriority(prop))
+          }
+        }
+        const inner = (rule as CSSGroupingRule).cssRules
+        if (inner) walk(inner)
+      }
+    }
+    walk(rules)
+  }
+  doc.querySelectorAll<HTMLElement>('[style*="vh"]').forEach((el) => {
+    el.setAttribute('style', conv(el.getAttribute('style') || ''))
+  })
+}
+
 type Fmt = 'png' | 'jpeg' | 'svg' | 'gif' | 'html'
 const FMT_LABEL: Record<Fmt, string> = { png: 'PNG', jpeg: 'JPEG', svg: 'SVG', gif: 'GIF', html: 'HTML' }
 
@@ -436,9 +480,14 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  const staticRef = useRef<HTMLIFrameElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [interactive, setInteractive] = useState(false)
+  // Frozen-vh dimensions of the static HTML render: once the static iframe has loaded, the
+  // parent rewrites its vh units to px and measures the true full-page size here, so the
+  // iframe can be shown at full height (no clip) without the height feeding back into vh.
+  const [staticDims, setStaticDims] = useState<{ w: number; h: number } | null>(null)
   // Intrinsic pixel size of the captured preview image. Used to size the card in
   // static mode — Mermaid/SVG never render the sizing iframe, so without this their
   // card would fall back to full column width.
@@ -520,6 +569,7 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
     setPreviewUrl(null)
     setInteractive(false)
     setImgDims(null)
+    setStaticDims(null)
   }, [stableCode, theme])
 
   // Capture Mermaid SVG → static preview image once the SVG is rendered.
@@ -553,26 +603,38 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
     return () => { cancelled = true }
   }, [type, fitReady, stableCode])
 
-  // Capture HTML → static preview image at a FIXED viewport (full card width × the 60vh
-  // cap). This is the only reliable way to show the WHOLE design of a vh-based page: a live
-  // auto-height iframe can't (its height feeds its own `vh` units, clipping the page). The
-  // captured image is non-interactive by nature and never clips. Interactive mode uses the
-  // live scripted iframe; this is just the static preview.
+  // Static HTML render: freeze the live iframe's vh→px (at a desktop-proportioned reference
+  // viewport) and measure the true full-page size. A LIVE iframe is pixel-perfect (flexbox
+  // centering, gradients, backdrop-filter — none of which html2canvas reproduces), and
+  // freezing vh lets us show the WHOLE page at full height without the `height:80vh` hero
+  // feeding back into the iframe height and clipping the page. Interactive mode uses the
+  // scripted iframe; this just sizes the non-interactive static view.
   useEffect(() => {
-    if (type !== 'text/html' || !fitReady) return
+    // The static iframe is ALWAYS mounted (only its visibility toggles), so it's frozen+
+    // measured exactly once per content/theme — toggling to interactive and back never
+    // remounts it (a remount would load an UNFROZEN doc and clip the page).
+    if (type !== 'text/html' || staticDims || !fitReady) return
+    const f = staticRef.current
+    if (!f) return
     let cancelled = false
-    const vw = Math.max(360, Math.round(availW))
-    // Capture at a real DESKTOP aspect (1280×800 → 16:10), not the chat's 60vh cap. vh-based
-    // sections (e.g. `height:80vh`) then land at natural proportions instead of being stretched
-    // into an over-tall frame. This mirrors the post-mockup pipeline (fixed device viewport).
-    const vh = captureViewportH(vw)
-    void captureHtmlPreview(stableCode, iframeRef.current, vw, vh).then((url) => {
-      if (!cancelled && url) setPreviewUrl(url)
-    })
-    return () => { cancelled = true }
-    // availW/maxH read at call time; re-running on every resize would re-capture needlessly.
+    const refH = captureViewportH(staticMeasureW(availW))
+    const measure = () => {
+      const doc = f.contentDocument
+      if (!doc || !doc.body) return
+      try { freezeVh(doc, refH) } catch { /* cross-origin / parse issue: fall back to raw */ }
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (cancelled || !doc.body) return
+        const w = Math.max(doc.documentElement.scrollWidth, doc.body.scrollWidth)
+        const h = Math.max(doc.documentElement.scrollHeight, doc.body.scrollHeight)
+        if (w > 0 && h > 0) setStaticDims({ w, h })
+      }))
+    }
+    if (f.contentDocument?.readyState === 'complete') measure()
+    f.addEventListener('load', measure)
+    return () => { cancelled = true; f.removeEventListener('load', measure) }
+    // availW read at call time; resizing re-runs via staticDims reset, not as a dep.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [type, stableCode, theme, fitReady])
+  }, [type, staticDims, fitReady, stableCode, theme])
 
   useEffect(() => {
     if (!menuOpen) return
@@ -584,13 +646,14 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
   const srcdoc = type !== 'application/vnd.mermaid' ? buildSrcdoc(type, stableCode) : ''
   const mermaidSrcdoc = mermaid.svg ? buildSrcdoc('image/svg+xml', mermaid.svg) : ''
 
-  // Static (default) shows a rasterized image of the WHOLE design once captured; interactive
-  // shows the live scripted iframe. Same model for HTML, Mermaid and SVG now.
-  const showStatic = !interactive && !!previewUrl
-  // The static image's own pixels are authoritative for sizing the card.
-  const usingImg = showStatic && !!imgDims
-  const dispW = usingImg ? imgDims!.w : naturalW
-  const dispH = usingImg ? imgDims!.h : naturalH
+  // Static shows the frozen-vh live render (HTML) or the rasterized image (Mermaid/SVG);
+  // interactive shows the live scripted iframe.
+  const htmlStaticReady = type === 'text/html' && !interactive && !!staticDims
+  const showStatic = !interactive && (type === 'text/html' ? !!staticDims : !!previewUrl)
+  // The static render's own measured pixels are authoritative for sizing the card.
+  const usingImg = !interactive && type !== 'text/html' && !!imgDims
+  const dispW = htmlStaticReady ? staticDims!.w : usingImg ? imgDims!.w : naturalW
+  const dispH = htmlStaticReady ? staticDims!.h : usingImg ? imgDims!.h : naturalH
   const dispReady = dispW > 0 && availW > 0
 
   // Fit-height: scale to the 60vh cap, card hugs content. Fit-width: full column.
@@ -673,24 +736,55 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
       </div>
     )
   } else if (type === 'text/html') {
-    //  · static (default): a captured IMAGE of the whole design at a fixed viewport — shows
-    //    the entire page (hero + everything below), can't clip, and is inherently
-    //    non-interactive. While the capture runs we show a spinner (not a clipping live
-    //    frame). A live auto-height iframe is NOT used here because `vh`-based heights make
-    //    its measured height feed back on itself and clip the page.
-    //  · interactive: a REAL viewport — scale 1, full card width, fixed 60vh height,
-    //    natively scrollable, scripts on. Fixed height = no collapse / no runaway-expand.
-    // A hidden, always-mounted scripted iframe (iframeRef) powers GIF/canvas downloads and
-    // is the html2canvas fallback source; it never displays.
-    const sizer = (
-      <div style={{ height: 0, overflow: 'hidden' }} aria-hidden>
-        <FittedIframe frameRef={iframeRef} srcDoc={srcdoc} naturalW={naturalW} naturalH={naturalH} scale={scale} cap={cap} ready={fitReady} />
-      </div>
-    )
+    //  · static (default): the LIVE page rendered in a same-origin, no-scripts iframe with its
+    //    `vh` units frozen to px (see the static-measure effect). A live render is pixel-perfect
+    //    — flexbox centering, gradients, backdrop-filter — none of which a rasterizer reproduces;
+    //    freezing vh lets it show at full height with no clip and no feedback. `pointer-events:
+    //    none` makes it non-interactive. Until measured we render it transparent + a spinner.
+    //  · interactive: a REAL viewport — scale 1, full card width, fixed 60vh height, natively
+    //    scrollable, scripts on. Fixed height = no collapse / no runaway-expand.
+    // A hidden scripted iframe (iframeRef) powers GIF/canvas + on-demand image downloads.
+    const measureW = staticMeasureW(availW)
+    const refH = captureViewportH(measureW)
     body = (
       <>
-        {sizer}
-        {interactive ? (
+        <div style={{ height: 0, overflow: 'hidden' }} aria-hidden>
+          <FittedIframe frameRef={iframeRef} srcDoc={srcdoc} naturalW={naturalW} naturalH={naturalH} scale={scale} cap={cap} ready={fitReady} />
+        </div>
+        {/* Static frozen-vh render — ALWAYS mounted (frozen once); only hidden when interactive,
+            so toggling back never remounts/unfreezes it. */}
+        <div
+          style={interactive
+            ? { height: 0, overflow: 'hidden' }
+            : {
+                position: 'relative',
+                width: staticDims ? Math.round(staticDims.w * scale) : undefined,
+                height: staticDims ? Math.round(staticDims.h * scale) : undefined,
+                overflow: 'hidden',
+              }}
+          aria-hidden={interactive}
+        >
+          <iframe
+            ref={staticRef}
+            srcDoc={buildCaptureDoc(stableCode)}
+            sandbox="allow-same-origin"
+            title="Artifact"
+            scrolling="no"
+            className="block border-0"
+            style={staticDims
+              ? { width: staticDims.w, height: staticDims.h, transform: scale !== 1 ? `scale(${scale})` : undefined, transformOrigin: 'top left', pointerEvents: 'none' }
+              : { width: measureW, height: refH, pointerEvents: 'none', opacity: 0 }}
+          />
+          {!interactive && !staticDims && (
+            <div className="flex items-center justify-center" style={{ position: 'absolute', inset: 0, minHeight: 160 }}>
+              <div className="flex items-center gap-2 text-faint">
+                <Loader2 size={14} className="animate-spin" />
+                <span className="text-[13px]">Rendering artifact…</span>
+              </div>
+            </div>
+          )}
+        </div>
+        {interactive && (
           <iframe
             srcDoc={srcdoc}
             sandbox="allow-scripts"
@@ -698,24 +792,6 @@ export function ArtifactCard({ lang, code }: ArtifactCardProps) {
             className="block w-full border-0"
             style={{ height: cap }}
           />
-        ) : previewUrl ? (
-          <img
-            src={previewUrl}
-            alt="Artifact"
-            onLoad={(e) => {
-              const el = e.currentTarget
-              if (el.naturalWidth && el.naturalHeight) setImgDims({ w: el.naturalWidth, h: el.naturalHeight })
-            }}
-            style={{ width: cardWidth, height: 'auto', display: 'block' }}
-            className="min-w-0"
-          />
-        ) : (
-          <div className="flex items-center justify-center" style={{ minHeight: 160 }}>
-            <div className="flex items-center gap-2 text-faint">
-              <Loader2 size={14} className="animate-spin" />
-              <span className="text-[13px]">Rendering artifact…</span>
-            </div>
-          </div>
         )}
       </>
     )
