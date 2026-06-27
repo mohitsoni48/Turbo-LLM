@@ -32,6 +32,9 @@ _Nothing yet._
 ### Fixed
 - **Import from URL now works with Hugging Face "blob" viewer links** ([#28](https://github.com/mohitsoni48/TurboLLM/pull/28)). HF file-viewer pages use `/blob/` in the path; pasting one would fail because HTTP clients receive the HTML page, not the binary. Both the dialog URL pre-processor and the backend download manager now rewrite `/blob/` → `/resolve/` automatically, so any URL copied directly from the HF file browser imports cleanly.
 
+### Discord
+- You can now paste any Hugging Face file page URL directly into **Import from URL** — no more errors when copying the link straight from the HF file browser.
+
 ## [1.5.2] - 2026-06-26
 
 **Bug-fix + batch-size release — llama.cpp batch controls, artifact rendering overhaul,
