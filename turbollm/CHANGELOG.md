@@ -25,6 +25,29 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
+## [1.5.4] - 2026-06-28
+
+**Python engines + pixel-perfect artifact export.**
+
+SGLang joins the engine catalog (Linux/WSL2, OpenAI-compatible, safetensors). Two real vLLM/SGLang bugs fixed: `ninja` no longer needs to be installed system-wide, and the `repetition_penalty` sampling key is now mapped correctly. Artifact PNG/JPEG export switched to headless Chrome (puppeteer-core) for a pixel-perfect result, plus a series of static-render fixes. `turbollm launch` auto-discovers the daemon port and no longer pins a model unless `--model` is passed.
+
+### Added
+- **SGLang engine** (ADR-120, Linux/WSL2 only). Faster vLLM-class inference — OpenAI-compatible, HuggingFace safetensors, Python ≥3.10, CUDA 12/13. Load settings: `context-length`, `mem-fraction-static`, `tp`, `served-model-name`, `api-key`, `disable-flashinfer`. Greyed on Windows with a "Linux/WSL2 only" explanation, matching vLLM's treatment.
+- **GitHub Sponsors** badge added to README.
+
+### Fixed
+- **BUG-005** — vLLM and SGLang fail to start when `ninja` is not installed system-wide. FlashInfer JIT-compiles a CUDA kernel at startup and shells out to `ninja` via `PATH`; the venv ships `ninja` in `venv/bin` but it was never added to `PATH`. Fix: prepend the engine venv's `bin` / `Scripts` directory to PATH in `pyEngineEnv` — applies to vLLM, MLX, and SGLang.
+- **BUG-006** — vLLM and SGLang reject `repeat_penalty` (llama.cpp name); both engines expect `repetition_penalty`. Sampling key mapping corrected for both engines.
+- **Pixel-perfect artifact export** (puppeteer-core) — PNG/JPEG downloads now use headless Chrome instead of html2canvas. The exported image matches the on-screen render exactly. html2canvas is removed.
+- **Artifact static rendering** — a series of fixes to the frozen-viewport live preview: captures at the correct desktop aspect ratio (16:10); eliminates the white band below the artifact and nav alignment regressions; vertically centers single-line button/pill text that html2canvas mis-placed.
+- **`turbollm launch`** — auto-discovers the running daemon port (pidfile → config.json → shipped default); no longer pins `ANTHROPIC_MODEL` unless `--model` is passed, so Claude Code connects to whatever model the gateway currently has loaded instead of forcing an auto-swap.
+
+### Discord
+- **SGLang is now a supported engine** — a faster alternative to vLLM for Python-based inference on Linux/WSL2. Same one-click setup as vLLM.
+- **Artifact exports are pixel-perfect** — switched to headless Chrome (puppeteer-core) for PNG/JPEG downloads. What you export now matches exactly what you see on screen.
+- **vLLM and SGLang start reliably** — fixed a startup failure when `ninja` wasn't installed system-wide; TurboLLM now uses the one bundled inside the engine's own virtual environment.
+- **`turbollm launch` is smarter** — auto-detects the daemon port and uses your currently loaded model by default, no flags needed.
+
 ## [1.5.3] - 2026-06-27
 
 **Bug-fix — HF blob URL normalization on import.**
