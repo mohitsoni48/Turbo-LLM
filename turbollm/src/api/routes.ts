@@ -1548,7 +1548,9 @@ export function registerApi(app: Hono, d: Deps): void {
       name: b.name.trim(),
       transport,
       enabled: b.enabled !== false,
-      ...(transport === 'stdio' ? { command: b.command!.trim(), args: b.args ?? [], env: b.env ?? {} } : { url: b.url!.trim() }),
+      ...(transport === 'stdio'
+        ? { command: b.command!.trim(), args: b.args ?? [], env: b.env ?? {} }
+        : { url: b.url!.trim(), ...(b.apiKey ? { apiKey: b.apiKey } : {}) }),
     }
     d.store.update((cfg) => { cfg.mcp.servers.push(server) })
     if (server.enabled) await d.tools?.syncMcpServers(d.store.snapshot().mcp.servers).catch(() => {})
@@ -1571,6 +1573,7 @@ export function registerApi(app: Hono, d: Deps): void {
       if (b.args !== undefined) s.args = b.args
       if (b.env !== undefined) s.env = b.env
       if (b.url !== undefined) s.url = b.url
+      if (b.apiKey !== undefined) s.apiKey = b.apiKey || undefined
     })
     await d.tools?.syncMcpServers(d.store.snapshot().mcp.servers).catch(() => {})
     return c.json(d.store.snapshot().mcp.servers.find((s) => s.id === id))
@@ -1928,7 +1931,8 @@ function settingsPayload(d: Deps) {
       kagiKeySet: !!cfg.tools.search?.kagiApiKey,
       searxngUrl: cfg.tools.search?.searxngUrl ?? '',
     },
-    mcp: cfg.mcp,
+    // apiKey is write-only: strip before echoing so Bearer tokens never reach the frontend.
+    mcp: { ...cfg.mcp, servers: cfg.mcp.servers.map(({ apiKey: _k, ...s }) => s) },
     // Build environment (ADR-100): folders prepended to PATH for compile-from-source so a
     // conda-env / custom-path CUDA Toolkit + compiler are found. Not secret — echoed back.
     build: { toolchainDirs: cfg.build.toolchainDirs },

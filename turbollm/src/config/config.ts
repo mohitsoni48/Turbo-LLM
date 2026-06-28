@@ -112,6 +112,8 @@ export interface McpServer {
   env?: Record<string, string>
   /** sse only — base URL of the MCP server */
   url?: string
+  /** sse only — Bearer token injected as Authorization header on every request (ADR-124) */
+  apiKey?: string
   enabled: boolean
 }
 

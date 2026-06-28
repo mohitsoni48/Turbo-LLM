@@ -176,16 +176,18 @@ export class SseMcpClient implements IMcpClient {
   readonly serverId: string
   readonly serverName: string
   private baseUrl: string
+  private headers: Record<string, string>
   private msgId = 0
   private sseEndpoint = ''
   private sseAbort: AbortController | null = null
   private emitter = new EventEmitter()
   private initialized = false
 
-  constructor(opts: { id: string; name: string; url: string }) {
+  constructor(opts: { id: string; name: string; url: string; headers?: Record<string, string> }) {
     this.serverId = opts.id
     this.serverName = opts.name
     this.baseUrl = opts.url.replace(/\/$/, '')
+    this.headers = opts.headers ?? {}
   }
 
   async connect(): Promise<void> {
@@ -195,7 +197,7 @@ export class SseMcpClient implements IMcpClient {
     this.sseAbort = new AbortController()
     const endpoint = await new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('SSE connect timeout')), 15_000)
-      fetch(`${this.baseUrl}/sse`, { signal: this.sseAbort!.signal })
+      fetch(`${this.baseUrl}/sse`, { signal: this.sseAbort!.signal, headers: this.headers })
         .then(async (resp) => {
           if (!resp.ok || !resp.body) { clearTimeout(timer); reject(new Error(`SSE connect failed: ${resp.status}`)); return }
           const reader = resp.body.getReader()
@@ -283,7 +285,7 @@ export class SseMcpClient implements IMcpClient {
     const url = this.sseEndpoint || `${this.baseUrl}/messages`
     await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...this.headers },
       body: JSON.stringify(msg),
       signal: AbortSignal.timeout(10_000),
     })
@@ -300,10 +302,12 @@ export function createMcpClient(server: {
   args?: string[]
   env?: Record<string, string>
   url?: string
+  apiKey?: string
 }): IMcpClient {
   if (server.transport === 'sse') {
     if (!server.url) throw new Error(`MCP server "${server.name}" has transport=sse but no url`)
-    return new SseMcpClient({ id: server.id, name: server.name, url: server.url })
+    const headers = server.apiKey ? { Authorization: `Bearer ${server.apiKey}` } : undefined
+    return new SseMcpClient({ id: server.id, name: server.name, url: server.url, headers })
   }
   if (!server.command) throw new Error(`MCP server "${server.name}" has transport=stdio but no command`)
   return new StdioMcpClient({
