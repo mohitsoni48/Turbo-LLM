@@ -11,6 +11,7 @@ import { koboldcppServerCommand } from './koboldcpp'
 import { llamafileServerCommand } from './llamafile'
 import { slotCacheDir } from './slot-cache'
 import { vllmServerCommand, vllmServeBlocker } from './vllm'
+import { sglangServerCommand, sgLangServeBlocker } from './sglang'
 
 export type State = 'stopped' | 'starting' | 'running' | 'stopping' | 'error'
 
@@ -212,6 +213,14 @@ export class Manager {
         return
       }
     }
+    if (opts.engine.kind === 'sglang') {
+      const blocker = await sgLangServeBlocker(opts.engine.binPath)
+      if (blocker) {
+        this.state = 'error'
+        this.errInfo = { code: 'engine_unsupported', message: blocker, exitCode: -1, logTail: [] }
+        return
+      }
+    }
 
     const port = await allocPort()
     const logPath = join(this.store.dir(), 'logs', `engine-${opts.engine.id}.log`)
@@ -242,7 +251,7 @@ export class Manager {
     }
 
     const { cmd, args } = engineCommand(opts, port, slotSavePath)
-    const child = spawn(cmd, args, { cwd: dirname(cmd), windowsHide: true, env: pyEngineEnv(opts.engine.kind, this.store.dir()) })
+    const child = spawn(cmd, args, { cwd: dirname(cmd), windowsHide: true, env: pyEngineEnv(opts.engine.kind, this.store.dir(), opts.engine.binPath) })
     // end:false — otherwise whichever of stdout/stderr closes first would end the
     // shared log stream and drop the other's output. We close it in onTerminated.
     child.stdout?.pipe(logStream, { end: false })
@@ -463,7 +472,7 @@ export class Manager {
       // otherwise flip us to "running" and then hang every request forever on a dead
       // generation thread. Detect a fatal load-failure traceback in the log and surface
       // it as an engine error instead. (Checked before probeReady so we win the race.)
-      if (kind === 'mlx' || kind === 'vllm') {
+      if (kind === 'mlx' || kind === 'vllm' || kind === 'sglang') {
         const loadErr = detectPyLoadFailure(readTail(this.logPathStr, 200))
         if (loadErr) {
           if (this.child === child && this.state === 'starting') {
@@ -522,6 +531,11 @@ function engineCommand(opts: StartOpts, port: number, slotSavePath?: string): { 
     // but the multi-GPU shard count (ADR-054) maps to --tensor-parallel-size.
     return vllmServerCommand(opts.engine.binPath, opts.modelPath, port, '127.0.0.1', opts.tensorParallelSize, opts.extraArgs)
   }
+  if (opts.engine.kind === 'sglang') {
+    // SGLang: run the OpenAI server via the provisioned venv python. modelPath is an
+    // HF repo id or a local safetensors dir; llama.cpp LoadProfile flags don't apply.
+    return sglangServerCommand(opts.engine.binPath, opts.modelPath, port, '127.0.0.1', opts.extraArgs)
+  }
   if (opts.engine.kind === 'koboldcpp') {
     // KoboldCpp: a single binary with its OWN flag names. opts.extraArgs carries the
     // KoboldCpp arg-map (koboldcppProfileToArgs) built by the router; no slot-save path
@@ -542,23 +556,29 @@ function engineCommand(opts: StartOpts, port: number, slotSavePath?: string): { 
  *  minutes for a large model — so it gets a longer window before we declare a
  *  readiness timeout. */
 function readinessTimeoutMs(kind: string): number {
-  return kind === 'vllm' ? 600_000 : 120_000
+  return kind === 'vllm' || kind === 'sglang' ? 600_000 : 120_000
 }
 
-/** Environment for Python-based engines (mlx, vllm). Returns undefined for native
- *  engines so they inherit the daemon env unchanged. For Python engines we:
+/** Environment for Python-based engines (mlx, vllm, sglang). Returns undefined for
+ *  native engines so they inherit the daemon env unchanged. For Python engines we:
+ *   - prepend the venv's bin dir to PATH so venv-installed tools (notably `ninja`,
+ *     used by FlashInfer's JIT kernel compiler) are found without a system install
+ *     (BUG-005),
  *   - force HuggingFace OFFLINE so a model load / request can never block on a network
  *     call (TurboLLM downloads models itself; it is offline-first), and
  *   - point the HF cache at a real, created dir inside the TurboLLM data dir so mlx-lm's
  *     `/v1/models` (which calls huggingface_hub `scan_cache_dir()`) doesn't crash with
  *     CacheNotFound when `~/.cache/huggingface/hub` is absent. */
-function pyEngineEnv(kind: string, dataDir: string): NodeJS.ProcessEnv | undefined {
-  if (kind !== 'mlx' && kind !== 'vllm') return undefined
+function pyEngineEnv(kind: string, dataDir: string, binPath: string): NodeJS.ProcessEnv | undefined {
+  if (kind !== 'mlx' && kind !== 'vllm' && kind !== 'sglang') return undefined
   const hfHome = join(dataDir, 'hf-cache')
   const hubCache = join(hfHome, 'hub')
   mkdirSync(hubCache, { recursive: true })
+  const venvBin = dirname(binPath)
+  const pathSep = process.platform === 'win32' ? ';' : ':'
   return {
     ...process.env,
+    PATH: `${venvBin}${pathSep}${process.env.PATH ?? ''}`,
     HF_HUB_OFFLINE: '1',
     TRANSFORMERS_OFFLINE: '1',
     HF_HOME: hfHome,

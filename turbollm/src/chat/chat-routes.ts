@@ -437,9 +437,13 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
 
   // Map conversation sampling overrides (camelCase) to the engine's snake_case names.
   const convS = conv.sampling ?? {}
+  const engineKind = d.registry.active()?.kind ?? ''
+  // BUG-006: vLLM and SGLang reject `repeat_penalty` (the llama.cpp name) and require
+  // `repetition_penalty` — the OpenAI-spec name. Map per engine kind.
+  const repeatPenaltyKey = (engineKind === 'vllm' || engineKind === 'sglang') ? 'repetition_penalty' : 'repeat_penalty'
   const SAMPLING_KEYS: Record<string, string> = {
     temp: 'temperature', topP: 'top_p', topK: 'top_k', minP: 'min_p',
-    repeatPenalty: 'repeat_penalty', presencePenalty: 'presence_penalty',
+    repeatPenalty: repeatPenaltyKey, presencePenalty: 'presence_penalty',
     frequencyPenalty: 'frequency_penalty',
   }
   const samplingOverride: Record<string, unknown> = {}
@@ -528,7 +532,7 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
       // server was launched with those flags (which we don't, and no built-in parser
       // matches Gemma's tool format). Sending tools there breaks ALL vLLM chat, so we
       // skip them. llama.cpp/forks accept them; mlx-lm ignores them harmlessly.
-      const toolsSupported = (d.registry.active()?.kind ?? '') !== 'vllm' && toolDefs.length > 0
+      const toolsSupported = engineKind !== 'vllm' && engineKind !== 'sglang' && toolDefs.length > 0
       if (toolsSupported) reqBody.tools = toolDefs
       // Force web_search on the first two iterations when the conversation has a
       // force_web_search policy (e.g. Research persona). This guarantees at least

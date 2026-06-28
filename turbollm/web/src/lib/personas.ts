@@ -79,7 +79,7 @@ const TURBOLLM_KNOWLEDGE =
   '- ` ```mermaid ` — flowcharts, sequence diagrams, ER/class/state diagrams, Gantt, mind maps, pie charts\n' +
   '- ` ```svg ` — static vector graphics: icons, logos, illustrations, hand-drawn charts\n' +
   '- ` ```html ` — interactive pages, UI mockups, canvas animations, games, calculators\n\n' +
-  'Artifacts are sandboxed (`sandbox="allow-scripts"`, CSP `default-src \'none\'`). The network is blocked inside — all CSS/JS/images must be inline. Controls: Fit-Width / Fit-Height toggles; download as PNG / JPEG / SVG (SVG/Mermaid) or PNG / JPEG / GIF / HTML (HTML).\n\n' +
+  'Artifacts are sandboxed (`sandbox="allow-scripts"`, CSP `default-src \'none\'`). The network is blocked inside — all CSS/JS/images must be inline. Controls: Fit-Width / Fit-Height toggles; download as PNG / JPEG / SVG (SVG/Mermaid) or PNG / JPEG / GIF / HTML (HTML). PNG/JPEG export uses headless Chrome (puppeteer-core) — the exported image is pixel-perfect and matches the on-screen render exactly.\n\n' +
 
   '## Auto-Tune\n\n' +
   'Auto-tune finds the best GPU-offload config for a model given available VRAM. It runs a binary search, not a fixed candidate list. Triggered from the Model Detail panel.\n\n' +
@@ -136,6 +136,9 @@ const TURBOLLM_KNOWLEDGE =
   'Loads MLX-format safetensors from HuggingFace or local dirs. KV/ctx controls hidden (dynamic sizing). If a model fails to load, TurboLLM detects the traceback instead of hanging and shows `model_load_failed`. Incomplete MLX shards show a re-download button.\n\n' +
   '**vLLM** (Linux / WSL2 only):\n' +
   'High-throughput engine for safetensors. Requires the vLLM venv (provisioned in-app). Hard dependency on `uvloop` (POSIX-only) — on Windows it fails immediately with a clear message directing the user to WSL2/Linux.\n\n' +
+
+  '**SGLang** (Linux / WSL2 only):\n' +
+  'Faster vLLM-class inference engine — OpenAI-compatible, HuggingFace safetensors (no GGUF), Python ≥3.10, CUDA 12/13. Launch: `python -m sglang.launch_server`. Load settings: `context-length` (≡ vLLM\'s `max-model-len`), `mem-fraction-static` (≡ `gpu-memory-utilization`), `tp` (tensor parallel), `served-model-name`, `api-key`, `disable-flashinfer` fallback. Greyed on Windows with "Linux/WSL2 only" message.\n\n' +
   '**KoboldCpp** (Windows / Linux / macOS — GGUF):\n' +
   'Popular for creative writing. GGUF over OpenAI-compatible API. Install from releases; full load→serve→gateway pipeline verified working.\n\n' +
   '**llamafile** (Windows / Linux / macOS — GGUF):\n' +
@@ -149,7 +152,7 @@ const TURBOLLM_KNOWLEDGE =
   '- **Anthropic-compatible**: `POST /v1/messages`\n' +
   '- **Auto model-swap**: request arrives with any model name → fuzzy-matched against available models → loads it automatically (mutex-serialized). Works with Claude Code, Continue, Open WebUI, any compatible client.\n' +
   '- **Keep-N pool**: 1–4 models simultaneously with LRU eviction (Settings → Gateway).\n' +
-  '- **`turbollm launch claude`**: launches Claude Code pointed at the gateway with proper slow-model timeouts (`ANTHROPIC_TIMEOUT=300000`, `ANTHROPIC_MAX_RETRIES=0`); `--model <name>` auto-loads that model.\n' +
+  '- **`turbollm launch claude`**: launches Claude Code pointed at the gateway with proper slow-model timeouts (`ANTHROPIC_TIMEOUT=300000`, `ANTHROPIC_MAX_RETRIES=0`). Auto-discovers the daemon port (pidfile → config → default 6996). Uses whatever model the gateway currently has loaded; `--model <name>` overrides to a specific model.\n' +
   '- **Embeddings**: bert-family / filename-pattern models (bge-, nomic-embed, -embed…) auto-detected; embedding models get a separate pool slot and are never LRU-evicted by chat requests.\n' +
   '- **Structured output**: pass `grammar` (GBNF) in the request body.\n\n' +
 

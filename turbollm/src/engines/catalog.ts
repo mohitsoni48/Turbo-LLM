@@ -183,6 +183,31 @@ const ALL: CatalogEngine[] = [
     ],
   },
   {
+    id: 'sglang',
+    name: 'SGLang',
+    kind: 'sglang',
+    description:
+      'High-throughput production server for safetensors / HF models with fast prefix caching. OpenAI-compatible. NVIDIA GPUs on Linux.',
+    provision: 'pip',
+    homepage: 'https://github.com/sgl-project/sglang',
+    repo: 'sgl-project/sglang',
+    platforms: ['linux', 'darwin', 'win32'],
+    support: 'experimental',
+    installEndpoint: '/api/v1/engines/sglang',
+    note: 'Officially supported on Linux + NVIDIA/CUDA 12+. macOS and Windows are unsupported upstream. Installs a multi-GB Python environment.',
+    variants: [
+      {
+        id: 'sglang-cuda',
+        label: 'CUDA (NVIDIA)',
+        repo: 'sgl-project/sglang',
+        requires: { platform: ['linux'], gpuVendor: ['nvidia'] },
+        stability: 'experimental',
+        speed: 'fastest',
+        hasPrebuilt: true,
+      },
+    ],
+  },
+  {
     id: 'ik_llama.cpp',
     name: 'ik_llama.cpp',
     kind: 'llama-server',

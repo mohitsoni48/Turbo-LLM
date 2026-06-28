@@ -143,6 +143,31 @@ export class Registry {
     return eng
   }
 
+  /** Register an SGLang engine (kind='sglang'). Like addVllm, the binPath is a
+   *  venv python (not a llama-server), so llama.cpp capabilities/flags don't apply. */
+  addSglang(name: string, binPath: string, version: string): Engine {
+    const eng: Engine = {
+      id: randomUUID(),
+      name: name.trim() || 'SGLang',
+      binPath,
+      kind: 'sglang',
+      version,
+      capabilities: { kvTypes: [], flags: [] },
+      addedAt: new Date().toISOString(),
+    }
+    this.store.update((c) => {
+      const existing = c.engines.find((e) => e.kind === 'sglang' && e.binPath === binPath)
+      if (existing) {
+        existing.version = version
+        eng.id = existing.id
+      } else {
+        c.engines.push(eng)
+      }
+      if (!c.activeEngineId) c.activeEngineId = eng.id
+    })
+    return eng
+  }
+
   /** Register a KoboldCpp engine (kind='koboldcpp'). binPath is the single KoboldCpp
    *  binary, not a llama-server, so llama.cpp capabilities/flags don't apply (it uses
    *  its own CLI flag names — see koboldcppProfileToArgs). */
