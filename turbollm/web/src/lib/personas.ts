@@ -45,8 +45,9 @@ const TURBOLLM_KNOWLEDGE =
   '- Runs persist in the SQLite database (DB v8/v9).\n\n' +
 
   '**Customize** (Puzzle icon in nav):\n' +
-  '- **Search provider**: Tavily (default), Kagi, or SearXNG (self-hosted) — paste API key here. Required for web_search, fetch_url, and the Research persona.\n' +
-  '- **MCP servers**: add/edit/delete MCP servers (stdio subprocess or SSE HTTP). Tools from all connected servers appear automatically as callable tools in chat.\n\n' +
+  '- **MCP marketplace**: a Cloud tab (hosted MCPs connected via Streamable HTTP with an API key — GitHub, Linear, Stripe, Atlassian, Neon, Supabase, Cloudflare, Zapier, Apify, Mixpanel), a Local tab (open-source stdio MCPs spawned via npx/uvx — filesystem, git, postgres, playwright, etc., plus the three built-in web-search providers), and a Connected tab listing active servers. One-click connect with brand logos; only services that actually connect via a static key are listed (OAuth-only services are deliberately excluded).\n' +
+  '- **Search provider** (built-in cards in the Local tab): Tavily (default), Kagi, or SearXNG (self-hosted) — paste API key/URL inline. Required for web_search, fetch_url, and the Research persona.\n' +
+  '- **Custom MCP servers**: add/edit/delete your own MCP servers (stdio subprocess or SSE/HTTP). Tools from all connected servers appear automatically as callable tools in chat, with no daemon restart.\n\n' +
 
   '**Settings**:\n' +
   '- Theme: light / dark / system\n' +
