@@ -66,6 +66,11 @@ function NavRail({
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if (!e.ctrlKey && !e.metaKey) return
+      // Only handle the digit keys 1–9. Non-digit keys (e.g. Ctrl+C, Ctrl+V)
+      // make parseInt return NaN; without this guard NaN slips past the range
+      // check below, calls preventDefault() (silently killing native copy/paste
+      // everywhere in the app) and then throws on NAV[NaN].
+      if (!/^[1-9]$/.test(e.key)) return
       const idx = parseInt(e.key, 10) - 1
       if (idx < 0 || idx >= NAV.length) return
       // Don't hijack number input in text fields / chat composer.
