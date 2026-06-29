@@ -1514,6 +1514,9 @@ export function registerApi(app: Hono, d: Deps): void {
     // Keep ToolRegistry in sync when tools config changes.
     if (b.tavilyApiKey !== undefined || b.search !== undefined) {
       d.tools?.updateConfig(d.store.snapshot().tools)
+      // Rebuild tool definitions so the engine picks up new/changed search providers
+      // without requiring a full daemon restart.
+      await d.tools?.buildToolDefinitions()
     }
     const after = d.store.snapshot().daemon
 
@@ -1548,11 +1551,25 @@ export function registerApi(app: Hono, d: Deps): void {
       name: b.name.trim(),
       transport,
       enabled: b.enabled !== false,
-      ...(transport === 'stdio' ? { command: b.command!.trim(), args: b.args ?? [], env: b.env ?? {} } : { url: b.url!.trim() }),
+      ...(transport === 'stdio'
+        ? { command: b.command!.trim(), args: b.args ?? [], env: b.env ?? {} }
+        : { url: b.url!.trim(), ...(b.apiKey ? { apiKey: b.apiKey } : {}) }),
+    }
+    // Auto-set MEMORY_FILE_PATH for @modelcontextprotocol/server-memory so users never need to
+    // configure it. The package name lands in args (command is "npx"), so check both.
+    const isMemoryServer = server.transport === 'stdio' &&
+      (server.command?.includes('server-memory') || server.args?.some((a) => a.includes('server-memory')))
+    if (isMemoryServer && !server.env?.MEMORY_FILE_PATH) {
+      server.env = { ...server.env, MEMORY_FILE_PATH: join(homedir(), '.turbollm', 'mcp-memory.jsonl') }
     }
     d.store.update((cfg) => { cfg.mcp.servers.push(server) })
-    if (server.enabled) await d.tools?.syncMcpServers(d.store.snapshot().mcp.servers).catch(() => {})
-    return c.json(server, 201)
+    if (server.enabled) {
+      await d.tools?.syncMcpServers(d.store.snapshot().mcp.servers).catch(() => {})
+      await d.tools?.buildToolDefinitions()
+    }
+    // apiKey is write-only: never echo the Bearer token back, even on the create response.
+    const { apiKey: _created, ...safeServer } = server
+    return c.json(safeServer, 201)
   })
 
   app.put('/api/v1/mcp/servers/:id', async (c) => {
@@ -1571,17 +1588,23 @@ export function registerApi(app: Hono, d: Deps): void {
       if (b.args !== undefined) s.args = b.args
       if (b.env !== undefined) s.env = b.env
       if (b.url !== undefined) s.url = b.url
+      if (b.apiKey !== undefined) s.apiKey = b.apiKey || undefined
     })
     await d.tools?.syncMcpServers(d.store.snapshot().mcp.servers).catch(() => {})
-    return c.json(d.store.snapshot().mcp.servers.find((s) => s.id === id))
+    await d.tools?.buildToolDefinitions()
+    // apiKey is write-only: strip the Bearer token from the update response too.
+    const updated = d.store.snapshot().mcp.servers.find((s) => s.id === id)!
+    const { apiKey: _updated, ...safeUpdated } = updated
+    return c.json(safeUpdated)
   })
 
-  app.delete('/api/v1/mcp/servers/:id', (c) => {
+  app.delete('/api/v1/mcp/servers/:id', async (c) => {
     const id = c.req.param('id')
     const cfg = d.store.snapshot()
     if (!cfg.mcp.servers.some((s) => s.id === id)) return err(c, 404, 'not_found', 'MCP server not found.')
     d.store.update((c2) => { c2.mcp.servers = c2.mcp.servers.filter((s) => s.id !== id) })
     void d.tools?.syncMcpServers(d.store.snapshot().mcp.servers)
+    await d.tools?.buildToolDefinitions()
     return c.json({ ok: true })
   })
 
@@ -1928,7 +1951,8 @@ function settingsPayload(d: Deps) {
       kagiKeySet: !!cfg.tools.search?.kagiApiKey,
       searxngUrl: cfg.tools.search?.searxngUrl ?? '',
     },
-    mcp: cfg.mcp,
+    // apiKey is write-only: strip before echoing so Bearer tokens never reach the frontend.
+    mcp: { ...cfg.mcp, servers: cfg.mcp.servers.map(({ apiKey: _k, ...s }) => s) },
     // Build environment (ADR-100): folders prepended to PATH for compile-from-source so a
     // conda-env / custom-path CUDA Toolkit + compiler are found. Not secret — echoed back.
     build: { toolchainDirs: cfg.build.toolchainDirs },

@@ -25,6 +25,34 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
+## [1.6.0] - 2026-06-29
+
+**MCP marketplace — one-click tools in Customize.**
+
+The Customize screen becomes a curated MCP marketplace. A **Cloud** tab lists hosted MCPs you connect with a single API key, a **Local** tab lists open-source stdio MCPs (spawned via `npx`/`uvx`) plus the three built-in web-search providers, and a **Connected** tab shows everything currently active. Every entry carries a brand logo and a one-click connect panel. The guiding rule: a service is only listed if it actually connects with a static key — OAuth-only services are deliberately excluded so nothing ever shows a fake "connected" state.
+
+### Added
+- **MCP marketplace** (ADR-124) in Customize — Cloud / Local / Connected tabs with brand logos (tree-shaken `simple-icons`) and one-click connect.
+- **10 verified hosted (Cloud) MCPs**, each confirmed to connect with a static Bearer/API key against its official endpoint: GitHub, Linear, Stripe, Atlassian, Neon, Supabase, Cloudflare, Zapier, Apify, and **Mixpanel** (ADR-125). Mixpanel uses a service-account `Bearer Basic <base64>` token; the card tells you exactly what to paste.
+- **19 open-source local MCPs** (filesystem, memory, git, postgres, sqlite, playwright, puppeteer, docker, kubernetes, and more) plus the three built-in web-search providers surfaced as in-marketplace cards.
+- Hosted-MCP auth: a per-server API key is injected as `Authorization: Bearer …`; the key is **write-only** and never echoed back by the API.
+
+### Changed
+- Web-search provider configuration moved inline into the MCP section's built-in cards — one place to wire up tools.
+- Connected MCP tools now refresh live after any add / edit / delete / toggle — no daemon restart needed.
+
+### Fixed
+- **Hosted MCPs now actually connect**: replaced the legacy SSE handshake with **Streamable HTTP** (MCP 2025-03-26) — the transport every modern hosted MCP (GitHub, Linear, Stripe, …) actually uses.
+- **Local MCPs now spawn on Windows**: `npx`/`uvx` (`.cmd` wrappers) are launched through a shell, and catalog command strings are split into command + args correctly.
+- **Memory MCP works with zero config**: `MEMORY_FILE_PATH` is auto-set to `~/.turbollm/mcp-memory.jsonl`, so the server no longer crashes trying to read a directory as a file.
+- Excluded services that cannot connect with a static key (Notion, Figma, Sentry, Vercel, HubSpot, Amplitude, Slack — OAuth-only; Google Stitch — custom header + OAuth2-only; Motion — no confirmed endpoint) so the catalog never offers a connection that silently fails.
+- Removed a Node `DEP0190` deprecation warning from MCP subprocess spawning.
+
+### Discord
+- **New: a one-click MCP marketplace.** Open **Customize** and connect tools like GitHub, Linear, Stripe, Notion-grade integrations, Mixpanel, and more — most take just an API key. There's also a Local tab for open-source tools (filesystem, git, Postgres, Playwright…) that run on your own machine.
+- **It just works now** — hosted tools connect on the modern MCP transport, local tools launch correctly on Windows, and the Memory tool needs no setup. Connected tools show up in chat instantly, no restart.
+- We only list tools that genuinely connect — if a service needs a browser login we don't yet support, it's left out rather than faking a connection.
+
 ## [1.5.4] - 2026-06-28
 
 **Python engines + pixel-perfect artifact export.**

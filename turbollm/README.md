@@ -194,8 +194,10 @@ the detail:
 - **Image input** for vision models, and **TurboLLM Expert** — a built-in assistant that knows
   the app and your hardware for onboarding and troubleshooting without leaving the UI.
 - **Agentic tools** — built-in `web_search` (Tavily), `fetch_url`, and sandboxed `run_code`, plus
-  **MCP server support** (stdio / SSE) so any MCP server's tools appear in every chat. A **Research**
-  persona forces multi-step web search and cites sources inline.
+  an **MCP marketplace** in Customize: one-click connect for hosted MCPs (GitHub, Linear, Stripe,
+  Atlassian, Neon, Supabase, Cloudflare, Zapier, Apify, Mixpanel) and open-source local MCPs
+  (filesystem, git, postgres, playwright, …), plus your own custom servers. Connected tools appear
+  in every chat with no restart. A **Research** persona forces multi-step web search and cites sources inline.
 
 </details>
 

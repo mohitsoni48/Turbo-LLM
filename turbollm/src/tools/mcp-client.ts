@@ -1,7 +1,6 @@
-// MCP host/client (v0.7.0). Implements stdio (subprocess JSON-RPC) and SSE (HTTP)
-// transports per the MCP 2024-11-05 specification.
+// MCP host/client. Implements stdio (subprocess JSON-RPC) and Streamable HTTP
+// (MCP 2025-03-26) transports. All modern hosted MCPs use Streamable HTTP.
 import { spawn, type ChildProcess } from 'node:child_process'
-import { EventEmitter } from 'node:events'
 
 // ── MCP protocol types ────────────────────────────────────────────────────
 
@@ -71,7 +70,16 @@ export class StdioMcpClient implements IMcpClient {
 
   async connect(): Promise<void> {
     if (this.proc) return
-    this.proc = spawn(this.command, this.args, {
+    // npx/uvx are .cmd shims on Windows; Node refuses to spawn .cmd directly (CVE-2024-27980)
+    // and won't resolve them via PATHEXT without a shell. Instead of shell:true with a
+    // concatenated string (DEP0190 + shell-injection surface from custom commands), run the
+    // invocation through `cmd.exe /c` with a DISCRETE args array (shell:false). Node escapes
+    // each arg, so whitespace and metacharacters in args are not re-interpreted by a shell.
+    // On POSIX the command is on PATH and runs directly.
+    const isWin = process.platform === 'win32'
+    const file = isWin ? 'cmd.exe' : this.command
+    const args = isWin ? ['/c', this.command, ...this.args] : this.args
+    this.proc = spawn(file, args, {
       env: { ...process.env, ...this.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     })
@@ -170,79 +178,44 @@ export class StdioMcpClient implements IMcpClient {
   }
 }
 
-// ── SSE client ────────────────────────────────────────────────────────────
+// ── Streamable HTTP client (MCP 2025-03-26) ───────────────────────────────────
+// Modern hosted MCPs (GitHub, Linear, Stripe, Atlassian, Neon, etc.) use this
+// transport: POST every JSON-RPC message directly to the base URL; server
+// replies with plain JSON or an SSE stream. Session ID is tracked via the
+// Mcp-Session-Id response header and echoed on all subsequent requests.
 
 export class SseMcpClient implements IMcpClient {
   readonly serverId: string
   readonly serverName: string
   private baseUrl: string
+  private headers: Record<string, string>
   private msgId = 0
-  private sseEndpoint = ''
-  private sseAbort: AbortController | null = null
-  private emitter = new EventEmitter()
+  private sessionId: string | null = null
   private initialized = false
 
-  constructor(opts: { id: string; name: string; url: string }) {
+  constructor(opts: { id: string; name: string; url: string; headers?: Record<string, string> }) {
     this.serverId = opts.id
     this.serverName = opts.name
     this.baseUrl = opts.url.replace(/\/$/, '')
+    this.headers = opts.headers ?? {}
   }
 
   async connect(): Promise<void> {
     if (this.initialized) return
-
-    // Connect to the SSE stream to discover the messages endpoint
-    this.sseAbort = new AbortController()
-    const endpoint = await new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('SSE connect timeout')), 15_000)
-      fetch(`${this.baseUrl}/sse`, { signal: this.sseAbort!.signal })
-        .then(async (resp) => {
-          if (!resp.ok || !resp.body) { clearTimeout(timer); reject(new Error(`SSE connect failed: ${resp.status}`)); return }
-          const reader = resp.body.getReader()
-          const decoder = new TextDecoder()
-          let buf = ''
-          let resolved = false
-          // eslint-disable-next-line no-constant-condition
-          while (true) {
-            const { done, value } = await reader.read()
-            if (done) break
-            buf += decoder.decode(value, { stream: true })
-            const lines = buf.split('\n')
-            buf = lines.pop() ?? ''
-            for (const line of lines) {
-              if (line.startsWith('data:')) {
-                const data = line.slice(5).trim()
-                if (!resolved) {
-                  // First event is the endpoint URL
-                  resolved = true
-                  clearTimeout(timer)
-                  resolve(data)
-                }
-                try {
-                  const msg = JSON.parse(data) as JsonRpcResponse
-                  if (msg.id != null) this.emitter.emit(`rpc:${msg.id}`, msg)
-                } catch { /* non-JSON events (endpoint URL) are fine */ }
-              }
-            }
-          }
-        })
-        .catch((e) => { clearTimeout(timer); if (!this.sseAbort?.signal.aborted) reject(e) })
-    })
-
-    this.sseEndpoint = endpoint.startsWith('http') ? endpoint : `${this.baseUrl}${endpoint}`
-
+    // protocolVersion is the MCP message-protocol version (distinct from the Streamable HTTP
+    // transport). 2024-11-05 is the broadest version every hosted server accepts; servers that
+    // prefer a newer one negotiate down, so this stays maximally compatible.
     await this.sendRequest('initialize', {
       protocolVersion: '2024-11-05',
       capabilities: { tools: {} },
       clientInfo: { name: 'turbollm', version: '0.7.0' },
     })
-    await this.post({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} })
+    void this.postNotification({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} })
     this.initialized = true
   }
 
   disconnect(): void {
-    this.sseAbort?.abort()
-    this.sseAbort = null
+    this.sessionId = null
     this.initialized = false
   }
 
@@ -265,28 +238,77 @@ export class SseMcpClient implements IMcpClient {
   private async sendRequest(method: string, params: unknown): Promise<unknown> {
     const id = ++this.msgId
     const req: JsonRpcRequest = { jsonrpc: '2.0', id, method, params }
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.emitter.removeAllListeners(`rpc:${id}`)
-        reject(new Error(`MCP SSE request timeout: ${method}`))
-      }, 30_000)
-      this.emitter.once(`rpc:${id}`, (msg: JsonRpcResponse) => {
-        clearTimeout(timer)
-        if (msg.error) reject(new Error(msg.error.message))
-        else resolve(msg.result)
-      })
-      this.post(req).catch((e) => { clearTimeout(timer); reject(e) })
+    const reqHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json, text/event-stream',
+      ...this.headers,
+    }
+    if (this.sessionId) reqHeaders['Mcp-Session-Id'] = this.sessionId
+
+    const resp = await fetch(this.baseUrl, {
+      method: 'POST',
+      headers: reqHeaders,
+      body: JSON.stringify(req),
+      signal: AbortSignal.timeout(30_000),
     })
+
+    if (!resp.ok) {
+      const txt = await resp.text().catch(() => '')
+      throw new Error(`MCP HTTP ${resp.status}: ${txt.slice(0, 200)}`)
+    }
+
+    const newSession = resp.headers.get('mcp-session-id')
+    if (newSession) this.sessionId = newSession
+
+    const ct = resp.headers.get('content-type') ?? ''
+    if (ct.includes('text/event-stream')) return this.readSSEResult(resp, id)
+
+    const json = await resp.json() as JsonRpcResponse
+    if (json.error) throw new Error(json.error.message)
+    return json.result
   }
 
-  private async post(msg: unknown): Promise<void> {
-    const url = this.sseEndpoint || `${this.baseUrl}/messages`
-    await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(msg),
+  private async readSSEResult(resp: Response, targetId: string | number): Promise<unknown> {
+    if (!resp.body) throw new Error('SSE response body is null')
+    const reader = resp.body.getReader()
+    const dec = new TextDecoder()
+    let buf = ''
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += dec.decode(value, { stream: true })
+        const lines = buf.split('\n')
+        buf = lines.pop() ?? ''
+        for (const line of lines) {
+          if (!line.startsWith('data:')) continue
+          let msg: JsonRpcResponse
+          try {
+            msg = JSON.parse(line.slice(5).trim()) as JsonRpcResponse
+          } catch {
+            continue // non-JSON SSE lines (comments, pings) — skip, don't swallow real errors
+          }
+          if (msg.id === targetId) {
+            if (msg.error) throw new Error(msg.error.message)
+            return msg.result
+          }
+        }
+      }
+    } finally {
+      // Cancel (not just release) so the underlying connection is torn down once we have
+      // our answer — releaseLock alone leaves the body streaming.
+      await reader.cancel().catch(() => {})
+    }
+    throw new Error(`SSE stream ended without response for id ${targetId}`)
+  }
+
+  private async postNotification(msg: JsonRpcNotification): Promise<void> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json', ...this.headers }
+    if (this.sessionId) headers['Mcp-Session-Id'] = this.sessionId
+    await fetch(this.baseUrl, {
+      method: 'POST', headers, body: JSON.stringify(msg),
       signal: AbortSignal.timeout(10_000),
-    })
+    }).catch(() => {})
   }
 }
 
@@ -300,10 +322,12 @@ export function createMcpClient(server: {
   args?: string[]
   env?: Record<string, string>
   url?: string
+  apiKey?: string
 }): IMcpClient {
   if (server.transport === 'sse') {
     if (!server.url) throw new Error(`MCP server "${server.name}" has transport=sse but no url`)
-    return new SseMcpClient({ id: server.id, name: server.name, url: server.url })
+    const headers = server.apiKey ? { Authorization: `Bearer ${server.apiKey}` } : undefined
+    return new SseMcpClient({ id: server.id, name: server.name, url: server.url, headers })
   }
   if (!server.command) throw new Error(`MCP server "${server.name}" has transport=stdio but no command`)
   return new StdioMcpClient({
