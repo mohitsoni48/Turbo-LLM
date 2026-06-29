@@ -1564,7 +1564,9 @@ export function registerApi(app: Hono, d: Deps): void {
       await d.tools?.syncMcpServers(d.store.snapshot().mcp.servers).catch(() => {})
       await d.tools?.buildToolDefinitions()
     }
-    return c.json(server, 201)
+    // apiKey is write-only: never echo the Bearer token back, even on the create response.
+    const { apiKey: _created, ...safeServer } = server
+    return c.json(safeServer, 201)
   })
 
   app.put('/api/v1/mcp/servers/:id', async (c) => {
@@ -1587,7 +1589,10 @@ export function registerApi(app: Hono, d: Deps): void {
     })
     await d.tools?.syncMcpServers(d.store.snapshot().mcp.servers).catch(() => {})
     await d.tools?.buildToolDefinitions()
-    return c.json(d.store.snapshot().mcp.servers.find((s) => s.id === id))
+    // apiKey is write-only: strip the Bearer token from the update response too.
+    const updated = d.store.snapshot().mcp.servers.find((s) => s.id === id)!
+    const { apiKey: _updated, ...safeUpdated } = updated
+    return c.json(safeUpdated)
   })
 
   app.delete('/api/v1/mcp/servers/:id', async (c) => {
