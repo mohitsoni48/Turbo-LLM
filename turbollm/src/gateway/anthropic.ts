@@ -378,9 +378,17 @@ export async function* streamToAnthropic(
       yield cbStop(blockIdx)
       blockIdx++
     }
+    // Anthropic usage fields are DISJOINT: the full prompt = input_tokens +
+    // cache_read_input_tokens + cache_creation_input_tokens, and clients (incl.
+    // Claude Code's context meter) sum them to size the context. llama.cpp's
+    // `prompt_tokens` is the WHOLE prompt (cached + uncached), so report only the
+    // non-cached remainder here — otherwise the cached prefix is counted twice and
+    // the meter balloons (e.g. an agentic 100k prompt that's ~95k cached would read
+    // as ~195k). Clamp at 0 in case cache_n ever exceeds prompt_tokens.
+    const nonCachedInput = Math.max(0, inputTokens - cacheReadTokens)
     yield sse('message_delta', {
       delta: { stop_reason: stopReason, stop_sequence: null },
-      usage: { input_tokens: inputTokens, output_tokens: outputTokens, cache_read_input_tokens: cacheReadTokens },
+      usage: { input_tokens: nonCachedInput, output_tokens: outputTokens, cache_read_input_tokens: cacheReadTokens },
     })
     yield sse('message_stop', {})
     // Best-effort session stats (B4): hand off the final usage. Never throws.
