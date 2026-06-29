@@ -5,7 +5,7 @@ import { Button } from '../components/ui/button'
 import { toast } from '../components/ui/sonner'
 import { useMcpMutations, useSettings } from '../lib/queries'
 import { ApiError } from '../lib/api'
-import type { McpServer, DaemonSettings, DaemonSettingsPatch, SearchProvider } from '../lib/api'
+import type { McpServer, DaemonSettings, DaemonSettingsPatch } from '../lib/api'
 import { CLOUD_MCPS, LOCAL_MCPS, CLOUD_CATS, LOCAL_CATS } from '../lib/mcp-catalog'
 import type { CloudEntry, LocalEntry } from '../lib/mcp-catalog'
 import { BRAND_ICONS } from '../lib/brand-icons'
@@ -20,100 +20,11 @@ export function CustomizeScreen() {
         title="Customize"
         description="Add tools and external providers the model can call during conversations."
       />
-      <div className="flex flex-col gap-6">
-        <ToolsSection
-          search={settings?.search ?? { provider: 'tavily', tavilyKeySet: false, kagiKeySet: false, searxngUrl: '' }}
-          onSaved={() => void settingsQ.refetch()}
-        />
-        <McpSection servers={settings?.mcp?.servers ?? []} />
-      </div>
+      <McpSection
+        servers={settings?.mcp?.servers ?? []}
+        search={settings?.search ?? { provider: 'tavily', tavilyKeySet: false, kagiKeySet: false, searxngUrl: '' }}
+      />
     </div>
-  )
-}
-
-// ── Tools — web search provider ───────────────────────────────────────────────
-
-type ProviderMeta = { id: SearchProvider; label: string; blurb: string; getKey?: string }
-const PROVIDERS: ProviderMeta[] = [
-  { id: 'tavily', label: 'Tavily', blurb: 'AI-search API tuned for LLMs. Reliable default.', getKey: 'https://app.tavily.com' },
-  { id: 'kagi', label: 'Kagi', blurb: 'Premium search, no bot-blocking, no tracking ($0.012/query).', getKey: 'https://kagi.com/settings?p=api' },
-  { id: 'searxng', label: 'SearXNG', blurb: 'Your own self-hosted meta-search. Fully local — no key, just a URL.' },
-]
-
-function ToolsSection({ search, onSaved }: { search: DaemonSettings['search']; onSaved: () => void }) {
-  const { save } = useSettings()
-  const [provider, setProvider] = useState<SearchProvider>(search.provider)
-  const [secret, setSecret] = useState('')
-
-  const meta = PROVIDERS.find((p) => p.id === provider)!
-  const isUrl = provider === 'searxng'
-  const configured = provider === 'tavily' ? search.tavilyKeySet : provider === 'kagi' ? search.kagiKeySet : !!search.searxngUrl
-
-  const pick = (p: SearchProvider) => { setProvider(p); setSecret(p === 'searxng' ? search.searxngUrl : '') }
-
-  const handleSave = () => {
-    const v = secret.trim()
-    const patch: DaemonSettingsPatch['search'] = { provider }
-    if (isUrl) patch.searxngUrl = v
-    else if (v && provider === 'tavily') patch.tavilyApiKey = v
-    else if (v && provider === 'kagi') patch.kagiApiKey = v
-    save.mutate({ search: patch }, {
-      onSuccess: () => { toast.success(`Search set to ${meta.label}${v ? ` — ${isUrl ? 'URL' : 'key'} saved` : ''}`); if (!isUrl) setSecret(''); onSaved() },
-      onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not save search settings.'),
-    })
-  }
-
-  return (
-    <section className="rounded-lg border border-border bg-panel p-4">
-      <h2 className="mb-1 text-[13px] font-semibold uppercase tracking-wide text-faint">Web Search</h2>
-      <p className="mb-3 text-[12px] text-muted">
-        Choose a search provider. When one is configured, the model can call the{' '}
-        <span className="font-mono text-ink">web_search</span> tool automatically.
-      </p>
-
-      <div className="mb-3 inline-flex rounded-md border border-border p-0.5">
-        {PROVIDERS.map((p) => (
-          <button key={p.id} onClick={() => pick(p.id)}
-            className={`rounded px-3 py-1 text-[13px] transition-colors ${provider === p.id ? 'bg-bg text-ink' : 'text-muted hover:text-ink'}`}>
-            {p.label}
-          </button>
-        ))}
-      </div>
-
-      <p className="mb-2 text-[12px] text-muted">
-        {meta.blurb}{' '}
-        {meta.getKey && (
-          <a href={meta.getKey} target="_blank" rel="noopener noreferrer" className="text-ink underline-offset-2 hover:underline">
-            Get a key
-          </a>
-        )}
-      </p>
-
-      <div className="mb-2 text-[13px] text-muted">
-        {configured ? (
-          <span className="inline-flex items-center gap-1.5 text-ink">
-            <Check size={13} style={{ color: 'var(--ok)' }} /> {isUrl ? 'A URL is configured' : 'A key is configured'}
-          </span>
-        ) : isUrl ? 'No URL configured' : 'No key configured'}
-      </div>
-
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-        <input
-          type={isUrl ? 'text' : 'password'}
-          value={secret}
-          onChange={(e) => setSecret(e.target.value)}
-          placeholder={isUrl ? 'http://localhost:8888' : configured ? 'Enter a new key to replace the current one' : provider === 'tavily' ? 'tvly-…' : 'Kagi API key'}
-          autoComplete="off"
-          className="flex-1 rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-[13px] text-ink outline-none"
-        />
-        <Button size="sm" onClick={handleSave} disabled={save.isPending}>Save</Button>
-      </div>
-
-      <p className="mt-3 text-[12px] text-faint">
-        <span className="font-mono text-ink">fetch_url</span> and{' '}
-        <span className="font-mono text-ink">run_code</span> (sandboxed JS) are always available — no key needed.
-      </p>
-    </section>
   )
 }
 
@@ -372,7 +283,7 @@ function McpLocalPanel({ entry, extraArg, onExtraArgChange, envs, onEnvChange, o
 
 // ── McpSection ────────────────────────────────────────────────────────────────
 
-function McpSection({ servers }: { servers: McpServer[] }) {
+function McpSection({ servers, search }: { servers: McpServer[]; search: DaemonSettings['search'] }) {
   const mut = useMcpMutations()
 
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -386,6 +297,11 @@ function McpSection({ servers }: { servers: McpServer[] }) {
   const [apiKey, setApiKey] = useState('')
   const [extraArg, setExtraArg] = useState('')
   const [localEnvs, setLocalEnvs] = useState<Record<string, string>>({})
+  const [searchProvider, setSearchProvider] = useState<NonNullable<DaemonSettings['search']>['provider']>(search.provider)
+  const [searchSecret, setSearchSecret] = useState(() => {
+    const s = search
+    return s.provider === 'tavily' ? '' : s.provider === 'kagi' ? '' : s.searxngUrl
+  })
 
   const connectedUrls = useMemo(() => new Set(servers.map((s) => s.url).filter(Boolean) as string[]), [servers])
   const connectedNames = useMemo(() => new Set(servers.map((s) => s.name)), [servers])
@@ -427,6 +343,22 @@ function McpSection({ servers }: { servers: McpServer[] }) {
     })
   }
 
+  const { save } = useSettings()
+  const saveSearch = (provider: NonNullable<DaemonSettings['search']>['provider'], secret: string) => {
+    const patch: DaemonSettingsPatch['search'] = { provider }
+    if (provider === 'searxng') patch.searxngUrl = secret
+    else if (secret.trim()) patch[provider === 'tavily' ? 'tavilyApiKey' : 'kagiApiKey'] = secret
+    save.mutate({ search: patch }, {
+      onSuccess: () => {
+        const displayName = provider === 'tavily' ? 'Tavily' : provider === 'kagi' ? 'Kagi' : 'SearXNG'
+        toast.success(`Search set to ${displayName}`)
+        setSearchSecret('')
+        selectCard(null)
+      },
+      onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not save search settings.'),
+    })
+  }
+
   const connectCloud = (entry: CloudEntry) => {
     mut.add.mutate({
       name: entry.name, transport: 'sse', url: entry.url, enabled: true,
@@ -438,14 +370,15 @@ function McpSection({ servers }: { servers: McpServer[] }) {
   }
 
   const connectLocal = (entry: LocalEntry) => {
-    const cmd = extraArg.trim() ? `${entry.cmd} ${extraArg.trim()}` : entry.cmd
+    const fullCmd = extraArg.trim() ? `${entry.cmd} ${extraArg.trim()}` : entry.cmd
+    const [command, ...args] = fullCmd.trim().split(/\s+/)
     const env: Record<string, string> = {}
     for (const [k, v] of Object.entries(localEnvs)) { if (v.trim()) env[k] = v.trim() }
     for (const e of entry.envs) {
       if (e.required && !env[e.key]) return void toast.error(`${e.key} is required.`)
     }
     mut.add.mutate({
-      name: entry.name, transport: 'stdio', command: cmd, enabled: true,
+      name: entry.name, transport: 'stdio', command, args: args.length ? args : undefined, enabled: true,
       ...(Object.keys(env).length ? { env } : {}),
     }, {
       onSuccess: () => { toast.success(`${entry.name} added`); selectCard(null) },
@@ -613,54 +546,104 @@ function McpSection({ servers }: { servers: McpServer[] }) {
                   onClose={() => selectCard(null)} onAdd={() => connectLocal(selectedLocal)} busy={busy} />
               )}
               {selectedLocal?.builtin && (
-                <div className="mt-3 flex items-start gap-2.5 rounded-lg border bg-panel-2 p-3"
-                  style={{ borderColor: 'color-mix(in srgb, var(--ok) 40%, transparent)' }}>
-                  <Check size={13} className="mt-0.5 shrink-0" style={{ color: 'var(--ok)' }} />
-                  <p className="text-[12px] text-muted">
-                    <span className="font-medium text-ink">{selectedLocal.name}</span> is built in to TurboLLM — no separate server needed.
-                    Configure it in <span className="font-medium text-ink">Web Search</span> settings above.
-                  </p>
-                  <button type="button" onClick={() => selectCard(null)} className="ml-auto rounded p-1 text-faint hover:text-ink">
-                    <X size={13} />
-                  </button>
+                <div className="mt-3 flex flex-col gap-3 rounded-lg border bg-panel-2 p-3"
+                  style={{ borderColor: 'color-mix(in srgb, var(--accent) 40%, transparent)' }}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <BrandCircle name={selectedLocal.name} color={nameColor(selectedLocal.name)} iconSlug={(selectedLocal as LocalEntry).iconSlug} />
+                      <span className="text-[13px] font-medium text-ink">Configure {selectedLocal.name}</span>
+                    </div>
+                    <button type="button" onClick={() => selectCard(null)} className="rounded p-1 text-faint transition-colors hover:text-ink">
+                      <X size={13} />
+                    </button>
+                  </div>
+
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[12px] text-muted">Provider</label>
+                    <div className="flex gap-4">
+                      {(['tavily', 'kagi', 'searxng'] as const).map((p) => (
+                        <label key={p} className="flex cursor-pointer items-center gap-1.5 text-[13px] text-ink">
+                          <input type="radio" name="search-provider" checked={searchProvider === p}
+                            onChange={() => setSearchProvider(p)} className="h-3.5 w-3.5 accent-[var(--accent)]" />
+                          <span className="font-mono">{p === 'tavily' ? 'Tavily' : p === 'kagi' ? 'Kagi' : 'SearXNG'}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  {searchProvider === 'searxng' ? (
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[12px] text-muted">SearXNG URL</label>
+                      <input type="text" value={searchSecret} onChange={(e) => setSearchSecret(e.target.value)}
+                        placeholder="http://localhost:8080"
+                        className="rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-[12px] text-ink outline-none" />
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[12px] text-muted">{searchProvider === 'tavily' ? 'Tavily' : 'Kagi'} API Key</label>
+                      <input type="password" value={searchSecret} onChange={(e) => setSearchSecret(e.target.value)}
+                        placeholder={searchProvider === 'tavily' ? 'tvly-…' : 'kg-…'} autoComplete="off"
+                        className="rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-[12px] text-ink outline-none" />
+                    </div>
+                  )}
+
+                  <Button size="sm" onClick={() => saveSearch(searchProvider, searchSecret)} disabled={!searchSecret.trim()}>
+                    Save search settings
+                  </Button>
                 </div>
               )}
             </>
           )}
 
           {tab === 'connected' && (
-            <div className="flex flex-col gap-1.5">
+            <div>
               {servers.length === 0 ? (
                 <p className="py-8 text-center text-[12px] text-muted">
                   No MCP servers connected yet. Add one from the Cloud or Local tab.
                 </p>
               ) : (
-                servers.map((s) => (
-                  <div key={s.id} className="flex items-center gap-2 rounded-lg border border-border bg-panel-2 px-3 py-2">
-                    <span className="shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-medium"
-                      style={{
-                        background: s.transport === 'sse' ? 'color-mix(in srgb, var(--accent) 15%, transparent)' : 'color-mix(in srgb, var(--muted) 20%, transparent)',
-                        color: s.transport === 'sse' ? 'var(--accent)' : 'var(--muted)',
-                      }}>
-                      {s.transport}
-                    </span>
-                    <span className="flex-1 truncate text-[13px] font-medium text-ink">{s.name}</span>
-                    <span className="hidden max-w-[220px] shrink-0 truncate font-mono text-[11px] text-faint sm:block"
-                      title={s.transport === 'stdio' ? s.command : s.url}>
-                      {s.transport === 'stdio' ? s.command?.split(/[\\/]/).slice(-1)[0] : s.url}
-                    </span>
-                    <input type="checkbox" checked={s.enabled} onChange={() => handleToggle(s)}
-                      title={s.enabled ? 'Disable' : 'Enable'} className="h-3.5 w-3.5 accent-[var(--accent)]" />
-                    <button type="button" onClick={() => openEdit(s)} title="Edit"
-                      className="rounded p-1 text-faint transition-colors hover:bg-bg hover:text-ink">
-                      <Pencil size={12} />
-                    </button>
-                    <button type="button" onClick={() => handleDelete(s.id, s.name)} title="Delete"
-                      className="rounded p-1 transition-colors hover:bg-bg" style={{ color: 'var(--err)' }}>
-                      <Trash2 size={12} />
-                    </button>
-                  </div>
-                ))
+                <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(185px, 1fr))' }}>
+                  {servers.map((s) => (
+                    <div key={s.id} className="relative flex flex-col gap-2 rounded-lg border bg-panel-2 p-3">
+                      <div className="flex items-start gap-2.5">
+                        <BrandCircle name={s.name} color={nameColor(s.name)} />
+                        <div className="min-w-0 flex-1 pr-14">
+                          <div className="truncate text-[13px] font-semibold text-ink">{s.name}</div>
+                          <div className="mt-0.5 flex flex-wrap items-center gap-1">
+                            <span className="rounded px-1.5 py-0.5 font-mono text-[10px] font-medium"
+                              style={{
+                                background: s.transport === 'sse' ? 'color-mix(in srgb, var(--accent) 15%, transparent)' : 'color-mix(in srgb, var(--muted) 20%, transparent)',
+                                color: s.transport === 'sse' ? 'var(--accent)' : 'var(--muted)',
+                              }}>
+                              {s.transport}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      <span className="hidden max-w-[220px] shrink-0 truncate font-mono text-[11px] text-faint sm:block"
+                        title={s.transport === 'stdio' ? s.command : s.url}>
+                        {s.transport === 'stdio' ? s.command?.split(/[\\/]/).slice(-1)[0] : s.url}
+                      </span>
+                      <div className="flex items-center gap-2 pt-1">
+                        <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-ink">
+                          <input type="checkbox" checked={s.enabled} onChange={() => handleToggle(s)}
+                            className="h-3.5 w-3.5 accent-[var(--accent)]" />
+                          <span className="text-[11px]">{s.enabled ? 'Enabled' : 'Disabled'}</span>
+                        </label>
+                        <div className="ml-auto flex gap-1">
+                          <button type="button" onClick={() => openEdit(s)} title="Edit"
+                            className="rounded p-1 text-faint transition-colors hover:bg-bg hover:text-ink">
+                            <Pencil size={12} />
+                          </button>
+                          <button type="button" onClick={() => handleDelete(s.id, s.name)} title="Delete"
+                            className="rounded p-1 transition-colors hover:bg-bg" style={{ color: 'var(--err)' }}>
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
           )}

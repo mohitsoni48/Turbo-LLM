@@ -214,6 +214,7 @@ const toolRegistry = new ToolRegistry(store.snapshot().tools)
 void (async () => {
   const cfg = store.snapshot()
   await toolRegistry.syncMcpServers(cfg.mcp.servers)
+  void toolRegistry.buildToolDefinitions()
 })()
 const startedAt = Date.now()
 // App self-update checker (F-006, ADR-031): is a newer TurboLLM published on npm than

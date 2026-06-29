@@ -163,7 +163,7 @@ export const LOCAL_MCPS: LocalEntry[] = [
     cat: 'AI',
     desc: 'Persistent knowledge graph across sessions.',
     cmd: 'npx -y @modelcontextprotocol/server-memory',
-    envs: [{ key: 'MEMORY_FILE_PATH', desc: 'Path to store the knowledge graph file', required: false }],
+    envs: [],
   },
   {
     id: 'brave',
