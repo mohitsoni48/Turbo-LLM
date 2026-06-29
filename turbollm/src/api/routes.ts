@@ -1555,8 +1555,11 @@ export function registerApi(app: Hono, d: Deps): void {
         ? { command: b.command!.trim(), args: b.args ?? [], env: b.env ?? {} }
         : { url: b.url!.trim(), ...(b.apiKey ? { apiKey: b.apiKey } : {}) }),
     }
-    // Auto-set MEMORY_FILE_PATH for @modelcontextprotocol/server-memory so users never need to configure it
-    if (server.transport === 'stdio' && server.command?.includes('server-memory') && !server.env?.MEMORY_FILE_PATH) {
+    // Auto-set MEMORY_FILE_PATH for @modelcontextprotocol/server-memory so users never need to
+    // configure it. The package name lands in args (command is "npx"), so check both.
+    const isMemoryServer = server.transport === 'stdio' &&
+      (server.command?.includes('server-memory') || server.args?.some((a) => a.includes('server-memory')))
+    if (isMemoryServer && !server.env?.MEMORY_FILE_PATH) {
       server.env = { ...server.env, MEMORY_FILE_PATH: join(homedir(), '.turbollm', 'mcp-memory.jsonl') }
     }
     d.store.update((cfg) => { cfg.mcp.servers.push(server) })

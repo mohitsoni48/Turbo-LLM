@@ -370,8 +370,16 @@ function McpSection({ servers, search }: { servers: McpServer[]; search: DaemonS
   }
 
   const connectLocal = (entry: LocalEntry) => {
-    const fullCmd = extraArg.trim() ? `${entry.cmd} ${extraArg.trim()}` : entry.cmd
-    const [command, ...args] = fullCmd.trim().split(/\s+/)
+    // entry.cmd is a curated catalog string (no spaces within tokens) — safe to split on space.
+    const [command, ...baseArgs] = entry.cmd.trim().split(/\s+/)
+    // extraArg is user input that may contain a path with spaces. Tokenize quote-aware so
+    // a quoted path ("C:\My Files") stays one arg, while unquoted multi-token input
+    // (e.g. --repository /path) still splits into separate args.
+    const extra = extraArg.trim()
+    const extraArgs = extra
+      ? (extra.match(/[^\s"]+|"[^"]*"/g) ?? []).map((t) => t.replace(/^"|"$/g, ''))
+      : []
+    const args = [...baseArgs, ...extraArgs]
     const env: Record<string, string> = {}
     for (const [k, v] of Object.entries(localEnvs)) { if (v.trim()) env[k] = v.trim() }
     for (const e of entry.envs) {

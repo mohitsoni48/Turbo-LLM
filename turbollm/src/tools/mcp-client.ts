@@ -70,15 +70,18 @@ export class StdioMcpClient implements IMcpClient {
 
   async connect(): Promise<void> {
     if (this.proc) return
-    // shell:true is required so npx/uvx (.cmd wrappers on Windows) resolve on PATH. With
-    // shell:true the whole invocation must be ONE string — passing a separate args array
-    // is deprecated (DEP0190) and unescaped. Quote any arg containing whitespace.
-    const quote = (a: string) => (/\s/.test(a) ? `"${a}"` : a)
-    const fullCmd = [this.command, ...this.args].map(quote).join(' ')
-    this.proc = spawn(fullCmd, {
+    // npx/uvx are .cmd shims on Windows; Node refuses to spawn .cmd directly (CVE-2024-27980)
+    // and won't resolve them via PATHEXT without a shell. Instead of shell:true with a
+    // concatenated string (DEP0190 + shell-injection surface from custom commands), run the
+    // invocation through `cmd.exe /c` with a DISCRETE args array (shell:false). Node escapes
+    // each arg, so whitespace and metacharacters in args are not re-interpreted by a shell.
+    // On POSIX the command is on PATH and runs directly.
+    const isWin = process.platform === 'win32'
+    const file = isWin ? 'cmd.exe' : this.command
+    const args = isWin ? ['/c', this.command, ...this.args] : this.args
+    this.proc = spawn(file, args, {
       env: { ...process.env, ...this.env },
       stdio: ['pipe', 'pipe', 'pipe'],
-      shell: true,
     })
 
     this.proc.stdout?.on('data', (chunk: Buffer) => {
@@ -199,6 +202,9 @@ export class SseMcpClient implements IMcpClient {
 
   async connect(): Promise<void> {
     if (this.initialized) return
+    // protocolVersion is the MCP message-protocol version (distinct from the Streamable HTTP
+    // transport). 2024-11-05 is the broadest version every hosted server accepts; servers that
+    // prefer a newer one negotiate down, so this stays maximally compatible.
     await this.sendRequest('initialize', {
       protocolVersion: '2024-11-05',
       capabilities: { tools: {} },
@@ -276,17 +282,22 @@ export class SseMcpClient implements IMcpClient {
         buf = lines.pop() ?? ''
         for (const line of lines) {
           if (!line.startsWith('data:')) continue
+          let msg: JsonRpcResponse
           try {
-            const msg = JSON.parse(line.slice(5).trim()) as JsonRpcResponse
-            if (msg.id === targetId) {
-              if (msg.error) throw new Error(msg.error.message)
-              return msg.result
-            }
-          } catch { /* non-JSON lines (comments, pings) */ }
+            msg = JSON.parse(line.slice(5).trim()) as JsonRpcResponse
+          } catch {
+            continue // non-JSON SSE lines (comments, pings) — skip, don't swallow real errors
+          }
+          if (msg.id === targetId) {
+            if (msg.error) throw new Error(msg.error.message)
+            return msg.result
+          }
         }
       }
     } finally {
-      reader.releaseLock()
+      // Cancel (not just release) so the underlying connection is torn down once we have
+      // our answer — releaseLock alone leaves the body streaming.
+      await reader.cancel().catch(() => {})
     }
     throw new Error(`SSE stream ended without response for id ${targetId}`)
   }
