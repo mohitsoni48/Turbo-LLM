@@ -70,10 +70,15 @@ export class StdioMcpClient implements IMcpClient {
 
   async connect(): Promise<void> {
     if (this.proc) return
-    this.proc = spawn(this.command, this.args, {
+    // shell:true is required so npx/uvx (.cmd wrappers on Windows) resolve on PATH. With
+    // shell:true the whole invocation must be ONE string — passing a separate args array
+    // is deprecated (DEP0190) and unescaped. Quote any arg containing whitespace.
+    const quote = (a: string) => (/\s/.test(a) ? `"${a}"` : a)
+    const fullCmd = [this.command, ...this.args].map(quote).join(' ')
+    this.proc = spawn(fullCmd, {
       env: { ...process.env, ...this.env },
       stdio: ['pipe', 'pipe', 'pipe'],
-      shell: true, // required: npx/uvx are .cmd wrappers on Windows; also handles space-separated cmd strings
+      shell: true,
     })
 
     this.proc.stdout?.on('data', (chunk: Buffer) => {

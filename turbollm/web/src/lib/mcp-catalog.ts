@@ -43,9 +43,11 @@ export type LocalEntry = {
 }
 
 // Only entries where a static API key / Bearer token is confirmed to work against the
-// official hosted MCP endpoint. Verified 2026-06-28 against official docs for each service.
+// official hosted MCP endpoint. Verified 2026-06-29 against official docs for each service.
 // OAuth-only (Notion, Figma, Sentry, Vercel, HubSpot, Amplitude, Slack) are excluded.
 // Motion excluded: no confirmed official hosted endpoint exists.
+// Stitch (Google) excluded: its MCP needs an X-Goog-Api-Key header (we only inject
+// Authorization: Bearer) and rejects API keys anyway — OAuth2-only in practice.
 export const CLOUD_MCPS: CloudEntry[] = [
   {
     id: 'github',
@@ -144,6 +146,17 @@ export const CLOUD_MCPS: CloudEntry[] = [
     color: '#00c45a',
     url: 'https://mcp.apify.com',
     keyNote: 'Get an API token at console.apify.com → Settings → API & Integrations.',
+  },
+  {
+    id: 'mixpanel',
+    name: 'Mixpanel',
+    cat: 'Analytics',
+    desc: 'Query events, funnels, retention, and user profiles.',
+    auth: 'key',
+    color: '#7856ff',
+    iconSlug: 'mixpanel',
+    url: 'https://mcp.mixpanel.com/mcp',
+    keyNote: 'Create a service account at mixpanel.com → Settings → Service Accounts, then run: echo -n "username:secret" | base64 — and paste "Basic <that-base64>" here (include the word Basic).',
   },
 ]
 
