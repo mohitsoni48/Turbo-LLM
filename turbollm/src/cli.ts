@@ -1,3 +1,4 @@
+import { hideChildConsoleWindows } from './util/hide-console-windows'
 import { spawn } from 'node:child_process'
 import { openSync, readFileSync } from 'node:fs'
 import { serve } from '@hono/node-server'
@@ -33,6 +34,12 @@ import { launchCli } from './cli-launch'
 import { writePidfile, removePidfile, stopDaemon, resolveDaemonPort } from './daemon-pid'
 import { createApp } from './server'
 import type { Deps } from './deps'
+
+// Stop child processes (the agent engine's shell tool, engine binaries, git,
+// etc.) from flashing a console window on Windows when the daemon has no console
+// of its own. Must run before anything spawns — patches the shared low-level
+// spawn path, so it covers the external pi SDK's named spawn import too.
+hideChildConsoleWindows()
 
 // Entrypoint for the TurboLLM daemon (npm bin "turbollm"): wiring + graceful
 // shutdown. ADR-023 (Node/TS stack).
