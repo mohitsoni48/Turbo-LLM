@@ -5,6 +5,7 @@ import { continueConversation, fetchSysInfo, sendMessage } from '../lib/chat-api
 import { useConversation, useConversationMutations } from '../lib/chat-queries'
 import { useModelActions, useModels, useStatus } from '../lib/queries'
 import type { ChatSseEvent, LiveToolCall, Message } from '../lib/chat-types'
+import { appendTextDelta, upsertToolCall, type LiveBlock } from '../lib/live-timeline'
 import { ApiError, downloadChatExport, getDebugSnapshot, getShareUrl, importChat } from '../lib/api'
 import { Button } from '../components/ui/button'
 import { toast } from '../components/ui/sonner'
@@ -31,6 +32,7 @@ interface LiveState {
   liveGenTps: number  // rolling 2s window estimate during generation phase
   genTokens: number   // running count of generated tokens (content + reasoning) for this reply
   toolCalls: LiveToolCall[]
+  timeline: LiveBlock[]
 }
 
 export function ChatScreen() {
@@ -316,7 +318,7 @@ export function ChatScreen() {
       for await (const evt of gen) {
         if (evt.event === 'meta') {
           deltaTimestamps.current = []
-          setLive({ assistantId: evt.data.assistantMessageId, content: '', reasoning: '', progress: null, liveGenTps: 0, genTokens: 0, toolCalls: [] })
+          setLive({ assistantId: evt.data.assistantMessageId, content: '', reasoning: '', progress: null, liveGenTps: 0, genTokens: 0, toolCalls: [], timeline: [] })
           // Optimistically reflect the new/last user msg in the UI by invalidating
           void qc.invalidateQueries({ queryKey: ['conversation', convId] })
         } else if (evt.event === 'progress') {
@@ -327,18 +329,13 @@ export function ChatScreen() {
           setLive((l) => l ? { ...l, reasoning: l.reasoning + evt.data.delta, progress: null, liveGenTps: liveTps, genTokens: l.genTokens + 1 } : l)
         } else if (evt.event === 'delta') {
           const liveTps = pushGenToken()
-          setLive((l) => l ? { ...l, content: l.content + evt.data.delta, progress: null, liveGenTps: liveTps, genTokens: l.genTokens + 1 } : l)
+          setLive((l) => l ? { ...l, content: l.content + evt.data.delta, timeline: appendTextDelta(l.timeline, evt.data.delta), progress: null, liveGenTps: liveTps, genTokens: l.genTokens + 1 } : l)
         } else if (evt.event === 'tool_call') {
           const tc = evt.data
           setLive((l) => {
             if (!l) return l
-            const existing = l.toolCalls.findIndex((x) => x.id === tc.id)
-            if (existing >= 0) {
-              const updated = [...l.toolCalls]
-              updated[existing] = { ...updated[existing], status: tc.status, result: tc.result }
-              return { ...l, toolCalls: updated }
-            }
-            return { ...l, toolCalls: [...l.toolCalls, { id: tc.id, name: tc.name, args: tc.args, status: tc.status, result: tc.result }] }
+            const call: LiveToolCall = { id: tc.id, name: tc.name, args: tc.args, status: tc.status, result: tc.result }
+            return { ...l, timeline: upsertToolCall(l.timeline, call) }
           })
         } else if (evt.event === 'done') {
           setLive(null)
@@ -658,7 +655,7 @@ export function ChatScreen() {
 
             {/* Streaming bubble */}
             {live && (
-              <StreamingBubble content={live.content} reasoning={live.reasoning} progress={live.progress} liveGenTps={live.liveGenTps} genTokens={live.genTokens} toolCalls={live.toolCalls} />
+              <StreamingBubble timeline={live.timeline} reasoning={live.reasoning} progress={live.progress} liveGenTps={live.liveGenTps} genTokens={live.genTokens} />
             )}
 
             <div ref={bottomRef} />
