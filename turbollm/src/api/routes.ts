@@ -1001,6 +1001,7 @@ export function registerApi(app: Hono, d: Deps): void {
     // the runner's teardown.
     d.bench.cancel()
     abortAllInFlightChats()
+    d.agents?.interruptActive()
     await d.bench.waitIdle()
     const cfg = d.store.snapshot()
     const sys = getSysInfo()
@@ -1094,6 +1095,7 @@ export function registerApi(app: Hono, d: Deps): void {
     // they all depend on the engine that's going away.
     d.bench.cancel()
     abortAllInFlightChats()
+    d.agents?.interruptActive()
     d.manager.stop()
     return c.json({ ok: true }, 202)
   })
@@ -1103,6 +1105,7 @@ export function registerApi(app: Hono, d: Deps): void {
     // then restart — so the reload doesn't race auto-tune's teardown.
     d.bench.cancel()
     abortAllInFlightChats()
+    d.agents?.interruptActive()
     void (async () => {
       await d.bench.waitIdle()
       await d.manager.restart()
