@@ -27,6 +27,8 @@ export interface Conversation {
   /** Per-conversation read scope (spec 13 redesign): absolute file/folder paths the bound
    *  agent may read. Read access is chat-bound (attached via the picker), not agent-bound. */
   readScope?: string[]
+  /** pi permission mode for this agent conversation: 'ask'|'auto'|'bypass'|'read'. */
+  agentMode?: string
   createdAt: string
   updatedAt: string
   messages?: Message[]
@@ -162,7 +164,7 @@ export interface Message {
   createdAt: string
 }
 
-interface ConvRow { id: string; title: string; system_prompt: string; model_key: string; sampling: string; expert_mode: number; tool_policy: string | null; kind: string | null; agent_id: string | null; completed_at: string | null; read_scope: string | null; created_at: string; updated_at: string }
+interface ConvRow { id: string; title: string; system_prompt: string; model_key: string; sampling: string; expert_mode: number; tool_policy: string | null; kind: string | null; agent_id: string | null; completed_at: string | null; read_scope: string | null; agent_mode: string | null; created_at: string; updated_at: string }
 interface AgentRunRow { id: string; conv_id: string; title: string; status: string; allowed_tools: string; agent_id: string | null; error: string | null; created_at: string; updated_at: string; started_at: string | null; ended_at: string | null; archived_at: string | null; completion: string | null }
 interface MsgRow  { id: string; conv_id: string; seq: number; role: 'user' | 'assistant'; content: string; reasoning: string; attachments: string; text_attachments: string | null; tool_calls: string | null; stats: string; model_key: string | null; research_meta: string | null; created_at: string }
 
@@ -172,7 +174,7 @@ type P = Record<string, SQLInputValue>
 function safeJson(s: string): unknown { try { return JSON.parse(s) } catch { return {} } }
 
 function rowToConv(r: ConvRow): Conversation {
-  return { id: r.id, title: r.title, systemPrompt: r.system_prompt, modelKey: r.model_key, sampling: safeJson(r.sampling) as Record<string, unknown>, expertMode: r.expert_mode === 1, toolPolicy: r.tool_policy ?? undefined, kind: (r.kind === 'agent' ? 'agent' : 'chat'), agentId: r.agent_id ?? undefined, completedAt: r.completed_at ?? undefined, readScope: r.read_scope ? (safeJson(r.read_scope) as string[]) : undefined, createdAt: r.created_at, updatedAt: r.updated_at }
+  return { id: r.id, title: r.title, systemPrompt: r.system_prompt, modelKey: r.model_key, sampling: safeJson(r.sampling) as Record<string, unknown>, expertMode: r.expert_mode === 1, toolPolicy: r.tool_policy ?? undefined, kind: (r.kind === 'agent' ? 'agent' : 'chat'), agentId: r.agent_id ?? undefined, completedAt: r.completed_at ?? undefined, readScope: r.read_scope ? (safeJson(r.read_scope) as string[]) : undefined, agentMode: r.agent_mode ?? undefined, createdAt: r.created_at, updatedAt: r.updated_at }
 }
 
 function rowToAgentRun(r: AgentRunRow): AgentRun {
@@ -404,6 +406,13 @@ export class ConversationStore {
       this.db.exec(`
         ALTER TABLE conversations ADD COLUMN read_scope TEXT;
         PRAGMA user_version = 17;
+      `)
+    }
+    // v18: per-conversation pi permission mode ('ask'|'auto'|'bypass'|'read'). Null = 'auto'.
+    if (v < 18) {
+      this.db.exec(`
+        ALTER TABLE conversations ADD COLUMN agent_mode TEXT;
+        PRAGMA user_version = 18;
       `)
     }
   }
@@ -652,6 +661,12 @@ export class ConversationStore {
     const now = new Date().toISOString()
     this.db.prepare(`UPDATE conversations SET read_scope = $scope, updated_at = $now WHERE id = $id`)
       .run({ $id: id, $scope: JSON.stringify(paths), $now: now } as P)
+  }
+
+  /** Set a conversation's pi permission mode ('ask'|'auto'|'bypass'|'read'). */
+  setConversationMode(id: string, mode: string): void {
+    this.db.prepare(`UPDATE conversations SET agent_mode = $mode WHERE id = $id`)
+      .run({ $id: id, $mode: mode } as P)
   }
 
   addAgentLesson(row: { agentId: string; lesson: string; evidence?: string; convId?: string }): void {
