@@ -15,7 +15,7 @@ import type { BenchRunner } from './bench/bench'
 import type { ModelRouter } from './gateway/model-router'
 import type { ToolRegistry } from './tools/tool-registry'
 import type { GenerationGate } from './agents/gate'
-import type { AgentRunner } from './agents/runner'
+import type { AgentRunManager } from './agents/run-manager'
 
 export interface Deps {
   store: ConfigStore
@@ -48,8 +48,9 @@ export interface Deps {
   /** Priority-queue mutex serialising engine calls (fg > bg). Optional — absent under
    *  tests; only wired in cli.ts where the agent runner co-exists with chat. */
   gate?: GenerationGate
-  /** Background agent runner. Optional — same wiring conditions as gate. */
-  agentRunner?: AgentRunner
+  /** Daemon-owned agent run manager (spec 13 Phase 2). Optional — same wiring
+   *  conditions as gate (only in the real serve() entrypoint, absent under tests). */
+  agents?: AgentRunManager
   version: string
   startedAt: number
   /** Re-exec the daemon so config changes (port, LAN bind) take effect (spec 08 §2).
