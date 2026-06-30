@@ -35,7 +35,8 @@ export function ConversationSidebar({
   const searchRef = useRef<HTMLInputElement>(null)
   const mut = useConversationMutations()
   const convsQ = useConversations(debouncedQ || undefined)
-  const convs = convsQ.data?.conversations ?? []
+  // Agent conversations live in Workspace → Agent; the Chat tab shows plain chats only.
+  const convs = (convsQ.data?.conversations ?? []).filter((c) => !c.agentId)
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(q), 200)
