@@ -12,6 +12,7 @@ import type { ClaimVerdict, ConversationStore, MessageStats, ResearchMeta, Resea
 import { checkReply } from '../tools/research-referee.js'
 import { buildSnapshot } from './chat-export'
 import type { ExportFormat } from './chat-export'
+import { buildAgentToolset } from '../agents/agent-tools'
 
 // Track in-flight abort controllers per conversation id.
 const inflight = new Map<string, AbortController>()
@@ -41,8 +42,10 @@ export function registerChatRoutes(app: Hono, d: Deps): void {
   })
 
   app.post('/api/v1/conversations', async (c) => {
-    const b = await body<{ title?: string; systemPrompt?: string; modelKey?: string; toolPolicy?: string }>(c)
-    const conv = db.createConversation({ title: b.title, systemPrompt: b.systemPrompt, modelKey: b.modelKey, toolPolicy: b.toolPolicy })
+    const b = await body<{ title?: string; systemPrompt?: string; modelKey?: string; toolPolicy?: string; agentId?: string }>(c)
+    // Bind to an agent (spec 13 redesign): validate it exists; ignore an unknown id.
+    const agentId = b.agentId && d.store.snapshot().agents.agents.some((a) => a.id === b.agentId) ? b.agentId : undefined
+    const conv = db.createConversation({ title: b.title, systemPrompt: b.systemPrompt, modelKey: b.modelKey, toolPolicy: b.toolPolicy, agentId })
     return c.json(conv, 201)
   })
 
@@ -463,6 +466,28 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
   const iterMessages: { role: string; content: unknown; tool_calls?: unknown; tool_call_id?: string }[] =
     ctx.engineMessages.map((m) => ({ role: m.role, content: m.content }))
 
+  // Agent-bound conversation (spec 13 redesign §1.2): inject the agent's CURRENT system
+  // prompt + a note on its readable folders + writable root. Done here (not at conv
+  // creation) so editing the agent updates live conversations. No-op for plain chats.
+  const boundAgent = conv.agentId ? d.store.snapshot().agents.agents.find((a) => a.id === conv.agentId) : undefined
+  if (boundAgent) {
+    const reads = boundAgent.readRoots.map((r) => (r === '<dataDir>' ? d.store.dir() : r))
+    const dataDir = d.store.dir()
+    const agentSys = [
+      boundAgent.systemPrompt || `You are ${boundAgent.name}.`,
+      reads.length ? `You can READ files in these folders: ${reads.join(', ')}.` : '',
+      `You can WRITE files only in: ${dataDir}.`,
+      `Use run_code for computation only (it has no file access); to save a result, return it and call write_file.`,
+    ].filter(Boolean).join('\n\n')
+    const sysIdx = iterMessages.findIndex((m) => m.role === 'system')
+    if (sysIdx >= 0) {
+      const existing = typeof iterMessages[sysIdx].content === 'string' ? iterMessages[sysIdx].content : ''
+      iterMessages[sysIdx] = { ...iterMessages[sysIdx], content: `${agentSys}\n\n${existing}`.trim() }
+    } else {
+      iterMessages.unshift({ role: 'system', content: agentSys })
+    }
+  }
+
   // F-021: inject confidence-loop instruction into Research persona system prompt.
   // Appends to the existing system message (or inserts one if absent).
   const CONFIDENCE_INSTRUCTION =
@@ -504,7 +529,12 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
   d.manager.generationStart()
   try {
     // Get tool definitions once (or empty for engines that don't support tools)
-    const toolDefs = d.tools ? await d.tools.buildToolDefinitions() : []
+    const baseToolDefs = d.tools ? await d.tools.buildToolDefinitions() : []
+    // Agent-bound conversation (spec 13 redesign): merge in the agent's guarded FS/code
+    // tools. When conv.agentId is null this is a no-op → plain chat is byte-identical.
+    const agent = conv.agentId ? d.store.snapshot().agents.agents.find((a) => a.id === conv.agentId) : undefined
+    const agentTools = agent ? buildAgentToolset(agent, d.store.dir()) : undefined
+    const toolDefs = agentTools ? [...baseToolDefs, ...agentTools.defs] : baseToolDefs
 
     outerLoop: while (toolIter <= MAX_TOOL_ITER) {
       toolIter++
@@ -694,9 +724,14 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
           try { parsedArgs = JSON.parse(tc.argsBuffer || '{}') as Record<string, unknown> }
           catch { parsedArgs = {} }
 
-          // When run_code confirmation is required, emit a gate event so the
-          // frontend can prompt the user — tool execution is skipped this round (F-019).
+          // Is this an agent-owned tool (FS/code, guarded)? Route it to the agent
+          // executor; everything else stays with the normal ToolRegistry.
+          const isAgentTool = agentTools?.names.has(tc.name) ?? false
+
+          // run_code confirmation gate applies to NORMAL chat only. An agent's run_code is
+          // the compute-only sandbox (no FS) and is pre-authorized, so it never prompts.
           const requireConfirm =
+            !isAgentTool &&
             tc.name === 'run_code' &&
             d.store.snapshot().tools.requireRunCodeConfirmation !== false
           if (requireConfirm) {
@@ -715,7 +750,9 @@ async function runGeneration(d: Deps, stream: StreamHandle, ctx: GenerationCtx):
           let result = ''
           let callError: string | undefined
           try {
-            result = await d.tools.executeTool({ id: tc.id, name: tc.name, args: parsedArgs })
+            result = isAgentTool && agentTools
+              ? agentTools.execute({ id: tc.id, name: tc.name, args: parsedArgs })
+              : await d.tools.executeTool({ id: tc.id, name: tc.name, args: parsedArgs })
           } catch (e) {
             callError = (e as Error).message
             result = `Error: ${callError}`

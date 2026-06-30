@@ -84,6 +84,8 @@ export interface Conversation {
   /** When set, the backend enforces a tool_choice policy on the first generation
    *  iteration. 'force_web_search' forces web_search before the model can reply. */
   toolPolicy?: string
+  /** When set, this chat is bound to an Agent (its persona/tools/folders). */
+  agentId?: string
   createdAt: string
   updatedAt: string
   messages?: Message[]
