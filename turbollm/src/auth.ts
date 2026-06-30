@@ -64,6 +64,18 @@ export function isLocalRequest(c: Context, d: Deps): boolean {
   return isLoopback(c) === true
 }
 
+/** Like {@link isLocalRequest}, but ALSO permits a remote client when the daemon requires
+ *  an API key — `lanAuth` has already verified that key before the handler runs, so the
+ *  caller is authenticated. Use for agent actions (which execute on the host) so a user can
+ *  drive their own box from another device, while an OPEN (keyless) LAN still can't trigger
+ *  remote code execution. Fails closed when the address is undetermined. */
+export function isLocalOrAuthenticated(c: Context, d: Deps): boolean {
+  const daemon = d.store.snapshot().daemon
+  if (!daemon.lanBind) return true        // loopback-only bind → always local
+  if (isLoopback(c) === true) return true // local client
+  return daemon.requireApiKey === true    // remote allowed only behind required (verified) API key
+}
+
 /** LAN auth middleware (spec 06 §5). Register AFTER cors + the Server header and
  *  BEFORE the API/chat/gateway routes. Enforcement only kicks in when the daemon
  *  is LAN-exposed (lanBind=true); with the default loopback-only bind it is a pure
