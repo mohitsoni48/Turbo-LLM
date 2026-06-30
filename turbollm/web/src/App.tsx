@@ -55,7 +55,20 @@ export function App() {
   // A 401 isn't a lost connection — the daemon is up but (LAN-exposed) wants an API
   // key. Show the key prompt instead of the misleading "lost connection" overlay.
   const needsAuth = statusQ.isError && statusQ.error instanceof ApiError && statusQ.error.status === 401
-  const unreachable = !needsAuth && failCount >= 3
+
+  // Latch the auth prompt once we've seen a 401, and keep it up until a poll finally
+  // SUCCEEDS. Without this, a flaky LAN link (common on the remote machine where you're
+  // pasting the key) flips an occasional poll from 401 → generic network error, which
+  // would tear the dialog down, swap in the "lost connection" overlay, and wipe the
+  // half-typed key. Sticky mount = the input keeps its value + focus while you type.
+  const [authLatched, setAuthLatched] = useState(false)
+  useEffect(() => {
+    if (needsAuth) setAuthLatched(true)
+    else if (statusQ.isSuccess) setAuthLatched(false)
+  }, [needsAuth, statusQ.isSuccess])
+
+  // While the key prompt is up, the "lost connection" overlay must yield to it.
+  const unreachable = !authLatched && !needsAuth && failCount >= 3
   const version = statusQ.data?.version ? `v${statusQ.data.version}` : 'v0.0.0-dev'
 
   return (
@@ -85,7 +98,7 @@ export function App() {
           </Routes>
         </Suspense>
       </Shell>
-      {needsAuth && (
+      {authLatched && (
         <AuthGate
           onConnect={(key) => {
             setAuthToken(key)
