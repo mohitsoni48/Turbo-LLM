@@ -140,8 +140,25 @@ export type Status = {
   engineBuild?: EngineBuild
   /** ComfyUI GPU coordination state (null when the feature is off / not wired). */
   comfyui?: ComfyRuntime | null
+  /** Background agent tasks (reviewer + skill distill) — running + recently finished. */
+  agentTasks?: AgentTask[]
   telemetryLevel: string
   uptimeSec: number
+}
+
+/** One background agent task surfaced via GET /status `agentTasks`. */
+export type AgentTask = {
+  id: string
+  kind: 'review' | 'skill_from_conversation' | 'skill_from_folder'
+  convId?: string
+  agentId: string
+  label: string
+  status: 'running' | 'done' | 'failed'
+  steps: string[]
+  result?: string
+  error?: string
+  startedAt: number
+  endedAt?: number
 }
 
 /** App self-update check (F-006, GET /api/v1/app/update). Is a newer TurboLLM published

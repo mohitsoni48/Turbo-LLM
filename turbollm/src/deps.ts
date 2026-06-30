@@ -16,6 +16,7 @@ import type { ModelRouter } from './gateway/model-router'
 import type { ToolRegistry } from './tools/tool-registry'
 import type { GenerationGate } from './agents/gate'
 import type { AgentRunManager } from './agents/run-manager'
+import type { AgentTaskState } from './agents/task-state'
 
 export interface Deps {
   store: ConfigStore
@@ -51,6 +52,9 @@ export interface Deps {
   /** Daemon-owned agent run manager (spec 13 Phase 2). Optional — same wiring
    *  conditions as gate (only in the real serve() entrypoint, absent under tests). */
   agents?: AgentRunManager
+  /** Background agent-task registry (reviewer + skill distill). Surfaced via /status
+   *  so the UI can show running bg tasks inline. Optional — absent under tests. */
+  agentTasks?: AgentTaskState
   version: string
   startedAt: number
   /** Re-exec the daemon so config changes (port, LAN bind) take effect (spec 08 §2).
