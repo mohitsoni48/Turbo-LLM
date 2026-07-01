@@ -3,13 +3,13 @@
 // blob URL; on submit it enqueues a raw-URL download via useDownloadMutations and
 // closes — the item then appears in the DownloadsPanel.
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link2 } from 'lucide-react'
 import { ApiError } from '../../lib/api'
 import { useDownloadMutations } from '../../lib/queries'
 import { Button } from '../../components/ui/button'
 import { Input } from '../../components/ui/input'
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../../components/ui/dialog'
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '../../components/ui/sheet'
 
 /** True when the URL is a plausible GGUF download target (spec 10 §8 step 2):
  *  path ends in `.gguf` OR matches an HF resolve blob URL. */
@@ -95,15 +95,27 @@ export function ImportUrlDialog({ open, onClose }: { open: boolean; onClose: () 
     )
   }
 
+  // Side panel, not a modal (spec 00 §9): pad the app shell so content resizes
+  // instead of being covered, same convention as ModelDetailDialog.
+  useEffect(() => {
+    if (!open) return
+    document.documentElement.classList.add('tllm-config-open')
+    return () => document.documentElement.classList.remove('tllm-config-open')
+  }, [open])
+
   return (
-    <Dialog open={open} onOpenChange={(o) => !o && close()}>
-      <DialogContent className="sm:max-w-[480px]">
-        <DialogHeader>
-          <DialogTitle>Import from URL</DialogTitle>
-          <DialogDescription>
+    <Sheet open={open} onOpenChange={(o) => !o && close()} modal={false}>
+      <SheetContent
+        className="overflow-y-auto p-5"
+        onPointerDownOutside={(e) => e.preventDefault()}
+        onInteractOutside={(e) => e.preventDefault()}
+      >
+        <SheetHeader>
+          <SheetTitle>Import from URL</SheetTitle>
+          <SheetDescription>
             Paste a direct link to a <span className="font-mono">.gguf</span> file — any HTTPS host, not just Hugging Face.
-          </DialogDescription>
-        </DialogHeader>
+          </SheetDescription>
+        </SheetHeader>
 
         <div className="flex flex-col gap-3">
           <Input
@@ -141,14 +153,14 @@ export function ImportUrlDialog({ open, onClose }: { open: boolean; onClose: () 
           )}
         </div>
 
-        <DialogFooter>
+        <div className="mt-4 flex justify-end gap-2">
           <Button variant="outline" onClick={close}>Cancel</Button>
           <Button onClick={submit} disabled={!valid || mut.enqueue.isPending}>
             <Link2 size={14} />
             {mut.enqueue.isPending ? 'Adding…' : 'Import'}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </div>
+      </SheetContent>
+    </Sheet>
   )
 }

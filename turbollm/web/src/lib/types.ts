@@ -318,17 +318,19 @@ export type EngineCatalog = {
 /** One build-toolchain prerequisite from GET /api/v1/build/prereqs. Mirrors
  *  src/engines/build-prereqs.ts BuildPrereqTool. */
 export type BuildPrereqTool = {
-  id: 'git' | 'cmake' | 'cuda' | 'msvc'
+  id: 'git' | 'cmake' | 'cuda' | 'msvc' | 'gcc'
   name: string
   found: boolean
   version?: string
   installUrl: string
 }
 
-/** GET /api/v1/build/prereqs payload. `supported` is false off Windows (guided build is
- *  Windows + CUDA only for now); `tools` is empty there. */
+/** GET /api/v1/build/prereqs payload. `supported` is false on macOS (guided build is
+ *  Windows/Linux + CUDA only for now); `tools` is empty there. `os` tells the UI which
+ *  toolchain shape `tools` reflects (and which manual command block to show). */
 export type BuildPrereqs = {
   supported: boolean
+  os: 'windows' | 'linux' | 'other'
   tools: BuildPrereqTool[]
 }
 
@@ -600,6 +602,11 @@ export type HfSearchItem = {
 export type HfSearchResult = {
   results: HfSearchItem[]
 }
+
+/** Mirrors src/hf/hf.ts HfSortOption. 'best-match' is HF's own relevance ranking for a
+ *  text query (meaningless when browsing with no query — the daemon falls back to
+ *  'trending' there). */
+export type HfSortOption = 'best-match' | 'trending' | 'downloads' | 'likes' | 'modified' | 'created'
 
 /** One logical file in a repo (spec 10 §3): GGUF split parts are grouped into one
  *  entry with summed size and `parts` > 1; safetensors component files each get

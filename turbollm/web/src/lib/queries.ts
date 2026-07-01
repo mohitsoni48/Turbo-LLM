@@ -100,6 +100,7 @@ import type {
   UpdatePolicy,
   HfRepoDetail,
   HfSearchResult,
+  HfSortOption,
   LoadProfile,
   ModelDetail,
   ModelDirs,
@@ -228,7 +229,7 @@ export function useEngineRecommendation(provisioning: boolean): UseQueryResult<E
   })
 }
 
-/** Guided compile-from-source prereqs (ADR-089). Detects the Windows + CUDA build
+/** Guided compile-from-source prereqs (ADR-089). Detects the Windows/Linux + CUDA build
  *  toolchain. Disabled until the build guide opens so it doesn't probe on mount; the
  *  result is stable for the session, so cache it. */
 export function useBuildPrereqs(enabled = true): UseQueryResult<BuildPrereqs> {
@@ -578,14 +579,14 @@ export function useConnect(cli: string) {
   })
 }
 
-// ── Hugging Face discovery (spec 10 §2–4) ────────────────────────────────────
-/** Search GGUF repos. Disabled until a non-empty query is set (the Discover tab
- *  debounces the input before passing it here). */
-export function useHfSearch(q: string): UseQueryResult<HfSearchResult> {
+// ── Hugging Face discovery (spec 10 §2–4, §7 rewrite) ────────────────────────
+/** Search (q set) or browse (q blank — replaces the old hardcoded "Featured" list)
+ *  HF repos, sorted by `sort`. Always enabled: DiscoverTab shows this list whether or
+ *  not the user has typed a query, so there's no empty-query gate to disable it. */
+export function useHfSearch(q: string, sort: HfSortOption = 'best-match'): UseQueryResult<HfSearchResult> {
   return useQuery({
-    queryKey: ['hf-search', q],
-    queryFn: () => hfSearch(q),
-    enabled: q.trim().length > 0,
+    queryKey: ['hf-search', q, sort],
+    queryFn: () => hfSearch(q, sort),
     retry: false,
     placeholderData: (prev) => prev,
   })

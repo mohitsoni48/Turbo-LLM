@@ -33,25 +33,25 @@ test('buildEnv: does not create a duplicate PATH/Path key', () => {
 })
 
 test('buildCommands: includes --branch when a branch is given', () => {
-  const cmds = buildCommands('https://github.com/owner/repo', 'main')
+  const cmds = buildCommands('https://github.com/owner/repo', 'main', 'windows')
   assert.equal(cmds[0], 'git clone --branch "main" --depth 1 "https://github.com/owner/repo" turbo-build')
 })
 
 test('buildCommands: omits --branch when no branch (or empty/whitespace) is given', () => {
   const expected = 'git clone --depth 1 "https://github.com/owner/repo" turbo-build'
-  assert.equal(buildCommands('https://github.com/owner/repo')[0], expected)
-  assert.equal(buildCommands('https://github.com/owner/repo', '')[0], expected)
-  assert.equal(buildCommands('https://github.com/owner/repo', '   ')[0], expected)
+  assert.equal(buildCommands('https://github.com/owner/repo', undefined, 'windows')[0], expected)
+  assert.equal(buildCommands('https://github.com/owner/repo', '', 'windows')[0], expected)
+  assert.equal(buildCommands('https://github.com/owner/repo', '   ', 'windows')[0], expected)
 })
 
 test('buildCommands: passes the repo URL through verbatim', () => {
   const url = 'https://github.com/ikawrakow/ik_llama.cpp.git'
-  const cmds = buildCommands(url, 'sidestream')
+  const cmds = buildCommands(url, 'sidestream', 'windows')
   assert.ok(cmds[0].includes(url))
 })
 
 test('buildCommands: produces the Windows + CUDA cmake steps and the binary-location note', () => {
-  const cmds = buildCommands('https://github.com/owner/repo')
+  const cmds = buildCommands('https://github.com/owner/repo', undefined, 'windows')
   assert.deepEqual(cmds.slice(1, 4), [
     'cd turbo-build',
     'cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release',
@@ -59,4 +59,15 @@ test('buildCommands: produces the Windows + CUDA cmake steps and the binary-loca
   ])
   assert.match(cmds[cmds.length - 1], /llama-server\.exe/)
   assert.match(cmds[cmds.length - 1], /Add your own engine/)
+})
+
+test('buildCommands: produces the Linux + CUDA cmake steps (no config flag, no .exe) and the binary-location note', () => {
+  const cmds = buildCommands('https://github.com/owner/repo', undefined, 'linux')
+  assert.deepEqual(cmds.slice(1, 4), [
+    'cd turbo-build',
+    'cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release',
+    'cmake --build build -j --target llama-server',
+  ])
+  assert.match(cmds[cmds.length - 1], /build\/bin\/llama-server/)
+  assert.ok(!cmds[cmds.length - 1].includes('.exe'))
 })

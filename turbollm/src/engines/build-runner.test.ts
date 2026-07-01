@@ -25,9 +25,14 @@ test('CMAKE_CONFIGURE_ARGS: enables CUDA + Release', () => {
   assert.deepEqual(CMAKE_CONFIGURE_ARGS, ['-DGGML_CUDA=ON', '-DCMAKE_BUILD_TYPE=Release'])
 })
 
-test('pickGenerator: Ninja when available, NMake fallback otherwise', () => {
-  assert.equal(pickGenerator(true), 'Ninja')
-  assert.equal(pickGenerator(false), 'NMake Makefiles')
+test('pickGenerator: Ninja when available regardless of platform', () => {
+  assert.equal(pickGenerator(true, true), 'Ninja')
+  assert.equal(pickGenerator(true, false), 'Ninja')
+})
+
+test('pickGenerator: falls back to NMake on Windows, Unix Makefiles on Linux', () => {
+  assert.equal(pickGenerator(false, true), 'NMake Makefiles')
+  assert.equal(pickGenerator(false, false), 'Unix Makefiles')
 })
 
 test('vcvarsBatch: calls vcvars x64, then cmake, quotes spaced args, propagates exit code', () => {

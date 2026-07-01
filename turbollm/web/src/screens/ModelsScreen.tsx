@@ -130,7 +130,13 @@ export function ModelsScreen() {
   }
 
   return (
-    <div className="slim-scroll h-full w-full overflow-y-auto px-6 py-6">
+    <div
+      className={
+        tab === 'discover'
+          ? 'flex h-full w-full flex-col overflow-hidden px-6 py-6'
+          : 'h-full w-full overflow-y-auto px-6 py-6'
+      }
+    >
       <ScreenHeader
         title="Models"
         description={
@@ -183,7 +189,9 @@ export function ModelsScreen() {
       )}
 
       {tab === 'discover' ? (
-        <DiscoverTab presetQuery={presetSearch} />
+        <div className="min-h-0 flex-1">
+          <DiscoverTab presetQuery={presetSearch} />
+        </div>
       ) : (
         <LibraryTab
           modelsQ={modelsQ}
