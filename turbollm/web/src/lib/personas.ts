@@ -25,7 +25,7 @@ const TURBOLLM_KNOWLEDGE =
 
   '**Models** — discover and manage local models.\n' +
   '- **All models** view: scans configured local directories for GGUF, MLX safetensors, vLLM safetensors; badges incompatible models for the active engine.\n' +
-  '- **Discover** tab: searches Hugging Face Hub filtered by active engine kind (GGUF for llama.cpp/TurboQuant, MLX tag for MLX, unrestricted for vLLM); download directly from HF.\n' +
+  '- **Discover** tab: a live, sortable split-pane (list on the left, detail pane on the right, no dialog) browsing Hugging Face directly — filtered by active engine kind (GGUF for llama.cpp/TurboQuant, MLX tag for MLX, unrestricted for vLLM), sortable by trending / downloads / likes / recently updated / newest; the detail pane renders the actual model card (headings, images, links) and shows a per-quant VRAM-fit dot. Both panes are resizable.\n' +
   '- Click a model → **Model Detail** side panel: load profile config, VRAM estimate bar, auto-tune button, per-model saved profile.\n' +
   '- **Load** button starts the model; progress indicator shows load time.\n\n' +
 
@@ -34,7 +34,7 @@ const TURBOLLM_KNOWLEDGE =
   '- **Install & manage** catalog: all engines with hardware fit verdict (Recommended / Installed / Incompatible + reason). Incompatible engines are greyed out.\n' +
   '- **Advanced** (collapsible): per-backend llama.cpp variants — CUDA, ROCm, CPU, Vulkan, SYCL. Install, update, or switch here.\n' +
   '- **Add your own engine**: guided folder scan that probes a binary and registers it as a custom engine.\n' +
-  '- **In-app build**: clone → cmake → compile (CUDA); auto-downloads CUDA toolkit if absent (~490 MB from NVIDIA redist); live phase log + success screen.\n' +
+  '- **In-app build**: clone → cmake → compile (CUDA), on Windows or Linux (incl. WSL2); auto-downloads CUDA toolkit if absent on Windows (~490 MB from NVIDIA redist — on Linux, install CUDA via your distro/NVIDIA installer first); live phase log + success screen.\n' +
   '- **Engine updates**: honest check vs GitHub releases/latest; rollback-safe (probe new build before swap, old build kept until success).\n' +
   '- Per-engine auto-update policy: Off / Notify / Auto (default Notify).\n\n' +
 
@@ -45,8 +45,8 @@ const TURBOLLM_KNOWLEDGE =
   '- Runs persist in the SQLite database (DB v8/v9).\n\n' +
 
   '**Customize** (Puzzle icon in nav):\n' +
-  '- **MCP marketplace**: a Cloud tab (hosted MCPs connected via Streamable HTTP with an API key — GitHub, Linear, Stripe, Atlassian, Neon, Supabase, Cloudflare, Zapier, Apify, Mixpanel), a Local tab (open-source stdio MCPs spawned via npx/uvx — filesystem, git, postgres, playwright, etc., plus the three built-in web-search providers), and a Connected tab listing active servers. One-click connect with brand logos; only services that actually connect via a static key are listed (OAuth-only services are deliberately excluded).\n' +
-  '- **Search provider** (built-in cards in the Local tab): Tavily (default), Kagi, or SearXNG (self-hosted) — paste API key/URL inline. Required for web_search, fetch_url, and the Research persona.\n' +
+  '- **MCP marketplace**: a Cloud tab (hosted MCPs connected via Streamable HTTP with an API key — GitHub, Linear, Stripe, Atlassian, Neon, Supabase, Cloudflare, Zapier, Apify, Mixpanel), a Local tab (open-source stdio MCPs spawned via npx/uvx — filesystem, git, postgres, playwright, etc.), and a Connected tab listing active servers (each with its real brand logo). One-click connect; only services that actually connect via a static key are listed (OAuth-only services are deliberately excluded).\n' +
+  '- **Built-in web search**: its own section above the marketplace tabs (not mixed into the Local tab) — Tavily (default), Kagi, or SearXNG (self-hosted). Clicking one configures just that provider (API key or URL); the active one shows an "Active" badge and appears in the Connected tab too. Required for web_search, fetch_url, and the Research persona.\n' +
   '- **Custom MCP servers**: add/edit/delete your own MCP servers (stdio subprocess or SSE/HTTP). Tools from all connected servers appear automatically as callable tools in chat, with no daemon restart.\n\n' +
 
   '**Settings**:\n' +

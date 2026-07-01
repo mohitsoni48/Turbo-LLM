@@ -136,9 +136,10 @@ the detail:
 - **Use the folders you already have.** Point TurboLLM at any directory of GGUFs — your
   existing LM Studio / Ollama / manual downloads — **no re-downloading.** It parses GGUF
   metadata (arch, params, quant, context, vision) for every file.
-- **Browse & download from Hugging Face**, in-app: search, see the file tree, pick a quant,
-  and download with **resume + SHA-256 verification**. Gated models (Llama, Gemma) work via
-  your own HF token, which **never leaves your machine**.
+- **Browse & download from Hugging Face**, in-app: a live, sortable list (trending / downloads
+  / likes / recently updated / newest) alongside a permanent detail pane — pick a quant, read
+  the **rendered model card**, and download with **resume + SHA-256 verification**. Gated
+  models (Llama, Gemma) work via your own HF token, which **never leaves your machine**.
 - **Import from any URL** — not just Hugging Face. Paste a direct `.gguf` link (model-author
   sites, mirrors, private servers); it disk-space-checks and downloads through the same manager.
 - **Quant recommendation per GPU** and a **VRAM-fit verdict** so you pick a quant that
@@ -319,7 +320,9 @@ the engine as a swappable component.
    support are hidden; ones it adds (e.g. low-bit KV cache, NextN) light up.
 
 No prebuilt for your OS? The **build-from-source guide** checks your toolchain (git / CMake /
-CUDA / MSVC), hands you the exact build commands, then drops you into the folder scan above.
+CUDA / a compiler — MSVC on Windows, gcc/clang on Linux), hands you the exact build commands
+(or a 1-click **"Build it for me"** on Windows and Linux), then drops you into the folder scan
+above.
 
 **Auto-provisioned default.** Don't want to fetch anything? On first run TurboLLM downloads
 the right upstream prebuilt for your GPU automatically — and a **backend picker** lets you

@@ -25,6 +25,39 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
+## [1.6.2] - 2026-07-01
+
+**Live model discovery, Linux builds, and MCP marketplace fixes.**
+
+### Added
+- **Linux support for the 1-click build pipeline** — compile llama.cpp from source with CUDA
+  on Linux (WSL2 included), not just Windows. Detects your compiler, bundles the CUDA runtime
+  libraries next to the binary automatically. Verified end-to-end in WSL Ubuntu.
+- **Discover now browses Hugging Face live** instead of a static "Featured" list — sortable by
+  trending / downloads / likes / recently updated / newest, in a persistent list + detail
+  layout (both panes are resizable) instead of a click-to-open panel.
+- **Rendered model card READMEs** — headings, images, links, and layout now render properly
+  instead of showing as raw markdown source, sanitized to stay safe against untrusted content.
+- **Built-in web search (Tavily/Kagi/SearXNG) is now its own section** in Customize, separate
+  from the MCP marketplace — selecting one configures just that provider instead of a shared
+  3-way panel.
+
+### Changed
+- App-wide scrollbars are now consistently styled everywhere.
+- The quant picker shows a green/yellow/red VRAM-fit indicator per option.
+
+### Fixed
+- **Connected MCP servers now show their real brand logo** in the Connected tab.
+- **The LAN API-key prompt no longer gets wiped out by a flaky connection** — a network hiccup
+  used to occasionally clear whatever key you were typing.
+- **The recommended quant no longer defaults to the largest/unquantized file** when nothing
+  fits your VRAM — it now picks the smallest viable one instead.
+
+### Discord
+- Discover now browses Hugging Face live with sorting (trending/downloads/likes/etc), not a fixed list — and model card READMEs actually render now (images, formatting, the works).
+- 1-click engine builds work on Linux/WSL2 too, not just Windows.
+- Fixed the LAN API-key box sometimes clearing itself while you were typing, plus a couple of MCP marketplace annoyances (Tavily/Kagi/SearXNG selection, missing logos).
+
 ## [1.6.1] - 2026-07-01
 
 **Auto-tune no longer breaks vision models.**
