@@ -4,14 +4,24 @@
 // primary action that is "Download" (enqueue) for a remote quant or "Load" for a
 // quant already in the local library. Gated repos with no token show guidance and
 // disable downloading.
+//
+// The actual content is `HfRepoContent` — Sheet-free, so DiscoverTab's split-pane
+// layout can render it inline as the permanent right column. `HfRepoDialog` just
+// wraps it in the Sheet chrome for the one other call site (ModelsScreen's Library
+// tab "View HF page" hand-off), which has no split-pane of its own.
 
 import { useEffect, useMemo, useState } from 'react'
-import { Download, ExternalLink, Lock, Zap } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import rehypeRaw from 'rehype-raw'
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
+import { ChevronDown, Download, ExternalLink, Lock, Zap } from 'lucide-react'
 import { ApiError } from '../../lib/api'
 import { useDownloadMutations, useHfRepo, useModelActions, useStatus, useSysInfo } from '../../lib/queries'
-import type { FitVerdict } from '../../lib/types'
+import type { FitVerdict, HfRepoFile } from '../../lib/types'
 import { Button } from '../../components/ui/button'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../components/ui/dialog'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '../../components/ui/dropdown-menu'
+import { Sheet, SheetContent } from '../../components/ui/sheet'
 import { toast } from '../../components/ui/sonner'
 
 /** Per-quant VRAM fit estimate. We only know the file size here (no GGUF block/head
@@ -55,6 +65,42 @@ export function HfRepoDialog({
    *  switch to a Hugging Face search for the given term. */
   onSearch?: (term: string) => void
 }) {
+  // Side panel, not a modal (spec 00 §9): pad the app shell so content resizes
+  // instead of being covered, same convention as ModelDetailDialog.
+  useEffect(() => {
+    if (!repo) return
+    document.documentElement.classList.add('tllm-config-open')
+    return () => document.documentElement.classList.remove('tllm-config-open')
+  }, [repo])
+
+  return (
+    <Sheet open={!!repo} onOpenChange={(o) => !o && onClose()} modal={false}>
+      <SheetContent
+        className="overflow-y-auto p-5"
+        // Push panel, not a modal: keep it open while the user browses behind it.
+        // Close is via the ✕, Esc, or the buttons below.
+        onPointerDownOutside={(e) => e.preventDefault()}
+        onInteractOutside={(e) => e.preventDefault()}
+      >
+        <HfRepoContent repo={repo} onClose={onClose} onSearch={onSearch} />
+      </SheetContent>
+    </Sheet>
+  )
+}
+
+/** The repo detail body: header + quant picker + VRAM verdict + gated guidance +
+ *  primary action + rendered README. No Sheet/Dialog chrome of its own — usable
+ *  standalone inside any container (a Sheet, per `HfRepoDialog` above, or a plain
+ *  `<div>` column, per DiscoverTab's split-pane right side). */
+export function HfRepoContent({
+  repo,
+  onClose,
+  onSearch,
+}: {
+  repo: string | null
+  onClose: () => void
+  onSearch?: (term: string) => void
+}) {
   const detailQ = useHfRepo(repo)
   const sysQ = useSysInfo()
   const dlMut = useDownloadMutations()
@@ -68,15 +114,20 @@ export function HfRepoDialog({
   const [selected, setSelected] = useState<string>('')
 
   // Pre-select the recommended quant: largest that fits; prefer K-quants over IQ at
-  // an equal size class (spec 10 §3). Re-runs when the file list changes.
+  // an equal size class (spec 10 §3). When NOTHING fits (e.g. a huge MoE model on modest
+  // VRAM — the pool falls back to every gguf), prefer the SMALLEST file instead: sorting
+  // "largest first" in that fallback used to default to the biggest/unquantized file
+  // (a 1.5TB BF16 for GLM-5.2-GGUF), the least viable option, not the most. Re-runs when
+  // the file list changes.
   useEffect(() => {
     if (!detail) return
     const ggufs = detail.files.filter((f) => !f.mmproj)
     if (ggufs.length === 0) return
     const fits = ggufs.filter((f) => fileFit(f.sizeBytes, vramMb) === 'fits')
     const pool = fits.length > 0 ? fits : ggufs
+    const sizeDir = fits.length > 0 ? 1 : -1
     const best = [...pool].sort((a, b) => {
-      if (b.sizeBytes !== a.sizeBytes) return b.sizeBytes - a.sizeBytes
+      if (b.sizeBytes !== a.sizeBytes) return (b.sizeBytes - a.sizeBytes) * sizeDir
       const aK = /q\d_k/i.test(a.quant) ? 0 : 1
       const bK = /q\d_k/i.test(b.quant) ? 0 : 1
       return aK - bK
@@ -145,127 +196,252 @@ export function HfRepoDialog({
   }
 
   return (
-    <Dialog open={!!repo} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-[560px]">
-        <DialogHeader>
-          <DialogTitle className="truncate pr-6">
-            <span className="inline-flex items-center gap-1.5">
-              {gated && <Lock size={14} style={{ color: 'var(--warn)' }} />}
-              {repo}
-            </span>
-          </DialogTitle>
-          <DialogDescription>
-            {detail
-              ? `${detail.downloads.toLocaleString()} downloads · ${detail.likes.toLocaleString()} likes${detail.license ? ` · ${detail.license}` : ''}`
-              : 'Loading repo…'}
-          </DialogDescription>
-        </DialogHeader>
+    <>
+      {/* Plain elements, not Sheet's Title/Description (Radix Dialog primitives tied to
+          a Dialog.Root context) — this content renders both inside a Sheet (HfRepoDialog)
+          and bare, with no dialog ancestor at all (DiscoverTab's split-pane right column). */}
+      <div className="mb-4 flex flex-col gap-1">
+        <h2 className="truncate pr-6 text-[16px] font-semibold tracking-[-0.01em] text-ink">
+          <span className="inline-flex items-center gap-1.5">
+            {gated && <Lock size={14} style={{ color: 'var(--warn)' }} />}
+            {repo}
+          </span>
+        </h2>
+        <p className="text-[13px] text-muted">
+          {detail
+            ? `${detail.downloads.toLocaleString()} downloads · ${detail.likes.toLocaleString()} likes${detail.license ? ` · ${detail.license}` : ''}`
+            : 'Loading repo…'}
+        </p>
+      </div>
 
-        {detailQ.isLoading ? (
-          <div className="py-10 text-center text-[13px] text-muted">Loading repo…</div>
-        ) : detailQ.isError ? (
-          <UnreachableOrError
-            error={detailQ.error}
-            onRetry={() => detailQ.refetch()}
-            onSearch={onSearch ? () => onSearch(repoSearchTerm(repo)) : undefined}
-          />
-        ) : isSafetensors ? (
-          <MlxRepoBody
-            detail={detail}
-            vramMb={vramMb}
-            engineKind={engineKind}
-            onDownload={onDownloadSafetensors}
-            isPending={dlMut.enqueue.isPending}
-          />
-        ) : !detail || ggufFiles.length === 0 ? (
-          <div className="py-10 text-center text-[13px] text-muted">No GGUF files found in this repo.</div>
-        ) : (
-          <div className="flex flex-col gap-4">
-            {/* Quant selector */}
-            <div className="flex flex-col gap-1.5">
-              <label className="flex items-center gap-1.5 text-[12px] font-medium text-ink">
-                Quant
-                {detail.verifying && (
-                  <span className="text-[11px] font-normal text-faint">· checking your library…</span>
-                )}
-              </label>
-              <select
-                value={selected}
-                onChange={(e) => setSelected(e.target.value)}
-                className="w-full rounded-md border border-border bg-bg px-2 py-2 text-[13px] text-ink outline-none"
-              >
-                {ggufFiles.map((f) => {
-                  const fFit = fileFit(f.sizeBytes, vramMb)
-                  const isLocal = !!f.downloaded
-                  const fitMark = fFit === 'fits' ? '●' : fFit === 'tight' ? '◐' : fFit === 'overflow' ? '○' : '·'
-                  return (
-                    <option key={f.name} value={f.name}>
-                      {f.quant} · {fmtSize(f.sizeBytes)}
-                      {f.parts > 1 ? ` · ${f.parts} parts` : ''} · {fitMark}
-                      {isLocal ? ' · Downloaded' : ''}
-                    </option>
-                  )
-                })}
-              </select>
-            </div>
-
-            {/* VRAM verdict line */}
-            {selectedFile && (
-              <div className="flex items-center gap-2 rounded-md border border-border bg-panel-2 px-3 py-2.5 text-[12px]">
-                <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: FIT_COLOR[fit] }} />
-                <span className="text-muted">
-                  {FIT_LABEL[fit]}
-                  {vramMb ? ` (${(selectedFile.sizeBytes / 1e9).toFixed(1)} GB file · ${(vramMb / 1024).toFixed(0)} GB VRAM)` : ''}
-                </span>
-              </div>
-            )}
-
-            {/* Gated guidance */}
-            {blockedByGate && (
-              <div className="rounded-md border px-3 py-2.5 text-[12px]" style={{ borderColor: 'var(--warn)', background: 'color-mix(in srgb, var(--warn) 10%, transparent)' }}>
-                <p className="text-ink">This is a gated model.</p>
-                <p className="mt-1 text-muted">
-                  Accept the license on{' '}
-                  <a href={`https://huggingface.co/${detail.repo}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-0.5 underline" style={{ color: 'var(--accent)' }}>
-                    huggingface.co <ExternalLink size={11} />
-                  </a>
-                  , then add a Hugging Face token in Settings → Models.
-                </p>
-              </div>
-            )}
-
-            {enqueueError && <p className="text-[12px]" style={{ color: 'var(--err)' }}>{enqueueError}</p>}
-
-            {/* Primary action */}
-            <div className="flex items-center gap-2">
-              {selectedIsLocal && selectedFile?.localKey ? (
-                <Button className="flex-1" onClick={onLoad} disabled={actions.load.isPending}>
-                  <Zap size={14} />
-                  Load
-                </Button>
-              ) : (
-                <Button
-                  className="flex-1"
-                  onClick={onDownload}
-                  disabled={blockedByGate || dlMut.enqueue.isPending || !selectedFile}
-                >
-                  <Download size={14} />
-                  {dlMut.enqueue.isPending ? 'Adding…' : selectedIsLocal ? 'Re-download' : 'Download'}
-                </Button>
+      {detailQ.isLoading ? (
+        <div className="py-10 text-center text-[13px] text-muted">Loading repo…</div>
+      ) : detailQ.isError ? (
+        <UnreachableOrError
+          error={detailQ.error}
+          onRetry={() => detailQ.refetch()}
+          onSearch={onSearch ? () => onSearch(repoSearchTerm(repo)) : undefined}
+        />
+      ) : isSafetensors ? (
+        <MlxRepoBody
+          detail={detail}
+          vramMb={vramMb}
+          engineKind={engineKind}
+          onDownload={onDownloadSafetensors}
+          isPending={dlMut.enqueue.isPending}
+        />
+      ) : !detail || ggufFiles.length === 0 ? (
+        <div className="py-10 text-center text-[13px] text-muted">No GGUF files found in this repo.</div>
+      ) : (
+        <div className="flex flex-col gap-4">
+          {/* Quant selector */}
+          <div className="flex flex-col gap-1.5">
+            <label className="flex items-center gap-1.5 text-[12px] font-medium text-ink">
+              Quant
+              {detail.verifying && (
+                <span className="text-[11px] font-normal text-faint">· checking your library…</span>
               )}
-            </div>
+            </label>
+            <QuantDropdown files={ggufFiles} selected={selected} onSelect={setSelected} vramMb={vramMb} />
+          </div>
 
-            {/* Card preview */}
-            {detail.card && (
-              <details className="rounded-md border border-border bg-panel-2 px-3 py-2">
-                <summary className="cursor-pointer text-[12px] font-medium text-muted">Model card</summary>
-                <p className="mt-2 whitespace-pre-wrap text-[12px] leading-relaxed text-muted">{detail.card}</p>
-              </details>
+          {/* VRAM verdict line */}
+          {selectedFile && (
+            <div className="flex items-center gap-2 rounded-md border border-border bg-panel-2 px-3 py-2.5 text-[12px]">
+              <FitDot fit={fit} size={10} />
+              <span className="text-muted">
+                {FIT_LABEL[fit]}
+                {vramMb ? ` (${(selectedFile.sizeBytes / 1e9).toFixed(1)} GB file · ${(vramMb / 1024).toFixed(0)} GB VRAM)` : ''}
+              </span>
+            </div>
+          )}
+
+          {/* Gated guidance */}
+          {blockedByGate && (
+            <div className="rounded-md border px-3 py-2.5 text-[12px]" style={{ borderColor: 'var(--warn)', background: 'color-mix(in srgb, var(--warn) 10%, transparent)' }}>
+              <p className="text-ink">This is a gated model.</p>
+              <p className="mt-1 text-muted">
+                Accept the license on{' '}
+                <a href={`https://huggingface.co/${detail.repo}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-0.5 underline" style={{ color: 'var(--accent)' }}>
+                  huggingface.co <ExternalLink size={11} />
+                </a>
+                , then add a Hugging Face token in Settings → Models.
+              </p>
+            </div>
+          )}
+
+          {enqueueError && <p className="text-[12px]" style={{ color: 'var(--err)' }}>{enqueueError}</p>}
+
+          {/* Primary action */}
+          <div className="flex items-center gap-2">
+            {selectedIsLocal && selectedFile?.localKey ? (
+              <Button className="flex-1" onClick={onLoad} disabled={actions.load.isPending}>
+                <Zap size={14} />
+                Load
+              </Button>
+            ) : (
+              <Button
+                className="flex-1"
+                onClick={onDownload}
+                disabled={blockedByGate || dlMut.enqueue.isPending || !selectedFile}
+              >
+                <Download size={14} />
+                {dlMut.enqueue.isPending ? 'Adding…' : selectedIsLocal ? 'Re-download' : 'Download'}
+              </Button>
             )}
           </div>
+
+          {/* README — rendered markdown, not raw text */}
+          {detail.card && (
+            <div className="flex flex-col gap-1.5">
+              <p className="text-[11px] font-medium uppercase tracking-wide text-faint">README</p>
+              <div className="rounded-md border border-border bg-panel-2 px-3 py-2.5">
+                <ModelCard text={detail.card} />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  )
+}
+
+/** A small colored dot indicating VRAM fit — green/yellow/red (fits/tight/overflow),
+ *  neutral otherwise. Used both standalone (VRAM verdict line) and inside the quant
+ *  dropdown so every option's fit is visible without opening it further. */
+function FitDot({ fit, size = 8 }: { fit: FitVerdict; size?: number }) {
+  return (
+    <span
+      className="shrink-0 rounded-full"
+      style={{ width: size, height: size, background: FIT_COLOR[fit] }}
+      title={FIT_LABEL[fit]}
+    />
+  )
+}
+
+/** Quant picker replacing a native `<select>`: a native `<option>` can't render a
+ *  colored dot, and the fit signal (green/yellow/red) is the whole point here — so
+ *  this is a real listbox (Radix DropdownMenu) instead. */
+function QuantDropdown({
+  files,
+  selected,
+  onSelect,
+  vramMb,
+}: {
+  files: HfRepoFile[]
+  selected: string
+  onSelect: (name: string) => void
+  vramMb: number | undefined
+}) {
+  const selectedFile = files.find((f) => f.name === selected) ?? null
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        className="flex w-full items-center justify-between gap-2 rounded-md border border-border bg-bg px-2.5 py-2 text-left text-[13px] text-ink outline-none transition-colors hover:bg-panel-2"
+      >
+        {selectedFile ? (
+          <span className="flex min-w-0 items-center gap-2">
+            <FitDot fit={fileFit(selectedFile.sizeBytes, vramMb)} />
+            <span className="truncate">
+              {selectedFile.quant} · {fmtSize(selectedFile.sizeBytes)}
+              {selectedFile.parts > 1 ? ` · ${selectedFile.parts} parts` : ''}
+              {selectedFile.downloaded ? ' · Downloaded' : ''}
+            </span>
+          </span>
+        ) : (
+          <span className="text-faint">Select a quant…</span>
         )}
-      </DialogContent>
-    </Dialog>
+        <ChevronDown size={14} className="shrink-0 text-faint" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="start"
+        className="max-h-72 w-[var(--radix-dropdown-menu-trigger-width)] overflow-y-auto"
+      >
+        {files.map((f) => (
+          <DropdownMenuItem key={f.name} onSelect={() => onSelect(f.name)} className="justify-between gap-2">
+            <span className="flex min-w-0 items-center gap-2">
+              <FitDot fit={fileFit(f.sizeBytes, vramMb)} />
+              <span className="truncate">
+                {f.quant} · {fmtSize(f.sizeBytes)}
+                {f.parts > 1 ? ` · ${f.parts} parts` : ''}
+              </span>
+            </span>
+            {f.downloaded && (
+              <span className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium" style={{ color: 'var(--ok)', background: 'color-mix(in srgb, var(--ok) 15%, transparent)' }}>
+                Downloaded
+              </span>
+            )}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+/** Rendered model card (README). A deliberately plain markdown renderer — no
+ *  streaming/artifact handling (that's chat-specific, MessageBubble's Markdown) —
+ *  just GFM + safe external links + basic table/code styling for a static preview. */
+// Model cards frequently wrap layout (logo rows, badge banners) in raw HTML — react-
+// markdown escapes raw HTML as literal text by default (a safe default, since a README
+// is untrusted content from an arbitrary HF author). `rehype-raw` parses it into real
+// nodes; `rehype-sanitize` then strips anything dangerous (script/iframe/on*handlers/
+// javascript: links, etc.) using the same schema GitHub itself sanitizes READMEs with.
+// The default schema already allows div/span/img/a/ul/li/em and width/height/align —
+// the only gap for these cards is `style` (used for simple flex/margin layout), so
+// that's the one thing added on top of the default.
+const CARD_SANITIZE_SCHEMA = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    '*': [...(defaultSchema.attributes?.['*'] ?? []), 'style'],
+  },
+}
+
+function ModelCard({ text }: { text: string }) {
+  return (
+    // Text set close to normal reading size (not the app's usual compact 12px UI text):
+    // these images carry ABSOLUTE pixel dimensions the author set assuming a normal
+    // article context (HF's own model page — a wide column at ~16px body text), so
+    // shrinking just the text while leaving images at their authored size is what made
+    // images look oversized. Scaling the text back up (rather than capping images down)
+    // keeps the proportions the author actually intended; `max-w-full` on images still
+    // shrinks them if the panel itself is narrower than an image, same as any embedded
+    // external content.
+    <div className="flex flex-col gap-2 text-[14px] leading-relaxed text-muted [&_h1]:mt-1 [&_h2]:mt-3 [&_h3]:mt-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, CARD_SANITIZE_SCHEMA]]}
+        components={{
+          a: ({ children, href }) => (
+            <a href={href} target="_blank" rel="noopener noreferrer" className="text-accent underline underline-offset-2">{children}</a>
+          ),
+          img: ({ src, alt, width, height }) => (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={typeof src === 'string' ? src : undefined}
+              alt={alt ?? ''}
+              width={width}
+              height={height}
+              className="max-w-full rounded-md"
+            />
+          ),
+          h1: ({ children }) => <h3 className="text-[16px] font-semibold text-ink">{children}</h3>,
+          h2: ({ children }) => <h4 className="text-[15px] font-semibold text-ink">{children}</h4>,
+          h3: ({ children }) => <h5 className="text-[14px] font-semibold text-ink">{children}</h5>,
+          code: ({ className, children }) =>
+            className ? (
+              <code className="block overflow-x-auto rounded bg-bg p-2 font-mono text-[13px] leading-relaxed">{children}</code>
+            ) : (
+              <code className="rounded bg-bg px-1 py-0.5 font-mono text-[13px]">{children}</code>
+            ),
+          table: ({ children }) => <div className="my-1 overflow-x-auto"><table className="w-full border-collapse text-[13.5px]">{children}</table></div>,
+          th: ({ children }) => <th className="border border-border bg-bg px-2 py-1 text-left font-semibold text-ink">{children}</th>,
+          td: ({ children }) => <td className="border border-border px-2 py-1">{children}</td>,
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
   )
 }
 
@@ -299,7 +475,7 @@ function MlxRepoBody({
       </div>
 
       <div className="flex items-center gap-2 rounded-md border border-border bg-panel-2 px-3 py-2.5 text-[12px]">
-        <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: FIT_COLOR[fit] }} />
+        <FitDot fit={fit} size={10} />
         <span className="text-muted">
           {FIT_LABEL[fit]}
           {vramMb ? ` (${(totalBytes / 1e9).toFixed(1)} GB total · ${(vramMb / 1024).toFixed(0)} GB VRAM)` : `${(totalBytes / 1e9).toFixed(1)} GB total`}

@@ -1,40 +1,59 @@
-// Discover tab (spec 10 §2, §7, §8). A debounced HF search (400ms) with result
-// rows, a Featured rail shown when no query is active, an Import-from-URL entry, and
-// the live Downloads panel. Clicking a featured card or result row opens the
-// HfRepoDialog. Offline/HF-unreachable search errors render a friendly card instead
-// of results.
+// Discover tab (spec 10 §2, §7 rewrite, §8). A persistent split-pane: a searchable,
+// sortable list on the left (browsing HF live — the equivalent of
+// huggingface.co/models?library=<engine-adapted>&sort=<sort> — when no query is typed,
+// a debounced HF search once you type) and a permanent detail pane on the right showing
+// whatever's selected — no dialog/modal in between. Clicking a row just swaps what the
+// right pane shows. Offline/HF-unreachable errors render a friendly card in the list
+// instead of results. The library/format filter (gguf/mlx/none) adapts to the active
+// engine server-side (src/hf/hf.ts) — never hardcoded here.
 
-import { useEffect, useState } from 'react'
-import { Heart, Link2, Lock, Search, Sparkles } from 'lucide-react'
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
+import { Link2, Lock, Search } from 'lucide-react'
 import { ApiError } from '../../lib/api'
-import { useHfSearch, useModels, useSysInfo } from '../../lib/queries'
-import type { HfSearchItem, ModelEntry } from '../../lib/types'
-import { FEATURED_REPOS, vramTier, type FeaturedRepo } from '../../lib/featured'
+import { useHfSearch } from '../../lib/queries'
+import type { HfSearchItem, HfSortOption } from '../../lib/types'
 import { EmptyState, InlineError } from '../../components/common'
 import { Input } from '../../components/ui/input'
 import { Skeleton } from '../../components/ui/skeleton'
 import { DownloadsPanel } from './DownloadsPanel'
-import { HfRepoDialog } from './HfRepoDialog'
+import { HfRepoContent } from './HfRepoDialog'
 import { ImportUrlDialog } from './ImportUrlDialog'
 
-/** A repo id (owner/name) is "in library" when a local model's path or name matches
- *  the repo's name segment. The search payload also carries `localCount`; this is a
- *  client-side fallback for the Featured rail (which has no localCount). */
-function repoInLibrary(repo: string, models: ModelEntry[]): boolean {
-  const name = (repo.split('/').pop() ?? repo).toLowerCase()
-  // Strip a trailing "-gguf" so "Qwen3.6-27B-GGUF" matches a local "Qwen3.6-27B".
-  const stem = name.replace(/-gguf$/, '')
-  return models.some((m) => {
-    const hay = `${m.name} ${m.path}`.toLowerCase()
-    return hay.includes(stem)
-  })
+const SORT_LABEL: Record<HfSortOption, string> = {
+  'best-match': 'Best match',
+  trending: 'Trending',
+  downloads: 'Most downloads',
+  likes: 'Most likes',
+  modified: 'Recently updated',
+  created: 'Newest',
+}
+
+// List/detail split width — persisted like ModelDetailDialog's config-panel width, but
+// as a plain in-flow flex-basis (not a CSS var pinned against the app shell), since this
+// resizes two siblings on the same page rather than a docked panel.
+const LIST_WIDTH_KEY = 'tllm-discover-list-w'
+const LIST_MIN_W = 260
+/** Largest the list may grow: leave the detail pane at least 420px. */
+function listMaxW(): number {
+  return Math.max(LIST_MIN_W, Math.min(560, window.innerWidth - 420))
+}
+function readSavedListWidth(): number {
+  try {
+    const n = parseInt(localStorage.getItem(LIST_WIDTH_KEY) ?? '', 10)
+    return Number.isFinite(n) ? n : 340
+  } catch {
+    return 340
+  }
 }
 
 export function DiscoverTab({ presetQuery = '' }: { presetQuery?: string }) {
   const [query, setQuery] = useState('')
   const [debounced, setDebounced] = useState('')
-  const [openRepo, setOpenRepo] = useState<string | null>(null)
+  const [sort, setSort] = useState<HfSortOption>('trending')
+  const [selectedRepo, setSelectedRepo] = useState<string | null>(null)
   const [importOpen, setImportOpen] = useState(false)
+  const listRef = useRef<HTMLDivElement>(null)
+  const [listWidth, setListWidth] = useState(() => Math.min(Math.max(readSavedListWidth(), LIST_MIN_W), listMaxW()))
 
   // Seed the search when arriving from a library model's "Find other quants" with
   // no known source repo (imported file). Keyed on presetQuery so re-clicking the
@@ -49,170 +68,259 @@ export function DiscoverTab({ presetQuery = '' }: { presetQuery?: string }) {
     return () => clearTimeout(t)
   }, [query])
 
-  const searchQ = useHfSearch(debounced)
-  const modelsQ = useModels()
-  const sysQ = useSysInfo()
-  const models = modelsQ.data?.models ?? []
-  const tier = vramTier(sysQ.data?.gpus?.[0]?.vramMb)
-
   const searching = debounced.length > 0
+  // "Best match" (HF's own relevance ranking) only means anything for a text query —
+  // browsing falls back to 'trending' server-side anyway, so keep the picker in sync
+  // rather than showing a selected option that silently isn't what's being applied.
+  useEffect(() => {
+    if (!searching && sort === 'best-match') setSort('trending')
+  }, [searching, sort])
+
+  const searchQ = useHfSearch(debounced, sort)
   const unreachable = searchQ.error instanceof ApiError && searchQ.error.code === 'hf_unreachable'
   const results = searchQ.data?.results ?? []
+  const sortOptions: HfSortOption[] = searching
+    ? ['best-match', 'trending', 'downloads', 'likes', 'modified', 'created']
+    : ['trending', 'downloads', 'likes', 'modified', 'created']
 
   return (
-    <div>
+    <div className="flex h-full min-h-0 flex-col">
       <DownloadsPanel />
 
-      {/* Search + import bar */}
-      <div className="mb-5 flex items-center gap-2">
-        <div className="relative flex-1">
-          <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-faint" />
-          <Input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search Hugging Face for GGUF models, e.g. qwen3.6 gguf"
-            className="pl-9"
-          />
+      <div className="mt-3 flex min-h-0 flex-1">
+        {/* Left: search + sort + scrollable list */}
+        <div ref={listRef} className="flex shrink-0 flex-col gap-2 pr-3" style={{ width: listWidth }}>
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1">
+              <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-faint" />
+              <Input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search models by name or author…"
+                className="pl-9"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => setImportOpen(true)}
+              title="Import from URL"
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-transparent p-2 text-ink transition-colors hover:bg-panel-2"
+            >
+              <Link2 size={15} />
+            </button>
+          </div>
+
+          <select
+            value={sort}
+            onChange={(e) => setSort(e.target.value as HfSortOption)}
+            className="self-end rounded-md border border-border bg-bg px-2 py-1 text-[12px] text-ink outline-none"
+          >
+            {sortOptions.map((s) => (
+              <option key={s} value={s}>{SORT_LABEL[s]}</option>
+            ))}
+          </select>
+
+          <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto">
+            {searchQ.isLoading ? (
+              [0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-[54px] w-full shrink-0 rounded-lg" />)
+            ) : unreachable ? (
+              <InlineError
+                message="Hugging Face is unreachable — check your connection."
+                onRetry={() => searchQ.refetch()}
+              />
+            ) : searchQ.isError ? (
+              <InlineError
+                message={searchQ.error instanceof ApiError ? searchQ.error.message : 'Search failed.'}
+                onRetry={() => searchQ.refetch()}
+              />
+            ) : results.length === 0 ? (
+              <EmptyState
+                icon={<Search size={24} />}
+                message={searching ? `No models found for “${debounced}”.` : 'No models found.'}
+              />
+            ) : (
+              results.map((r) => (
+                <ResultListRow
+                  key={r.repo}
+                  item={r}
+                  selected={selectedRepo === r.repo}
+                  onSelect={() => setSelectedRepo(r.repo)}
+                />
+              ))
+            )}
+          </div>
         </div>
-        <button
-          type="button"
-          onClick={() => setImportOpen(true)}
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-transparent px-3 py-2 text-[13px] font-medium text-ink transition-colors hover:bg-panel-2"
-        >
-          <Link2 size={14} />
-          Import from URL
-        </button>
-      </div>
 
-      {/* Featured rail (only when not searching) */}
-      {!searching && (
-        <FeaturedRail
-          repos={FEATURED_REPOS}
-          tier={tier}
-          models={models}
-          onOpen={(repo) => setOpenRepo(repo)}
-        />
-      )}
+        <SplitResizeHandle listRef={listRef} onCommit={setListWidth} />
 
-      {/* Search results */}
-      {searching && (
-        <div className="flex flex-col gap-2">
-          {searchQ.isLoading ? (
-            [0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-[58px] w-full rounded-lg" />)
-          ) : unreachable ? (
-            <InlineError
-              message="Hugging Face is unreachable — check your connection."
-              onRetry={() => searchQ.refetch()}
+        {/* Right: permanent detail pane — no dialog, just swaps content on selection */}
+        <div className="min-h-0 flex-1 overflow-y-auto rounded-lg border border-border bg-panel p-5">
+          {selectedRepo ? (
+            <HfRepoContent
+              repo={selectedRepo}
+              onClose={() => setSelectedRepo(null)}
+              onSearch={(term) => {
+                setSelectedRepo(null)
+                setQuery(term)
+              }}
             />
-          ) : searchQ.isError ? (
-            <InlineError
-              message={searchQ.error instanceof ApiError ? searchQ.error.message : 'Search failed.'}
-              onRetry={() => searchQ.refetch()}
-            />
-          ) : results.length === 0 ? (
-            <EmptyState icon={<Search size={24} />} message={`No GGUF repos found for “${debounced}”.`} />
           ) : (
-            results.map((r) => (
-              <ResultRow key={r.repo} item={r} onOpen={() => setOpenRepo(r.repo)} />
-            ))
+            <div className="flex h-full items-center justify-center">
+              <EmptyState icon={<Search size={24} />} message="Select a model on the left to see details." />
+            </div>
           )}
         </div>
-      )}
+      </div>
 
-      <HfRepoDialog
-        repo={openRepo}
-        onClose={() => setOpenRepo(null)}
-        onSearch={(term) => {
-          setOpenRepo(null)
-          setQuery(term)
-        }}
-      />
       <ImportUrlDialog open={importOpen} onClose={() => setImportOpen(false)} />
     </div>
   )
 }
 
-function FeaturedRail({
-  repos,
-  tier,
-  models,
-  onOpen,
+/** Thin drag handle between the list and detail pane; resizes the list column live via
+ *  direct style mutation (same pattern as ModelDetailDialog's ConfigResizeHandle — avoids
+ *  a React re-render per pointer-move pixel), then commits + persists the final width on
+ *  release. */
+function SplitResizeHandle({
+  listRef,
+  onCommit,
 }: {
-  repos: FeaturedRepo[]
-  tier: ReturnType<typeof vramTier>
-  models: ModelEntry[]
-  onOpen: (repo: string) => void
+  listRef: RefObject<HTMLDivElement | null>
+  onCommit: (w: number) => void
 }) {
+  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = listRef.current?.getBoundingClientRect().width ?? readSavedListWidth()
+    document.documentElement.classList.add('tllm-resizing')
+    const onMove = (ev: PointerEvent) => {
+      const w = Math.min(Math.max(startW + (ev.clientX - startX), LIST_MIN_W), listMaxW())
+      if (listRef.current) listRef.current.style.width = `${Math.round(w)}px`
+    }
+    const onUp = () => {
+      document.documentElement.classList.remove('tllm-resizing')
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      const w = listRef.current?.getBoundingClientRect().width
+      if (w) {
+        const rounded = Math.round(w)
+        onCommit(rounded)
+        try {
+          localStorage.setItem(LIST_WIDTH_KEY, String(rounded))
+        } catch {
+          /* ignore quota / disabled storage */
+        }
+      }
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
   return (
-    <div className="mb-2">
-      <div className="mb-3 flex items-center gap-1.5 text-[12px] font-semibold uppercase tracking-wide text-faint">
-        <Sparkles size={13} />
-        Featured
-      </div>
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-        {repos.map((f) => {
-          const inLib = repoInLibrary(f.repo, models)
-          return (
-            <button
-              key={f.repo}
-              type="button"
-              onClick={() => onOpen(f.repo)}
-              className="flex flex-col gap-1.5 rounded-lg border border-border bg-panel px-4 py-3 text-left transition-colors hover:border-border-strong hover:bg-panel-2"
-            >
-              <div className="flex items-center gap-1.5">
-                {f.gated && <Lock size={13} style={{ color: 'var(--warn)' }} className="shrink-0" />}
-                <span className="truncate font-medium text-ink">{f.name}</span>
-                {inLib && <InLibraryChip />}
-              </div>
-              <p className="line-clamp-2 text-[12px] text-muted">{f.blurb}</p>
-              <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-faint">
-                <span>Suggested for your GPU:</span>
-                <span className="rounded px-1.5 py-0.5 font-mono" style={{ color: 'var(--accent)', background: 'color-mix(in srgb, var(--accent) 12%, transparent)' }}>
-                  {f.quants[tier]}
-                </span>
-              </div>
-            </button>
-          )
-        })}
-      </div>
-    </div>
+    <div
+      className="tllm-split-resizer"
+      onPointerDown={onPointerDown}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize model list"
+    />
   )
 }
 
-function ResultRow({ item, onOpen }: { item: HfSearchItem; onOpen: () => void }) {
+/** Shared visual shell for a left-list row: monogram avatar, selection highlight,
+ *  a title line (with gated lock + in-library chip), and a secondary line below. */
+function ListRow({
+  repo,
+  title,
+  secondary,
+  gated,
+  inLibrary,
+  selected,
+  onSelect,
+}: {
+  repo: string
+  title: string
+  secondary: string
+  gated?: boolean
+  inLibrary?: ReactNode
+  selected: boolean
+  onSelect: () => void
+}) {
   return (
     <button
       type="button"
-      onClick={onOpen}
-      className="group flex items-center gap-3 rounded-lg border border-border bg-panel px-4 py-3 text-left transition-colors hover:border-border-strong hover:bg-panel-2"
+      onClick={onSelect}
+      className="flex shrink-0 items-start gap-2.5 rounded-lg border px-3 py-2.5 text-left transition-colors"
+      style={{
+        borderColor: selected ? 'var(--accent)' : 'transparent',
+        background: selected ? 'color-mix(in srgb, var(--accent) 12%, transparent)' : 'transparent',
+      }}
+      onMouseEnter={(e) => { if (!selected) e.currentTarget.style.background = 'var(--panel-2)' }}
+      onMouseLeave={(e) => { if (!selected) e.currentTarget.style.background = 'transparent' }}
     >
+      <Avatar seed={repo} />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
-          {item.gated && <Lock size={13} style={{ color: 'var(--warn)' }} className="shrink-0" />}
-          <span className="truncate font-medium text-ink">{item.repo}</span>
-          {item.localCount > 0 && <InLibraryChip count={item.localCount} />}
+          {gated && <Lock size={12} style={{ color: 'var(--warn)' }} className="shrink-0" />}
+          <span className="truncate text-[13px] font-medium text-ink">{title}</span>
         </div>
-        <div className="mt-0.5 flex items-center gap-3 text-[12px] text-muted">
-          <span>{fmtCount(item.downloads)} downloads</span>
-          <span className="inline-flex items-center gap-1">
-            <Heart size={11} /> {fmtCount(item.likes)}
-          </span>
-          {item.updatedAt && <span>updated {fmtDate(item.updatedAt)}</span>}
-        </div>
+        <p className="mt-0.5 truncate text-[11px] text-muted">{secondary}</p>
+        {inLibrary && <div className="mt-1">{inLibrary}</div>}
       </div>
     </button>
   )
 }
 
-/** Green "in library" chip (spec 10 §2). With a count it reads "↓ N in library";
- *  without (Featured rail) it reads "✓ in library". */
-function InLibraryChip({ count }: { count?: number }) {
+function ResultListRow({
+  item,
+  selected,
+  onSelect,
+}: {
+  item: HfSearchItem
+  selected: boolean
+  onSelect: () => void
+}) {
+  const secondary = `${fmtCount(item.downloads)} downloads · ${fmtCount(item.likes)} likes${item.updatedAt ? ` · updated ${fmtDate(item.updatedAt)}` : ''}`
+  return (
+    <ListRow
+      repo={item.repo}
+      title={item.repo}
+      secondary={secondary}
+      gated={item.gated}
+      inLibrary={item.localCount > 0 ? <InLibraryChip count={item.localCount} /> : undefined}
+      selected={selected}
+      onSelect={onSelect}
+    />
+  )
+}
+
+/** Colored-initial monogram in lieu of a real per-author brand logo (HF authors
+ *  don't carry one) — same hashed-color convention used for MCP catalog entries. */
+function Avatar({ seed }: { seed: string }) {
+  const palette = ['#2563eb', '#7c3aed', '#db2777', '#dc2626', '#d97706', '#059669', '#0891b2']
+  let h = 0
+  for (const c of seed) h = (h * 31 + c.charCodeAt(0)) & 0x7fffffff
+  const color = palette[h % palette.length]
+  const author = seed.includes('/') ? seed.split('/')[0] : seed
+  const letter = (author[0] ?? '?').toUpperCase()
+  return (
+    <div
+      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[12px] font-bold text-white"
+      style={{ background: color }}
+    >
+      {letter}
+    </div>
+  )
+}
+
+/** Green "in library" chip (spec 10 §2): "↓ N in library". */
+function InLibraryChip({ count }: { count: number }) {
   return (
     <span
       className="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium"
       style={{ color: 'var(--ok)', background: 'color-mix(in srgb, var(--ok) 14%, transparent)' }}
     >
-      {count != null ? `↓ ${count} in library` : '✓ in library'}
+      {`↓ ${count} in library`}
     </span>
   )
 }

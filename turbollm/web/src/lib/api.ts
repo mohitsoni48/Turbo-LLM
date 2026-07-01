@@ -19,6 +19,7 @@ import type {
   UpdatePolicy,
   HfRepoDetail,
   HfSearchResult,
+  HfSortOption,
   HfTokenTest,
   LoadProfile,
   ModelDetail,
@@ -161,15 +162,15 @@ export function getEngineRecommendation(): Promise<EngineRecommendationResult> {
   return request<EngineRecommendationResult>('/api/v1/engines/recommendation')
 }
 
-/** Compile-from-source prereq check (ADR-089/100). Read-only: detects the Windows + CUDA
- *  build toolchain (with the configured toolchain-dir PATH override applied).
- *  `supported:false` off Windows (parked elsewhere). */
+/** Compile-from-source prereq check (ADR-089/100). Read-only: detects the Windows/Linux +
+ *  CUDA build toolchain (with the configured toolchain-dir PATH override applied).
+ *  `supported:false` on macOS (parked elsewhere). */
 export function getBuildPrereqs(): Promise<BuildPrereqs> {
   return request<BuildPrereqs>('/api/v1/build/prereqs')
 }
 
 /** Start a 1-click in-app build (ADR-100). 202 immediately; progress streams via
- *  GET /api/v1/status `engineBuild`. Windows + CUDA only; local-host only. */
+ *  GET /api/v1/status `engineBuild`. Windows/Linux + CUDA only; local-host only. */
 export function runBuild(args: { repoUrl: string; branch?: string; name?: string }): Promise<{ accepted: boolean }> {
   return request('/api/v1/build/run', { method: 'POST', json: args })
 }
@@ -643,10 +644,12 @@ export function getSysInfo(): Promise<SysInfo> {
   return request<SysInfo>('/api/v1/sysinfo')
 }
 
-// ── Hugging Face discovery (spec 10 §2–4) ────────────────────────────────────
-/** Search GGUF repos. Each row carries `localCount` (variants already in library). */
-export function hfSearch(q: string): Promise<HfSearchResult> {
-  return request<HfSearchResult>(`/api/v1/hf/search?q=${encodeURIComponent(q)}`)
+// ── Hugging Face discovery (spec 10 §2–4, §7 rewrite) ────────────────────────
+/** Search (q set) or browse (q blank) HF repos, sorted by `sort`. Each row carries
+ *  `localCount` (variants already in library). The library/format filter adapts to the
+ *  active engine server-side — never hardcoded to GGUF. */
+export function hfSearch(q: string, sort: HfSortOption = 'best-match'): Promise<HfSearchResult> {
+  return request<HfSearchResult>(`/api/v1/hf/search?q=${encodeURIComponent(q)}&sort=${sort}`)
 }
 
 /** Repo detail (files + sizes + gated). `repo` is "owner/name" — the slash is part

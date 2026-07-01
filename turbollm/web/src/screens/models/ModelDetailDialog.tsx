@@ -203,7 +203,7 @@ export function ModelDetailDialog({
     <>
     <Sheet open={!!modelKey} onOpenChange={(o) => !o && onClose()} modal={false}>
       <SheetContent
-        className="overflow-y-auto p-5 slim-scroll"
+        className="overflow-y-auto p-5"
         // It's a push panel, not a modal: keep it open while the user works in
         // the resized content behind it. Close is via the ✕, Esc, or the buttons.
         onPointerDownOutside={(e) => e.preventDefault()}
@@ -560,14 +560,14 @@ function ConfigResizeHandle() {
     if (e.button !== 0) return
     e.preventDefault()
     const root = document.documentElement
-    root.classList.add('tllm-config-resizing')
+    root.classList.add('tllm-resizing')
     const onMove = (ev: PointerEvent) => {
       // Panel is docked right, so its width is the distance from the right edge.
       const w = Math.min(Math.max(window.innerWidth - ev.clientX, CONFIG_MIN_W), configMaxW())
       root.style.setProperty('--tllm-config-w', `${Math.round(w)}px`)
     }
     const onUp = () => {
-      root.classList.remove('tllm-config-resizing')
+      root.classList.remove('tllm-resizing')
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
       try {

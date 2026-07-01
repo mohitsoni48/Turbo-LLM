@@ -46,7 +46,7 @@ import { engineAcceptsFormat } from '../engines/compat'
 import { ScannerError, type ModelEntry } from '../models/scanner'
 import { estimateVram, type LoadProfile, profileToArgs, resolveProfile, vllmProfileToArgs } from '../models/profile'
 import { getSysInfo, primaryVendor } from '../sysinfo/sysinfo'
-import { HfError } from '../hf/hf'
+import { HfError, type HfSortOption } from '../hf/hf'
 import { DownloadError } from '../downloads/downloads'
 import { BenchError } from '../bench/bench'
 import { inferRepoFromPath } from './path-utils'
@@ -1672,14 +1672,20 @@ export function registerApi(app: Hono, d: Deps): void {
     return c.json(modelDirsPayload(d))
   })
 
-  // ── Hugging Face discovery (spec 10 §2–4) ────────────────────────────────
-  // Search GGUF repos. `localCount` is overlaid from the scan cache so the row
-  // can show a "↓ N in library" chip without a second round-trip.
+  // ── Hugging Face discovery (spec 10 §2–4, §7 rewrite) ────────────────────
+  // Search (q set) or browse (q blank — the live equivalent of
+  // huggingface.co/models?library=<engine-adapted>&sort=<sort>, replacing what used to be
+  // a hardcoded "Featured" list) HF repos. `localCount` is overlaid from the scan cache so
+  // a row can show a "↓ N in library" chip without a second round-trip.
+  const SORT_OPTIONS: HfSortOption[] = ['best-match', 'trending', 'downloads', 'likes', 'modified', 'created']
   app.get('/api/v1/hf/search', async (c) => {
     const q = (c.req.query('q') ?? '').trim()
-    if (!q) return c.json({ results: [] })
+    const rawSort = c.req.query('sort') ?? ''
+    const sort: HfSortOption = (SORT_OPTIONS as string[]).includes(rawSort) ? (rawSort as HfSortOption) : 'best-match'
     try {
-      const results = await d.hf.searchModels(q, d.registry.active()?.kind)
+      const results = q
+        ? await d.hf.searchModels(q, d.registry.active()?.kind, sort)
+        : await d.hf.browseModels(sort, d.registry.active()?.kind)
       const withLocal = results.map((r) => ({ ...r, localCount: localCountFor(d, r.repo) }))
       return c.json({ results: withLocal })
     } catch (e) {

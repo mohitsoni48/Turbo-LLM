@@ -35,6 +35,44 @@ export interface HfSearchItem {
   tags: string[]
 }
 
+/** Sort options for both search and browse (spec 10 §7 rewrite). 'best-match' is HF's
+ *  own relevance ranking for a text query — it's a DISTINCT ordering from `sort=downloads`
+ *  (verified against the live API), not just "no sort specified" as a synonym for one of
+ *  the others. Browsing with no query has no notion of relevance, so it falls back to
+ *  'trending' there (see {@link HfClient.browseModels}). */
+export type HfSortOption = 'best-match' | 'trending' | 'downloads' | 'likes' | 'modified' | 'created'
+
+const SORT_PARAM: Record<Exclude<HfSortOption, 'best-match'>, string> = {
+  trending: 'trendingScore',
+  downloads: 'downloads',
+  likes: 'likes',
+  modified: 'lastModified',
+  created: 'createdAt',
+}
+
+/** The HF `library` facet to filter by, adapted to the active engine kind (spec 10 §2/§7)
+ *  — NEVER hardcoded to GGUF, since the format that actually runs depends on the engine:
+ *  - llama-server / koboldcpp / llamafile / TurboQuant (all llama.cpp-family) → gguf
+ *  - mlx                                                                      → mlx (HF library tag)
+ *  - vllm / anything else                                                     → no filter (all HF repos)
+ *  Shared by `searchModels` and `browseModels` so the two never drift apart. */
+function libraryFilterFor(engineKind?: string): string {
+  if (engineKind === 'mlx') return 'filter=mlx&'
+  if (engineKind === 'vllm') return ''
+  return 'filter=gguf&'
+}
+
+function toSearchItem(m: RawSearchItem): HfSearchItem {
+  return {
+    repo: m.id ?? m.modelId ?? '',
+    downloads: m.downloads ?? 0,
+    likes: m.likes ?? 0,
+    updatedAt: m.lastModified ?? m.createdAt ?? '',
+    gated: m.gated === true || m.gated === 'auto' || m.gated === 'manual',
+    tags: Array.isArray(m.tags) ? m.tags : [],
+  }
+}
+
 /** One logical file in a repo (spec 10 §3). For GGUF: split parts are grouped into
  *  a single entry with summed size and `parts` > 1. For safetensors repos (MLX /
  *  vLLM): each component file (safetensors + JSON) is its own entry with
@@ -80,27 +118,31 @@ export class HfClient {
     private version: string,
   ) {}
 
-  /** Search repos (spec 10 §2). Returns up to 30 rows sorted by downloads.
-   *  Format filter adapts to the active engine kind:
-   *  - llama-server / TurboQuant → filter=gguf
-   *  - mlx                       → filter=mlx (HF library tag)
-   *  - vllm                      → no format filter (searches all HF repos) */
-  async searchModels(query: string, engineKind?: string): Promise<HfSearchItem[]> {
+  /** Search repos by text (spec 10 §2). Returns up to 30 rows. `sort` defaults to HF's own
+   *  relevance ranking ('best-match' — omits `sort=` entirely, a genuinely different order
+   *  from `sort=downloads`, not just an alias for it). Format filter adapts to the active
+   *  engine kind (never hardcoded to GGUF) — see {@link libraryFilterFor}. */
+  async searchModels(query: string, engineKind?: string, sort: HfSortOption = 'best-match'): Promise<HfSearchItem[]> {
     const q = query.trim()
-    const formatFilter =
-      engineKind === 'mlx' ? '&filter=mlx' : engineKind === 'vllm' ? '' : '&filter=gguf'
+    const sortParam = sort === 'best-match' ? '' : `sort=${SORT_PARAM[sort]}&direction=-1&`
     const url =
-      `${BASE}/api/models?search=${encodeURIComponent(q)}` +
-      `${formatFilter}&sort=downloads&direction=-1&limit=30&full=false`
+      `${BASE}/api/models?search=${encodeURIComponent(q)}&` +
+      `${libraryFilterFor(engineKind)}${sortParam}limit=30&full=false`
     const raw = await this.getJson<RawSearchItem[]>(url)
-    return raw.map((m) => ({
-      repo: m.id ?? m.modelId ?? '',
-      downloads: m.downloads ?? 0,
-      likes: m.likes ?? 0,
-      updatedAt: m.lastModified ?? m.createdAt ?? '',
-      gated: m.gated === true || m.gated === 'auto' || m.gated === 'manual',
-      tags: Array.isArray(m.tags) ? m.tags : [],
-    }))
+    return raw.map(toSearchItem)
+  }
+
+  /** Browse repos with no search term (spec 10 §7 rewrite) — the live equivalent of
+   *  https://huggingface.co/models?library=gguf&sort=trending, replacing what used to be a
+   *  hardcoded "Featured" list. 'best-match' has no meaning without a query, so it falls
+   *  back to 'trending'. Format filter adapts to the active engine kind, same as search. */
+  async browseModels(sort: HfSortOption, engineKind?: string, limit = 30): Promise<HfSearchItem[]> {
+    const effective = sort === 'best-match' ? 'trending' : sort
+    const url =
+      `${BASE}/api/models?${libraryFilterFor(engineKind)}` +
+      `sort=${SORT_PARAM[effective]}&direction=-1&limit=${limit}&full=false`
+    const raw = await this.getJson<RawSearchItem[]>(url)
+    return raw.map(toSearchItem)
   }
 
   /** Repo detail (spec 10 §3): card data + the GGUF file tree, with split parts
