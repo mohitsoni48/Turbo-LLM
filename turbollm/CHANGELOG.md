@@ -49,6 +49,11 @@ automatically, with no reset needed.
   swallowing any Ctrl/Cmd shortcut whose key wasn't a digit 1-9, killing native
   copy/paste.
 
+### Discord
+- Fixed a bug where auto-tuning a vision model (like a Gemma or Qwen-VL GGUF) could leave it unable to see images afterward. If that ever happened to you, it's now fixed automatically — just reload the model, no need to reset anything.
+- Fixed copy/paste (Ctrl+C etc.) getting eaten in some spots.
+- Fixed a token-count display bug that could show your context as much fuller than it actually was.
+
 ## [1.6.0] - 2026-06-29
 
 **MCP marketplace — one-click tools in Customize.**
