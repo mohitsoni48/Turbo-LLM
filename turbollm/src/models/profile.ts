@@ -308,6 +308,14 @@ export function resolveProfile(
     gpu: { ...base.gpu, ...(saved?.gpu ?? {}), ...(overrides?.gpu ?? {}) },
     // vllm deep-merged for the same reason — old/partial profiles keep the defaults.
     vllm: { ...base.vllm, ...(saved?.vllm ?? {}), ...(overrides?.vllm ?? {}) },
+    // useMmproj has no UI control (only mmprojGpu — GPU-vs-CPU placement — is user-facing;
+    // see ModelDetailDialog's "Vision encoder on GPU" toggle), so there is no legitimate way
+    // for a saved profile or draft override to carry a meaningful `false` here. Forcing it to
+    // track the model's own vision capability makes it self-healing: any profile saved with a
+    // stale/incorrect useMmproj (e.g. auto-tune runs prior to the bench.ts fix that persisted
+    // false) is corrected on the very next resolve, for every user, with no reset/migration
+    // needed and no other tuned setting touched.
+    useMmproj: m.vision,
   }
 }
 

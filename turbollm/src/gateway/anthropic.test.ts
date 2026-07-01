@@ -95,7 +95,10 @@ async function cacheReadFromTimings(timingsJson: string): Promise<number> {
   const delta = events.find((e) => e.event === 'message_delta')
   assert.ok(delta, 'message_delta event must be emitted')
   const parsed = JSON.parse(delta!.data) as { usage: { input_tokens: number; cache_read_input_tokens: number } }
-  assert.equal(parsed.usage.input_tokens, 100)
+  // input_tokens is the NON-cached remainder (prompt_tokens 100 − cache 20), not the
+  // full prompt — Anthropic's usage fields are disjoint, so the cached prefix must not
+  // be counted in both input_tokens and cache_read_input_tokens.
+  assert.equal(parsed.usage.input_tokens, 80)
   return parsed.usage.cache_read_input_tokens
 }
 

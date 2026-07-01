@@ -298,12 +298,14 @@ export class BenchRunner {
     // ~24 with it off) and a load-time VRAM probe can't see that runtime cost. The offload + KV
     // choice here is for the base model; spec stays a separate load-time toggle, best left to the
     // user for when a model fits fully on the GPU.
-    // Also tune TEXT generation only: don't keep a vision projector (mmproj) resident on the GPU.
-    // For a vision model it can be 1–2 GB of VRAM that's idle during text gen but steals room from
-    // model layers — forcing more offload to the CPU and tanking t/s. Vision stays a separate load
-    // toggle; the offload/KV choice here is for the model's weights + KV.
+    // Tune WITH the vision projector (mmproj) exactly as the user has it configured (useMmproj /
+    // mmprojGpu come from `resolved`, untouched here). A vision model always loads with mmproj
+    // resident (see resolveProfile), so the offload search must account for its real VRAM
+    // footprint (~1-2 GB) — searching with it excluded would pick an offload that fits WITHOUT
+    // the projector, then load the projector on top of that afterward, eating into the
+    // VRAM_HEADROOM_MB safety margin the search thought it had (or spilling outright).
     const resolved = resolveProfile(entry, sys, saved, base, defaults)
-    const baseProfile: LoadProfile = { ...resolved, speculative: 'off', mtpHeadPath: '', draftModelPath: '', useMmproj: false }
+    const baseProfile: LoadProfile = { ...resolved, speculative: 'off', mtpHeadPath: '', draftModelPath: '' }
 
     const results: BenchCandidate[] = []
     let best: { cand: BenchCandidate; profile: LoadProfile } | null = null
