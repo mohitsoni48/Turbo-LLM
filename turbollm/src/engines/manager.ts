@@ -559,8 +559,13 @@ function readinessTimeoutMs(kind: string): number {
   return kind === 'vllm' || kind === 'sglang' ? 600_000 : 120_000
 }
 
-/** Environment for Python-based engines (mlx, vllm, sglang). Returns undefined for
- *  native engines so they inherit the daemon env unchanged. For Python engines we:
+/** Environment for a spawned engine. For native engines (llama.cpp, koboldcpp, llamafile) on
+ *  Linux, points `LD_LIBRARY_PATH` at the binary's own directory: a source build compiled
+ *  with CUDA bundles its runtime `.so` files there (build-runner.ts `copyCudaRuntimeLibs`),
+ *  but unlike Windows the dynamic linker doesn't search the executable's directory by
+ *  default — without this, a self-built engine fails to start with missing-library errors.
+ *  Harmless when nothing is bundled there. Native engines on Windows still inherit the
+ *  daemon env unchanged (undefined). For Python engines we:
  *   - prepend the venv's bin dir to PATH so venv-installed tools (notably `ninja`,
  *     used by FlashInfer's JIT kernel compiler) are found without a system install
  *     (BUG-005),
@@ -570,7 +575,11 @@ function readinessTimeoutMs(kind: string): number {
  *     `/v1/models` (which calls huggingface_hub `scan_cache_dir()`) doesn't crash with
  *     CacheNotFound when `~/.cache/huggingface/hub` is absent. */
 function pyEngineEnv(kind: string, dataDir: string, binPath: string): NodeJS.ProcessEnv | undefined {
-  if (kind !== 'mlx' && kind !== 'vllm' && kind !== 'sglang') return undefined
+  if (kind !== 'mlx' && kind !== 'vllm' && kind !== 'sglang') {
+    if (process.platform === 'win32') return undefined
+    const dir = dirname(binPath)
+    return { ...process.env, LD_LIBRARY_PATH: `${dir}:${process.env.LD_LIBRARY_PATH ?? ''}` }
+  }
   const hfHome = join(dataDir, 'hf-cache')
   const hubCache = join(hfHome, 'hub')
   mkdirSync(hubCache, { recursive: true })

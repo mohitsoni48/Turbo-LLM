@@ -24,14 +24,23 @@ import {
 } from '../../components/ui/dialog'
 import { AddEngineDialog } from './AddEngineDialog'
 
-/** The exact Windows + CUDA build command list for a repo (mirrors the backend's PURE
+/** The exact build command list for a repo on `os` (mirrors the backend's PURE
  *  `buildCommands` in src/engines/build-prereqs.ts — kept in lockstep so the manual path
  *  matches what the 1-click build runs). */
-function buildCommands(repoUrl: string, branch?: string): string[] {
+function buildCommands(repoUrl: string, branch: string | undefined, os: 'windows' | 'linux' | 'other'): string[] {
   const b = (branch ?? '').trim()
   const clone = b
     ? `git clone --branch ${b} --depth 1 ${repoUrl} turbo-build`
     : `git clone --depth 1 ${repoUrl} turbo-build`
+  if (os === 'linux') {
+    return [
+      clone,
+      'cd turbo-build',
+      'cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release',
+      'cmake --build build -j --target llama-server',
+      '# Built binary: build/bin/llama-server — add it via "Add your own engine".',
+    ]
+  }
   return [
     clone,
     'cd turbo-build',
@@ -52,10 +61,11 @@ const PHASE_LABEL: Record<EngineBuild['phase'], string> = {
   error: 'Build failed',
 }
 
-/** Compile-from-source dialog (ADR-089 + ADR-100). On Windows + CUDA: a prereq checklist,
- *  an editable "Build environment" (PATH dirs so a conda-env / custom CUDA Toolkit is found),
- *  a 1-click "Build it for me" that clones + compiles + registers in-app with live progress,
- *  and the manual command path as a fallback. Off Windows the guided build is parked. */
+/** Compile-from-source dialog (ADR-089 + ADR-100, Linux port). On Windows or Linux + CUDA:
+ *  a prereq checklist, an editable "Build environment" (PATH dirs so a conda-env / custom
+ *  CUDA Toolkit is found), a 1-click "Build it for me" that clones + compiles + registers
+ *  in-app with live progress, and the manual command path as a fallback. On macOS the
+ *  guided build is parked. */
 export function BuildGuideDialog({
   open,
   onOpenChange,
@@ -88,7 +98,8 @@ export function BuildGuideDialog({
   const [draftDirs, setDraftDirs] = useState<string[] | null>(null)
   const dirs = draftDirs ?? savedDirs
 
-  const commands = buildCommands(repoUrl, branch)
+  const os = prereqsQ.data?.os ?? 'windows'
+  const commands = buildCommands(repoUrl, branch, os)
   const commandText = commands.join('\n')
 
   const supported = prereqsQ.data?.supported ?? null
@@ -173,10 +184,10 @@ export function BuildGuideDialog({
             Checking your build tools…
           </div>
         ) : supported === false ? (
-          // Parked OS (Linux/macOS): point at the repo + upstream build docs.
+          // Parked OS (macOS): point at the repo + upstream build docs.
           <div className="flex flex-col gap-3">
             <div className="rounded-lg border border-border bg-panel p-4 text-[13px] text-muted">
-              In-app build is currently <span className="font-medium text-ink">Windows + CUDA</span> only.
+              In-app build is currently <span className="font-medium text-ink">Windows or Linux, with CUDA,</span> only.
               On your system, clone the repo and follow its upstream build instructions, then add the
               resulting <code className="font-mono">llama-server</code> binary via “Add your own engine”.
             </div>
@@ -199,15 +210,21 @@ export function BuildGuideDialog({
                   <PrereqRow
                     key={t.id}
                     tool={t}
-                    // CUDA can be auto-downloaded (ADR-101); offer it instead of just a link.
-                    onDownload={t.id === 'cuda' && !t.found && !showProgress ? downloadCuda : undefined}
+                    // CUDA can be auto-downloaded (ADR-101), but only on Windows so far.
+                    onDownload={t.id === 'cuda' && !t.found && !showProgress && os === 'windows' ? downloadCuda : undefined}
                   />
                 ))}
               </div>
               {cudaMissing && !showProgress && (
                 <p className="text-[11px] text-faint">
-                  No CUDA Toolkit found. <span className="text-muted">Download CUDA</span> grabs NVIDIA’s
-                  official build components (~0.5&nbsp;GB) automatically — no installer needed.
+                  {os === 'windows' ? (
+                    <>
+                      No CUDA Toolkit found. <span className="text-muted">Download CUDA</span> grabs NVIDIA’s
+                      official build components (~0.5&nbsp;GB) automatically — no installer needed.
+                    </>
+                  ) : (
+                    'No CUDA Toolkit found. Install it via your distro’s package manager or NVIDIA’s installer, then re-check.'
+                  )}
                 </p>
               )}
             </div>
@@ -286,7 +303,7 @@ export function BuildGuideDialog({
               </summary>
               <div className="mt-1.5 flex flex-col gap-1.5">
                 <div className="flex items-center justify-between">
-                  <p className="text-[11px] text-faint">Windows + CUDA</p>
+                  <p className="text-[11px] text-faint">{os === 'linux' ? 'Linux + CUDA' : 'Windows + CUDA'}</p>
                   <button
                     type="button"
                     onClick={copy}

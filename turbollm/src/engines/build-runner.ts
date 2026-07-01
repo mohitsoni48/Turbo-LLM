@@ -1,17 +1,19 @@
-// In-app 1-click compile-from-source (ADR-100, Windows + CUDA). Runs git clone → cmake
-// configure → cmake build inside the daemon, streaming each line to a {@link BuildState}
+// In-app 1-click compile-from-source (ADR-100, Windows + CUDA; Linux port). Runs git clone →
+// cmake configure → cmake build inside the daemon, streaming each line to a {@link BuildState}
 // so the UI shows live progress, then hands the built binary to the registry.
 //
-// Generator choice matters (ADR-100 follow-up). The default "Visual Studio" generator needs
-// the CUDA *Visual Studio integration* (.props) that only the full CUDA installer adds — a
-// standalone / conda CUDA Toolkit doesn't have it, so the VS generator fails with "No CUDA
-// toolset found". We instead build with **Ninja** (or NMake as a no-extra-install fallback)
-// *inside the MSVC developer environment* (vcvars): that generator drives `nvcc` directly off
-// PATH (no VS integration needed) and is much faster. vcvars is required because Ninja/NMake —
-// unlike the VS generator — don't auto-find cl.exe; vcvars puts cl/ml64/INCLUDE/LIB on PATH.
+// Generator choice matters (ADR-100 follow-up). On Windows, the default "Visual Studio"
+// generator needs the CUDA *Visual Studio integration* (.props) that only the full CUDA
+// installer adds — a standalone / conda CUDA Toolkit doesn't have it, so the VS generator
+// fails with "No CUDA toolset found". We instead build with **Ninja** (or NMake as a
+// no-extra-install fallback) *inside the MSVC developer environment* (vcvars): that generator
+// drives `nvcc` directly off PATH (no VS integration needed) and is much faster. vcvars is
+// required because Ninja/NMake — unlike the VS generator — don't auto-find cl.exe; vcvars puts
+// cl/ml64/INCLUDE/LIB on PATH. On Linux there's no VS-generator trap and no dev-env shell to
+// enter — cmake is invoked directly, preferring **Ninja** (falling back to Unix Makefiles).
 //
 // The toolchain PATH override (build-prereqs.ts `buildEnv`) is applied so a conda-env /
-// custom-path CUDA Toolkit (and a user-provided ninja) are found. Windows + CUDA only.
+// custom-path CUDA Toolkit (and a user-provided ninja) are found. Windows or Linux + CUDA only.
 import { execFile, spawn } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { delimiter, dirname, join } from 'node:path'
@@ -89,10 +91,12 @@ export function sourceBuildDirOf(binPath: string, enginesRoot: string): string |
   return join(enginesRoot, 'build', m[1])
 }
 
-/** PURE: prefer Ninja (fast, parallel) when a ninja.exe is reachable; else NMake Makefiles
- *  (ships with the MSVC Build Tools — always available after vcvars, just single-threaded). */
-export function pickGenerator(hasNinja: boolean): 'Ninja' | 'NMake Makefiles' {
-  return hasNinja ? 'Ninja' : 'NMake Makefiles'
+/** PURE: prefer Ninja (fast, parallel) when a ninja executable is reachable; else fall back
+ *  to the platform's always-available generator — NMake Makefiles on Windows (ships with the
+ *  MSVC Build Tools, available after vcvars) or Unix Makefiles on Linux (ships with `make`). */
+export function pickGenerator(hasNinja: boolean, isWindows: boolean): 'Ninja' | 'NMake Makefiles' | 'Unix Makefiles' {
+  if (hasNinja) return 'Ninja'
+  return isWindows ? 'NMake Makefiles' : 'Unix Makefiles'
 }
 
 /** The cmake CUDA flags (single-config generators honor CMAKE_BUILD_TYPE). */
@@ -193,6 +197,70 @@ function copyCudaRuntimeDlls(env: NodeJS.ProcessEnv, destDir: string, log: (l: s
     }
   }
   if (copied > 0) log(`Bundled ${copied} CUDA runtime DLL(s) next to the binary so the engine is self-contained.`)
+  return copied
+}
+
+/** Linux equivalent of {@link CUDA_RUNTIME_DLL_PREFIXES} — the `.so` names match by prefix
+ *  since the real files carry a version suffix (e.g. `libcudart.so.12.6.20`, often reached
+ *  through a `libcudart.so` / `libcudart.so.12` symlink chain in the same directory). */
+const CUDA_RUNTIME_SO_PREFIXES = ['libcudart.so', 'libcublas.so', 'libcublasLt.so', 'libnvrtc.so', 'libnvrtc-builtins.so', 'libnvJitLink.so']
+
+/** Linux equivalent of {@link cudaDllSourceDirs}: anchor on the toolkit that owns `nvcc` on
+ *  PATH, then look at the layouts CUDA installs actually use for the runtime libs — `lib64`
+ *  or `lib` beside `bin`, and the `targets/x86_64-linux/lib` layout some installers use. */
+function cudaSoSourceDirs(env: NodeJS.ProcessEnv): string[] {
+  const key = Object.keys(env).find((k) => k.toLowerCase() === 'path') ?? 'PATH'
+  const pathDirs = (env[key] ?? '').split(delimiter).filter(Boolean)
+  const nvccDir = pathDirs.find((dir) => {
+    try {
+      return existsSync(join(dir, 'nvcc'))
+    } catch {
+      return false
+    }
+  })
+  if (!nvccDir) return []
+  const toolkitRoot = dirname(nvccDir)
+  return [join(toolkitRoot, 'lib64'), join(toolkitRoot, 'lib'), join(toolkitRoot, 'targets', 'x86_64-linux', 'lib')].filter((d) => {
+    try {
+      return existsSync(d)
+    } catch {
+      return false
+    }
+  })
+}
+
+/** Copy the CUDA runtime `.so` files from the build's CUDA toolkit into `destDir` (Linux
+ *  equivalent of {@link copyCudaRuntimeDlls}). The binary still needs `LD_LIBRARY_PATH`
+ *  pointed at its own directory to find them at runtime (the loader doesn't search the
+ *  executable's directory by default, unlike Windows) — the engine launcher does this. */
+function copyCudaRuntimeLibs(env: NodeJS.ProcessEnv, destDir: string, log: (l: string) => void): number {
+  const sources = cudaSoSourceDirs(env)
+  if (sources.length === 0) {
+    log('Note: could not find the CUDA toolkit shared libraries to bundle — the engine may need LD_LIBRARY_PATH set to run.')
+    return 0
+  }
+  const seen = new Set<string>()
+  let copied = 0
+  for (const dir of sources) {
+    let names: string[]
+    try {
+      names = readdirSync(dir)
+    } catch {
+      continue
+    }
+    for (const name of names) {
+      if (seen.has(name)) continue
+      if (!CUDA_RUNTIME_SO_PREFIXES.some((p) => name.startsWith(p))) continue
+      try {
+        copyFileSync(join(dir, name), join(destDir, name))
+        seen.add(name)
+        copied++
+      } catch {
+        /* skip a locked/unreadable lib — best effort */
+      }
+    }
+  }
+  if (copied > 0) log(`Bundled ${copied} CUDA runtime librar${copied === 1 ? 'y' : 'ies'} next to the binary so the engine is self-contained.`)
   return copied
 }
 
@@ -346,6 +414,7 @@ function neutralizeGratuitousAsm(srcDir: string, log: (l: string) => void): void
 /** Run the full clone → configure → compile → locate flow. Throws on any failure (the
  *  caller surfaces it via BuildState.fail); on success returns the built binary + commit. */
 export async function runBuild(req: BuildRequest, hooks: BuildHooks, signal: AbortSignal): Promise<BuildOutput> {
+  const isWindows = process.platform === 'win32'
   // Force git to FAIL fast instead of blocking on an interactive credential prompt (a
   // private/typo'd URL would otherwise hang the build with stdin ignored). GCM_INTERACTIVE
   // disables the Git Credential Manager GUI on Windows.
@@ -355,7 +424,7 @@ export async function runBuild(req: BuildRequest, hooks: BuildHooks, signal: Abo
   // cryptic cmake error. CUDA is required because we build with -DGGML_CUDA=ON.
   hooks.phase('preparing')
   const prereqs = await checkBuildPrereqs(req.toolchainDirs)
-  if (!prereqs.supported) throw new Error('In-app build is currently Windows + CUDA only.')
+  if (!prereqs.supported) throw new Error('In-app build is currently Windows or Linux (with CUDA) only.')
   const missing = prereqs.tools.filter((t) => (t.id === 'git' || t.id === 'cmake' || t.id === 'cuda') && !t.found)
   if (missing.length > 0) {
     const names = missing.map((t) => t.name).join(', ')
@@ -364,12 +433,20 @@ export async function runBuild(req: BuildRequest, hooks: BuildHooks, signal: Abo
         `add that folder under Build environment so TurboLLM can find them.`,
     )
   }
-  // We compile with Ninja/NMake (not the VS generator), so we need the MSVC dev env.
-  const vcvars = await findVcvarsall()
-  if (!vcvars) {
+  // Windows: we compile with Ninja/NMake (not the VS generator), so we need the MSVC dev env.
+  // Linux: cmake is invoked directly, so we just need a C++ compiler on PATH.
+  let vcvars: string | null = null
+  if (isWindows) {
+    vcvars = await findVcvarsall()
+    if (!vcvars) {
+      throw new Error(
+        'Could not locate the Visual Studio C++ build environment (vcvarsall.bat). Install the ' +
+          '"Desktop development with C++" workload from the Visual Studio Build Tools.',
+      )
+    }
+  } else if (!prereqs.tools.some((t) => t.id === 'gcc' && t.found)) {
     throw new Error(
-      'Could not locate the Visual Studio C++ build environment (vcvarsall.bat). Install the ' +
-        '"Desktop development with C++" workload from the Visual Studio Build Tools.',
+      'Could not find a C++ compiler. Install one (e.g. `sudo apt install build-essential` on Debian/Ubuntu) and retry.',
     )
   }
 
@@ -395,34 +472,51 @@ export async function runBuild(req: BuildRequest, hooks: BuildHooks, signal: Abo
   neutralizeGratuitousAsm(srcDir, hooks.log)
 
   // Pick the generator from what's reachable on PATH (incl. the user's toolchain dirs).
-  const generator = pickGenerator(onPath(env, 'ninja.exe'))
+  const generator = pickGenerator(onPath(env, isWindows ? 'ninja.exe' : 'ninja'), isWindows)
   hooks.log(
     generator === 'Ninja'
       ? 'Using the Ninja generator (drives nvcc directly — no Visual Studio CUDA integration needed).'
-      : 'Ninja not found on PATH — using the NMake generator (works, but single-threaded and slower; ' +
-          'add a folder containing ninja.exe under Build environment for much faster builds).',
+      : isWindows
+      ? 'Ninja not found on PATH — using the NMake generator (works, but single-threaded and slower; ' +
+          'add a folder containing ninja.exe under Build environment for much faster builds).'
+      : 'Ninja not found on PATH — using Unix Makefiles (works, but single-threaded and slower; ' +
+          'add a folder containing ninja under Build environment for much faster builds).',
   )
 
-  // 2) Configure — inside the MSVC dev env so cl/ml64/INCLUDE/LIB are set; nvcc comes off PATH.
+  // 2) Configure. Windows: inside the MSVC dev env so cl/ml64/INCLUDE/LIB are set (nvcc comes
+  // off PATH). Linux: cmake runs directly — no dev-env shell needed.
   hooks.phase('configuring')
-  const configureBat = join(buildRoot, '_tllm_configure.bat')
-  writeFileSync(configureBat, vcvarsBatch(vcvars, ['-G', generator, '-B', buildSubdir, '-S', srcDir, ...CMAKE_CONFIGURE_ARGS]))
-  await runStep('cmd.exe', ['/c', configureBat], { cwd: buildRoot, env, signal, onLine: hooks.log })
+  const configureArgs = ['-G', generator, '-B', buildSubdir, '-S', srcDir, ...CMAKE_CONFIGURE_ARGS]
+  if (isWindows) {
+    const configureBat = join(buildRoot, '_tllm_configure.bat')
+    writeFileSync(configureBat, vcvarsBatch(vcvars!, configureArgs))
+    await runStep('cmd.exe', ['/c', configureBat], { cwd: buildRoot, env, signal, onLine: hooks.log })
+  } else {
+    await runStep('cmake', configureArgs, { cwd: buildRoot, env, signal, onLine: hooks.log })
+  }
 
-  // 3) Compile just the server target (Ninja parallelizes with -j; NMake ignores it).
+  // 3) Compile just the server target (Ninja/Makefiles parallelize with -j; NMake ignores it).
   hooks.phase('compiling')
-  const compileBat = join(buildRoot, '_tllm_build.bat')
-  writeFileSync(compileBat, vcvarsBatch(vcvars, ['--build', buildSubdir, '-j', '--target', 'llama-server']))
-  await runStep('cmd.exe', ['/c', compileBat], { cwd: buildRoot, env, signal, onLine: hooks.log })
+  const compileArgs = ['--build', buildSubdir, '-j', '--target', 'llama-server']
+  if (isWindows) {
+    const compileBat = join(buildRoot, '_tllm_build.bat')
+    writeFileSync(compileBat, vcvarsBatch(vcvars!, compileArgs))
+    await runStep('cmd.exe', ['/c', compileBat], { cwd: buildRoot, env, signal, onLine: hooks.log })
+  } else {
+    await runStep('cmake', compileArgs, { cwd: buildRoot, env, signal, onLine: hooks.log })
+  }
 
-  // 4) Locate the produced binary (Ninja: build/bin/llama-server.exe; layouts vary).
+  // 4) Locate the produced binary (Ninja: build/bin/llama-server[.exe]; layouts vary).
   hooks.phase('registering')
   const binPath = resolveServerBinary(buildSubdir) ?? resolveServerBinary(buildRoot)
   if (!binPath) {
     throw new Error('Build finished but no llama-server binary was found in the output — see the log above.')
   }
-  // Make the engine self-contained: a source build doesn't bundle the CUDA runtime DLLs, so
-  // copy them next to the exe (else the probe + every launch fail to start with missing DLLs).
-  copyCudaRuntimeDlls(env, dirname(binPath), hooks.log)
+  // Make the engine self-contained: a source build doesn't bundle the CUDA runtime
+  // DLLs/.so's, so copy them next to the binary (else the probe + every launch fail to
+  // start with missing libs). On Linux the engine launcher also points LD_LIBRARY_PATH
+  // at the binary's own directory so these bundled .so's are actually found at runtime.
+  if (isWindows) copyCudaRuntimeDlls(env, dirname(binPath), hooks.log)
+  else copyCudaRuntimeLibs(env, dirname(binPath), hooks.log)
   return { binPath, commit, buildRoot }
 }

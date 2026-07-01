@@ -128,6 +128,37 @@ const ALL: CatalogEngine[] = [
     installEndpoint: '',
   },
   {
+    // Upstream publishes NO Linux CUDA prebuilt (download.ts availableBackends() — Linux
+    // NVIDIA users get Vulkan from the main llama.cpp entry above). Now that the guided
+    // build (ADR-100/build-runner.ts) runs on Linux too, offer official llama.cpp + CUDA
+    // there as its own "build from source" card — same guided-build flow as ik_llama.cpp/
+    // TurboQuant below, just pointed at the official repo. Windows/macOS never see this
+    // (platforms:['linux']): Windows already gets a CUDA prebuilt, and macOS has no CUDA.
+    id: 'llama.cpp-cuda-linux',
+    name: 'llama.cpp (CUDA)',
+    kind: 'llama-server',
+    description:
+      'Official llama.cpp compiled with CUDA for NVIDIA GPUs on Linux — no prebuilt is published upstream, so this uses the guided in-app build.',
+    provision: 'github-release',
+    homepage: 'https://github.com/ggml-org/llama.cpp',
+    repo: 'ggml-org/llama.cpp',
+    platforms: ['linux'],
+    support: 'experimental',
+    installEndpoint: '',
+    note: 'Builds the official repo with -DGGML_CUDA=ON and bundles its CUDA runtime libraries next to the binary, so it runs standalone. Manages like any other engine afterward (rebuild on a newer commit, disable, delete).',
+    variants: [
+      {
+        id: 'llama.cpp-cuda-source',
+        label: 'CUDA (NVIDIA) — build from source',
+        repo: 'ggml-org/llama.cpp',
+        requires: { platform: ['linux'], gpuVendor: ['nvidia'] },
+        stability: 'experimental',
+        speed: 'fast',
+        hasPrebuilt: false,
+      },
+    ],
+  },
+  {
     id: 'vllm',
     name: 'vLLM',
     kind: 'vllm',

@@ -451,24 +451,24 @@ export function registerApi(app: Hono, d: Deps): void {
     return c.json({ hardware: hw, recommendation: rec })
   })
 
-  // Compile-from-source prereq check (ADR-089). Read-only: detects the Windows + CUDA
-  // build toolchain (git / cmake / CUDA / MSVC) so the build guide can show what's missing
-  // + install links. The configured toolchain dirs (ADR-100) are prepended to PATH so a
-  // conda-env / custom-path CUDA Toolkit is found. Off Windows it reports `supported:false`
-  // (Linux/macOS guided build is parked).
+  // Compile-from-source prereq check (ADR-089). Read-only: detects the Windows/Linux + CUDA
+  // build toolchain (git / cmake / CUDA / MSVC-or-gcc) so the build guide can show what's
+  // missing + install links. The configured toolchain dirs (ADR-100) are prepended to PATH
+  // so a conda-env / custom-path CUDA Toolkit is found. On macOS it reports `supported:false`
+  // (guided build is parked there).
   app.get('/api/v1/build/prereqs', async (c) =>
     c.json(await checkBuildPrereqs(d.store.snapshot().build.toolchainDirs)),
   )
 
-  // 1-click compile-from-source (ADR-100, Windows + CUDA). Clones the repo, runs cmake,
+  // 1-click compile-from-source (ADR-100, Windows/Linux + CUDA). Clones the repo, runs cmake,
   // compiles llama-server, then registers + activates the built binary. Long-running; 202
   // immediately + live phase/log via GET /status engineBuild. Gated to the local host —
   // it executes a compiler from a user-supplied repo, so a LAN client must not trigger it.
   app.post('/api/v1/build/run', async (c) => {
     if (!isLocalRequest(c, d))
       return err(c, 403, 'forbidden', 'Building an engine is only available on the machine running TurboLLM.')
-    if (process.platform !== 'win32')
-      return err(c, 409, 'unsupported_platform', 'In-app build is currently Windows + CUDA only.')
+    if (process.platform !== 'win32' && process.platform !== 'linux')
+      return err(c, 409, 'unsupported_platform', 'In-app build is currently Windows or Linux (with CUDA) only.')
     const b = await body<{ repoUrl?: string; branch?: string; name?: string }>(c)
     const repoUrl = (b.repoUrl ?? '').trim()
     if (!/^https?:\/\//i.test(repoUrl))
