@@ -385,16 +385,57 @@ function QuantDropdown({
 // markdown escapes raw HTML as literal text by default (a safe default, since a README
 // is untrusted content from an arbitrary HF author). `rehype-raw` parses it into real
 // nodes; `rehype-sanitize` then strips anything dangerous (script/iframe/on*handlers/
-// javascript: links, etc.) using the same schema GitHub itself sanitizes READMEs with.
-// The default schema already allows div/span/img/a/ul/li/em and width/height/align —
-// the only gap for these cards is `style` (used for simple flex/margin layout), so
-// that's the one thing added on top of the default.
+// javascript: links, etc.) using the same default schema GitHub's own README rendering
+// sanitizes with. `style` is added to that schema so it survives sanitize at all, but
+// (unlike GitHub, which strips `style` outright) an UNFILTERED style value would let an
+// untrusted author inject `position:fixed` clickjacking overlays or `background:url()`
+// tracking beacons — so `rehypeSafeStyle` below runs straight after sanitize and narrows
+// whatever style text survives down to a safe, layout-only property allowlist.
 const CARD_SANITIZE_SCHEMA = {
   ...defaultSchema,
   attributes: {
     ...defaultSchema.attributes,
     '*': [...(defaultSchema.attributes?.['*'] ?? []), 'style'],
   },
+}
+
+/** CSS properties safe to keep in a `style` attribute after sanitize — layout-only, no
+ *  positioning/paint/network surface. Runs on the raw string (hast keeps `style` as a
+ *  string, not parsed) so no new CSS-parser dependency is needed. */
+const SAFE_STYLE_PROPS = new Set([
+  'display', 'flex', 'flex-direction', 'flex-wrap', 'flex-grow', 'flex-shrink', 'flex-basis',
+  'align-items', 'align-content', 'align-self', 'justify-content', 'justify-items',
+  'gap', 'row-gap', 'column-gap',
+  'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+  'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+  'text-align', 'vertical-align', 'white-space',
+  'width', 'max-width', 'min-width', 'height', 'max-height', 'min-height',
+  'border-radius',
+])
+
+/** Rehype plugin: filters every element's `style` attribute down to {@link SAFE_STYLE_PROPS},
+ *  dropping any declaration not on the allowlist (position, background*, content, etc.).
+ *  Runs AFTER rehype-sanitize in the pipeline — sanitize only allowlists the `style`
+ *  *attribute* (tag/attribute-level), it has no notion of individual CSS properties, so
+ *  this is the thing that actually keeps an untrusted style value safe. No unist-util-visit
+ *  dependency — hast trees are small enough here for a plain recursive walk. */
+function rehypeSafeStyle() {
+  return (tree: { type: string; properties?: Record<string, unknown>; children?: unknown[] }) => {
+    const walk = (node: typeof tree) => {
+      if (node.type === 'element' && typeof node.properties?.style === 'string') {
+        const filtered = node.properties.style
+          .split(';')
+          .map((decl) => decl.trim())
+          .filter(Boolean)
+          .filter((decl) => SAFE_STYLE_PROPS.has(decl.split(':')[0]?.trim().toLowerCase() ?? ''))
+          .join('; ')
+        if (filtered) node.properties.style = filtered
+        else delete node.properties.style
+      }
+      for (const child of node.children ?? []) walk(child as typeof tree)
+    }
+    walk(tree)
+  }
 }
 
 function ModelCard({ text }: { text: string }) {
@@ -410,7 +451,7 @@ function ModelCard({ text }: { text: string }) {
     <div className="flex flex-col gap-2 text-[14px] leading-relaxed text-muted [&_h1]:mt-1 [&_h2]:mt-3 [&_h3]:mt-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, CARD_SANITIZE_SCHEMA]]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, CARD_SANITIZE_SCHEMA], rehypeSafeStyle]}
         components={{
           a: ({ children, href }) => (
             <a href={href} target="_blank" rel="noopener noreferrer" className="text-accent underline underline-offset-2">{children}</a>

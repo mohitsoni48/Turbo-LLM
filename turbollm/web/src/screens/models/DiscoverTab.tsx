@@ -70,13 +70,16 @@ export function DiscoverTab({ presetQuery = '' }: { presetQuery?: string }) {
 
   const searching = debounced.length > 0
   // "Best match" (HF's own relevance ranking) only means anything for a text query —
-  // browsing falls back to 'trending' server-side anyway, so keep the picker in sync
-  // rather than showing a selected option that silently isn't what's being applied.
-  useEffect(() => {
-    if (!searching && sort === 'best-match') setSort('trending')
-  }, [searching, sort])
+  // browsing falls back to 'trending' server-side anyway. Derived rather than synced via
+  // an effect that mutates `sort` itself: that would fire an extra, redundant fetch on
+  // every searching->not-searching transition (browseModels already treats 'best-match' as
+  // 'trending' server-side, so the state-mutation's own refetch just re-requests the same
+  // results a second time). This way `sort` still remembers the user's real pick — clearing
+  // the query and typing again immediately shows "Best match" selected, not reset to
+  // "Trending" — while the query and the <select> both use the effective value.
+  const effectiveSort: HfSortOption = !searching && sort === 'best-match' ? 'trending' : sort
 
-  const searchQ = useHfSearch(debounced, sort)
+  const searchQ = useHfSearch(debounced, effectiveSort)
   const unreachable = searchQ.error instanceof ApiError && searchQ.error.code === 'hf_unreachable'
   const results = searchQ.data?.results ?? []
   const sortOptions: HfSortOption[] = searching
@@ -111,7 +114,7 @@ export function DiscoverTab({ presetQuery = '' }: { presetQuery?: string }) {
           </div>
 
           <select
-            value={sort}
+            value={effectiveSort}
             onChange={(e) => setSort(e.target.value as HfSortOption)}
             className="self-end rounded-md border border-border bg-bg px-2 py-1 text-[12px] text-ink outline-none"
           >
@@ -299,7 +302,10 @@ function ResultListRow({
 function Avatar({ seed }: { seed: string }) {
   const palette = ['#2563eb', '#7c3aed', '#db2777', '#dc2626', '#d97706', '#059669', '#0891b2']
   let h = 0
-  for (const c of seed) h = (h * 31 + c.charCodeAt(0)) & 0x7fffffff
+  // codePointAt, not charCodeAt: for-of already yields full Unicode codepoints (correctly
+  // handling surrogate pairs), so charCodeAt(0) would silently read only the first UTF-16
+  // unit of an astral-plane character (e.g. an emoji in an author name).
+  for (const c of seed) h = (h * 31 + (c.codePointAt(0) ?? 0)) & 0x7fffffff
   const color = palette[h % palette.length]
   const author = seed.includes('/') ? seed.split('/')[0] : seed
   const letter = (author[0] ?? '?').toUpperCase()

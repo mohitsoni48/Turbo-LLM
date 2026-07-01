@@ -578,7 +578,12 @@ function pyEngineEnv(kind: string, dataDir: string, binPath: string): NodeJS.Pro
   if (kind !== 'mlx' && kind !== 'vllm' && kind !== 'sglang') {
     if (process.platform === 'win32') return undefined
     const dir = dirname(binPath)
-    return { ...process.env, LD_LIBRARY_PATH: `${dir}:${process.env.LD_LIBRARY_PATH ?? ''}` }
+    // Append the existing value only if it's non-empty — glibc's dynamic linker treats an
+    // empty LD_LIBRARY_PATH entry (a bare trailing ':') as "search the current working
+    // directory", which a trailing `:${undefined ?? ''}` would otherwise produce whenever
+    // LD_LIBRARY_PATH wasn't already set.
+    const existing = process.env.LD_LIBRARY_PATH
+    return { ...process.env, LD_LIBRARY_PATH: existing ? `${dir}:${existing}` : dir }
   }
   const hfHome = join(dataDir, 'hf-cache')
   const hubCache = join(hfHome, 'hub')
