@@ -39,8 +39,24 @@ export type LocalEntry = {
   uvx?: boolean
   iconSlug?: string
   argNote?: string
-  builtin?: true
 }
+
+/** The three built-in web-search providers (spec 06 §5 / ADR-082). These are NOT MCP
+ *  servers — there is exactly one active provider at a time (`DaemonSettings.search`), so
+ *  they're kept out of LOCAL_MCPS entirely and rendered as their own "Built-in web search"
+ *  picker in the Customize screen, each with its own config, not a 3-way form shared by all. */
+export type BuiltinSearchEntry = {
+  id: 'tavily' | 'kagi' | 'searxng'
+  name: string
+  desc: string
+  iconSlug?: string
+}
+
+export const BUILTIN_SEARCH: BuiltinSearchEntry[] = [
+  { id: 'tavily', name: 'Tavily', desc: 'AI-search API tuned for LLMs.' },
+  { id: 'kagi', name: 'Kagi', desc: 'Premium search with no ads or tracking.', iconSlug: 'kagi' },
+  { id: 'searxng', name: 'SearXNG', desc: 'Self-hosted meta-search, fully local.', iconSlug: 'searxng' },
+]
 
 // Only entries where a static API key / Bearer token is confirmed to work against the
 // official hosted MCP endpoint. Verified 2026-06-29 against official docs for each service.
@@ -358,35 +374,6 @@ export const LOCAL_MCPS: LocalEntry[] = [
       { key: 'CIVITAI_API_TOKEN', desc: 'For downloading models from CivitAI', required: false },
       { key: 'HUGGINGFACE_TOKEN', desc: 'For downloading models from Hugging Face', required: false },
     ],
-  },
-  {
-    id: 'builtin-tavily',
-    name: 'Tavily',
-    cat: 'Built-in',
-    desc: 'AI-search API tuned for LLMs — built in to TurboLLM.',
-    cmd: '',
-    envs: [],
-    builtin: true,
-  },
-  {
-    id: 'builtin-kagi',
-    name: 'Kagi',
-    cat: 'Built-in',
-    desc: 'Premium search with no ads or tracking — built in to TurboLLM.',
-    cmd: '',
-    iconSlug: 'kagi',
-    envs: [],
-    builtin: true,
-  },
-  {
-    id: 'builtin-searxng',
-    name: 'SearXNG',
-    cat: 'Built-in',
-    desc: 'Self-hosted meta-search, fully local — built in to TurboLLM.',
-    cmd: '',
-    iconSlug: 'searxng',
-    envs: [],
-    builtin: true,
   },
 ]
 

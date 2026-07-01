@@ -6,8 +6,8 @@ import { toast } from '../components/ui/sonner'
 import { useMcpMutations, useSettings } from '../lib/queries'
 import { ApiError } from '../lib/api'
 import type { McpServer, DaemonSettings, DaemonSettingsPatch } from '../lib/api'
-import { CLOUD_MCPS, LOCAL_MCPS, CLOUD_CATS, LOCAL_CATS } from '../lib/mcp-catalog'
-import type { CloudEntry, LocalEntry } from '../lib/mcp-catalog'
+import { CLOUD_MCPS, LOCAL_MCPS, CLOUD_CATS, LOCAL_CATS, BUILTIN_SEARCH } from '../lib/mcp-catalog'
+import type { CloudEntry, LocalEntry, BuiltinSearchEntry } from '../lib/mcp-catalog'
 import { BRAND_ICONS } from '../lib/brand-icons'
 
 export function CustomizeScreen() {
@@ -129,15 +129,6 @@ function RuntimeBadge({ uvx }: { uvx?: boolean }) {
   )
 }
 
-function BuiltinBadge() {
-  return (
-    <span className="rounded px-1.5 py-0.5 text-[10px] font-medium"
-      style={{ background: 'color-mix(in srgb, var(--ok) 18%, transparent)', color: 'var(--ok)' }}>
-      Built-in
-    </span>
-  )
-}
-
 function McpCard({ entry, tab, isSelected, isConnected, onSelect }: {
   entry: CloudEntry | LocalEntry; tab: 'cloud' | 'local'; isSelected: boolean; isConnected?: boolean; onSelect: () => void
 }) {
@@ -161,8 +152,6 @@ function McpCard({ entry, tab, isSelected, isConnected, onSelect }: {
             <span className="text-[10px] text-faint">·</span>
             {tab === 'cloud'
               ? <AuthBadge auth={(entry as CloudEntry).auth} />
-              : (entry as LocalEntry).builtin
-              ? <BuiltinBadge />
               : <RuntimeBadge uvx={(entry as LocalEntry).uvx} />}
           </div>
         </div>
@@ -297,18 +286,32 @@ function McpSection({ servers, search }: { servers: McpServer[]; search: DaemonS
   const [apiKey, setApiKey] = useState('')
   const [extraArg, setExtraArg] = useState('')
   const [localEnvs, setLocalEnvs] = useState<Record<string, string>>({})
-  const [searchProvider, setSearchProvider] = useState<NonNullable<DaemonSettings['search']>['provider']>(search.provider)
-  const [searchSecret, setSearchSecret] = useState(() => {
-    const s = search
-    return s.provider === 'tavily' ? '' : s.provider === 'kagi' ? '' : s.searxngUrl
-  })
+  // Built-in web search (spec 06 §5 / ADR-082) is selected completely independently of the
+  // Cloud/Local marketplace — it's not an MCP server, it's the single active search provider.
+  const [selectedBuiltin, setSelectedBuiltin] = useState<BuiltinSearchEntry['id'] | null>(null)
+  const [searchSecret, setSearchSecret] = useState('')
+  // True once the ACTIVE provider actually has a key/URL saved (not just picked as default).
+  const searchConfigured = search.provider === 'tavily' ? search.tavilyKeySet
+    : search.provider === 'kagi' ? search.kagiKeySet
+    : !!search.searxngUrl?.trim()
+  const activeBuiltin = searchConfigured ? BUILTIN_SEARCH.find((b) => b.id === search.provider) : undefined
 
   const connectedUrls = useMemo(() => new Set(servers.map((s) => s.url).filter(Boolean) as string[]), [servers])
   const connectedNames = useMemo(() => new Set(servers.map((s) => s.name)), [servers])
   const isCatalogConnected = (entry: CloudEntry | LocalEntry) =>
     'url' in entry ? connectedUrls.has((entry as CloudEntry).url) : connectedNames.has(entry.name)
+  // Connected tab logo lookup: match a live server back to its catalog entry the same way
+  // isCatalogConnected does (cloud by URL, local by name) so it gets the same brand icon the
+  // Cloud/Local cards show, instead of falling back to colored initials for every entry.
+  const catalogIconFor = (s: McpServer): string | undefined =>
+    CLOUD_MCPS.find((e) => e.url === s.url)?.iconSlug ?? LOCAL_MCPS.find((e) => e.name === s.name)?.iconSlug
 
-  const selectCard = (id: string | null) => { setSelectedId(id); setApiKey(''); setExtraArg(''); setLocalEnvs({}) }
+  const selectCard = (id: string | null) => {
+    setSelectedId(id); setApiKey(''); setExtraArg(''); setLocalEnvs({}); setSelectedBuiltin(null)
+  }
+  const selectBuiltin = (id: BuiltinSearchEntry['id'] | null) => {
+    setSelectedBuiltin(id); setSearchSecret(''); setSelectedId(null)
+  }
   const switchTab = (t: 'cloud' | 'local' | 'connected') => { setTab(t); setActiveCat('All'); selectCard(null) }
 
   const cats = tab === 'cloud' ? CLOUD_CATS : LOCAL_CATS
@@ -352,8 +355,7 @@ function McpSection({ servers, search }: { servers: McpServer[]; search: DaemonS
       onSuccess: () => {
         const displayName = provider === 'tavily' ? 'Tavily' : provider === 'kagi' ? 'Kagi' : 'SearXNG'
         toast.success(`Search set to ${displayName}`)
-        setSearchSecret('')
-        selectCard(null)
+        selectBuiltin(null)
       },
       onError: (e) => toast.error(e instanceof ApiError ? e.message : 'Could not save search settings.'),
     })
@@ -512,6 +514,70 @@ function McpSection({ servers, search }: { servers: McpServer[]; search: DaemonS
 
       {view === 'marketplace' && (
         <div>
+          {/* Built-in web search (spec 06 §5 / ADR-082) — NOT an MCP server, so it's kept
+              fully separate from the Cloud/Local marketplace below: exactly one provider is
+              active at a time, and clicking one configures only that provider (no shared
+              3-way form). */}
+          <div className="mb-4 flex flex-col gap-1.5 rounded-lg border border-border bg-panel-2 p-3">
+            <p className="text-[11px] font-medium uppercase tracking-wide text-faint">Built-in web search</p>
+            <div className="flex flex-wrap gap-2">
+              {BUILTIN_SEARCH.map((b) => {
+                const isActive = search.provider === b.id && searchConfigured
+                const isOpen = selectedBuiltin === b.id
+                return (
+                  <button key={b.id} type="button" onClick={() => selectBuiltin(isOpen ? null : b.id)}
+                    className="flex items-center gap-2 rounded-lg border bg-panel px-2.5 py-1.5 text-left transition-colors hover:bg-bg"
+                    style={{ borderColor: isOpen ? 'var(--accent)' : isActive ? 'color-mix(in srgb, var(--ok) 50%, transparent)' : 'var(--border, #e2e2e2)' }}>
+                    <BrandCircle name={b.name} color={nameColor(b.name)} iconSlug={b.iconSlug} />
+                    <span className="text-[13px] font-medium text-ink">{b.name}</span>
+                    {isActive && (
+                      <span className="flex items-center gap-0.5 text-[10px] font-semibold" style={{ color: 'var(--ok)' }}>
+                        <Check size={10} /> Active
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+            {selectedBuiltin && (() => {
+              const entry = BUILTIN_SEARCH.find((b) => b.id === selectedBuiltin)!
+              return (
+                <div className="mt-1.5 flex flex-col gap-3 rounded-lg border bg-panel p-3"
+                  style={{ borderColor: 'color-mix(in srgb, var(--accent) 40%, transparent)' }}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <BrandCircle name={entry.name} color={nameColor(entry.name)} iconSlug={entry.iconSlug} />
+                      <span className="text-[13px] font-medium text-ink">Configure {entry.name}</span>
+                    </div>
+                    <button type="button" onClick={() => selectBuiltin(null)} className="rounded p-1 text-faint transition-colors hover:text-ink">
+                      <X size={13} />
+                    </button>
+                  </div>
+
+                  {entry.id === 'searxng' ? (
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[12px] text-muted">SearXNG URL</label>
+                      <input type="text" value={searchSecret} onChange={(e) => setSearchSecret(e.target.value)}
+                        placeholder="http://localhost:8080"
+                        className="rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-[12px] text-ink outline-none" />
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[12px] text-muted">{entry.name} API Key</label>
+                      <input type="password" value={searchSecret} onChange={(e) => setSearchSecret(e.target.value)}
+                        placeholder={entry.id === 'tavily' ? 'tvly-…' : 'kg-…'} autoComplete="off"
+                        className="rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-[12px] text-ink outline-none" />
+                    </div>
+                  )}
+
+                  <Button size="sm" onClick={() => saveSearch(entry.id, searchSecret)} disabled={!searchSecret.trim()}>
+                    Save &amp; make active
+                  </Button>
+                </div>
+              )
+            })()}
+          </div>
+
           <div className="mb-3 inline-flex rounded-md border border-border p-0.5">
             {(['cloud', 'local', 'connected'] as const).map((t) => (
               <button key={t} type="button" onClick={() => switchTab(t)}
@@ -548,73 +614,46 @@ function McpSection({ servers, search }: { servers: McpServer[]; search: DaemonS
                 <McpCloudPanel entry={selectedCloud} apiKey={apiKey} onApiKeyChange={setApiKey}
                   onClose={() => selectCard(null)} onConnect={() => connectCloud(selectedCloud)} busy={busy} />
               )}
-              {selectedLocal && !selectedLocal.builtin && (
+              {selectedLocal && (
                 <McpLocalPanel entry={selectedLocal} extraArg={extraArg} onExtraArgChange={setExtraArg}
                   envs={localEnvs} onEnvChange={(k, v) => setLocalEnvs((p) => ({ ...p, [k]: v }))}
                   onClose={() => selectCard(null)} onAdd={() => connectLocal(selectedLocal)} busy={busy} />
-              )}
-              {selectedLocal?.builtin && (
-                <div className="mt-3 flex flex-col gap-3 rounded-lg border bg-panel-2 p-3"
-                  style={{ borderColor: 'color-mix(in srgb, var(--accent) 40%, transparent)' }}>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <BrandCircle name={selectedLocal.name} color={nameColor(selectedLocal.name)} iconSlug={(selectedLocal as LocalEntry).iconSlug} />
-                      <span className="text-[13px] font-medium text-ink">Configure {selectedLocal.name}</span>
-                    </div>
-                    <button type="button" onClick={() => selectCard(null)} className="rounded p-1 text-faint transition-colors hover:text-ink">
-                      <X size={13} />
-                    </button>
-                  </div>
-
-                  <div className="flex flex-col gap-1">
-                    <label className="text-[12px] text-muted">Provider</label>
-                    <div className="flex gap-4">
-                      {(['tavily', 'kagi', 'searxng'] as const).map((p) => (
-                        <label key={p} className="flex cursor-pointer items-center gap-1.5 text-[13px] text-ink">
-                          <input type="radio" name="search-provider" checked={searchProvider === p}
-                            onChange={() => setSearchProvider(p)} className="h-3.5 w-3.5 accent-[var(--accent)]" />
-                          <span className="font-mono">{p === 'tavily' ? 'Tavily' : p === 'kagi' ? 'Kagi' : 'SearXNG'}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-
-                  {searchProvider === 'searxng' ? (
-                    <div className="flex flex-col gap-1">
-                      <label className="text-[12px] text-muted">SearXNG URL</label>
-                      <input type="text" value={searchSecret} onChange={(e) => setSearchSecret(e.target.value)}
-                        placeholder="http://localhost:8080"
-                        className="rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-[12px] text-ink outline-none" />
-                    </div>
-                  ) : (
-                    <div className="flex flex-col gap-1">
-                      <label className="text-[12px] text-muted">{searchProvider === 'tavily' ? 'Tavily' : 'Kagi'} API Key</label>
-                      <input type="password" value={searchSecret} onChange={(e) => setSearchSecret(e.target.value)}
-                        placeholder={searchProvider === 'tavily' ? 'tvly-…' : 'kg-…'} autoComplete="off"
-                        className="rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-[12px] text-ink outline-none" />
-                    </div>
-                  )}
-
-                  <Button size="sm" onClick={() => saveSearch(searchProvider, searchSecret)} disabled={!searchSecret.trim()}>
-                    Save search settings
-                  </Button>
-                </div>
               )}
             </>
           )}
 
           {tab === 'connected' && (
             <div>
-              {servers.length === 0 ? (
+              {servers.length === 0 && !activeBuiltin ? (
                 <p className="py-8 text-center text-[12px] text-muted">
                   No MCP servers connected yet. Add one from the Cloud or Local tab.
                 </p>
               ) : (
                 <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(185px, 1fr))' }}>
+                  {activeBuiltin && (
+                    <div className="relative flex flex-col gap-2 rounded-lg border bg-panel-2 p-3"
+                      style={{ borderColor: 'color-mix(in srgb, var(--ok) 50%, transparent)' }}>
+                      <span className="absolute right-2 top-2 flex items-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-semibold"
+                        style={{ background: 'color-mix(in srgb, var(--ok) 15%, transparent)', color: 'var(--ok)' }}>
+                        Built-in
+                      </span>
+                      <div className="flex items-start gap-2.5">
+                        <BrandCircle name={activeBuiltin.name} color={nameColor(activeBuiltin.name)} iconSlug={activeBuiltin.iconSlug} />
+                        <div className="min-w-0 flex-1 pr-14">
+                          <div className="truncate text-[13px] font-semibold text-ink">{activeBuiltin.name}</div>
+                          <div className="mt-0.5 text-[10px] text-faint">Web search</div>
+                        </div>
+                      </div>
+                      <button type="button" onClick={() => selectBuiltin(activeBuiltin.id)}
+                        className="mt-1 self-start text-[12px] text-muted transition-colors hover:text-ink">
+                        Manage
+                      </button>
+                    </div>
+                  )}
                   {servers.map((s) => (
                     <div key={s.id} className="relative flex flex-col gap-2 rounded-lg border bg-panel-2 p-3">
                       <div className="flex items-start gap-2.5">
-                        <BrandCircle name={s.name} color={nameColor(s.name)} />
+                        <BrandCircle name={s.name} color={nameColor(s.name)} iconSlug={catalogIconFor(s)} />
                         <div className="min-w-0 flex-1 pr-14">
                           <div className="truncate text-[13px] font-semibold text-ink">{s.name}</div>
                           <div className="mt-0.5 flex flex-wrap items-center gap-1">
