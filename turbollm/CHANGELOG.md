@@ -25,6 +25,30 @@ published version on npm has a matching `vX.Y.Z` tag in git.
 
 _Nothing yet._
 
+## [1.6.1] - 2026-07-01
+
+**Auto-tune no longer breaks vision models.**
+
+A bug-fix release. Auto-tuning a vision-capable GGUF model used to leave it unable to
+see images afterward (`500: image input is not supported`) — this is now fixed at the
+root, and any model profile already broken by a past auto-tune run repairs itself
+automatically, with no reset needed.
+
+### Fixed
+- **Auto-tune preserves vision (mmproj) after tuning** (#31, #32) — the offload/KV-cache
+  sweep now runs with the vision projector resident exactly as configured, instead of
+  excluding it and only restoring the setting afterward; the chosen offload now
+  genuinely accounts for the projector's VRAM footprint. `useMmproj` is also now
+  self-healing on every profile resolve — it has no UI control of its own, so any
+  profile already stuck disabled by a prior auto-tune run recovers automatically.
+- **Anthropic gateway no longer double-counts cached tokens** — `prompt_tokens` was
+  reported as `input_tokens` AND its cached subset was reported again as
+  `cache_read_input_tokens`, nearly doubling the context usage shown to clients on
+  cache-heavy sessions (e.g. Claude Code).
+- **Ctrl+C and other native shortcuts work again** — the nav-rail keyboard handler was
+  swallowing any Ctrl/Cmd shortcut whose key wasn't a digit 1-9, killing native
+  copy/paste.
+
 ## [1.6.0] - 2026-06-29
 
 **MCP marketplace — one-click tools in Customize.**
