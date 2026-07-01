@@ -298,12 +298,14 @@ export class BenchRunner {
     // ~24 with it off) and a load-time VRAM probe can't see that runtime cost. The offload + KV
     // choice here is for the base model; spec stays a separate load-time toggle, best left to the
     // user for when a model fits fully on the GPU.
-    // Also tune TEXT generation only: don't keep a vision projector (mmproj) resident on the GPU.
-    // For a vision model it can be 1–2 GB of VRAM that's idle during text gen but steals room from
-    // model layers — forcing more offload to the CPU and tanking t/s. Vision stays a separate load
-    // toggle; the offload/KV choice here is for the model's weights + KV.
+    // Tune WITH the vision projector (mmproj) exactly as the user has it configured (useMmproj /
+    // mmprojGpu come from `resolved`, untouched here). A vision model always loads with mmproj
+    // resident (see resolveProfile), so the offload search must account for its real VRAM
+    // footprint (~1-2 GB) — searching with it excluded would pick an offload that fits WITHOUT
+    // the projector, then load the projector on top of that afterward, eating into the
+    // VRAM_HEADROOM_MB safety margin the search thought it had (or spilling outright).
     const resolved = resolveProfile(entry, sys, saved, base, defaults)
-    const baseProfile: LoadProfile = { ...resolved, speculative: 'off', mtpHeadPath: '', draftModelPath: '', useMmproj: false }
+    const baseProfile: LoadProfile = { ...resolved, speculative: 'off', mtpHeadPath: '', draftModelPath: '' }
 
     const results: BenchCandidate[] = []
     let best: { cand: BenchCandidate; profile: LoadProfile } | null = null
@@ -368,11 +370,6 @@ export class BenchRunner {
         recommended && hasAnySampling(recommended)
           ? { ...best.profile, sampling: { ...best.profile.sampling, ...recommended } }
           : best.profile
-      // Restore the vision (mmproj) toggle to what it was BEFORE tuning forced it off (line ~306).
-      // useMmproj:false there is a sweep-only trick to keep the projector off the GPU while probing
-      // offload — it must not leak into the saved profile, or a vision model silently loses image
-      // support after auto-tune (it's still a separate load-time toggle the user controls).
-      profile.useMmproj = resolved.useMmproj
       // Hold the winner instead of auto-saving — the UI shows a Save/Cancel results dialog and
       // persists via POST /bench/save only when the user clicks Save.
       this.winning = { modelKey, profile, cand: best.cand, entry, sys, engineVersion: active?.version ?? '' }
