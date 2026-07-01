@@ -368,6 +368,11 @@ export class BenchRunner {
         recommended && hasAnySampling(recommended)
           ? { ...best.profile, sampling: { ...best.profile.sampling, ...recommended } }
           : best.profile
+      // Restore the vision (mmproj) toggle to what it was BEFORE tuning forced it off (line ~306).
+      // useMmproj:false there is a sweep-only trick to keep the projector off the GPU while probing
+      // offload — it must not leak into the saved profile, or a vision model silently loses image
+      // support after auto-tune (it's still a separate load-time toggle the user controls).
+      profile.useMmproj = resolved.useMmproj
       // Hold the winner instead of auto-saving — the UI shows a Save/Cancel results dialog and
       // persists via POST /bench/save only when the user clicks Save.
       this.winning = { modelKey, profile, cand: best.cand, entry, sys, engineVersion: active?.version ?? '' }
